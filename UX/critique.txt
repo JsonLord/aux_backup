@@ -1,0 +1,58 @@
+AI+CV Capabilities
+Computer Vision Analysis
+class VisualDesignAnalyzer:
+    def analyze_visual_hierarchy(self, screenshot):
+        """
+        - Visual weight distribution
+        - F-pattern and Z-pattern analysis
+        - Focal point identification
+        - Color contrast ratios
+        - Typography hierarchy assessment
+        """
+    
+    def detect_ui_patterns(self, screenshot):
+        """
+        - Common UI component recognition
+        - Design pattern matching (Material, iOS, etc.)
+        - Layout grid analysis
+        - Responsive breakpoint detection
+        """
+    
+    def accessibility_scan(self, screenshot, dom_data):
+        """
+        - Color blindness simulation
+        - Text readability analysis
+        - Touch target size validation
+        - Focus indicator visibility
+        """
+AI-Powered Critique Engine
+class UXCritiqueEngine:
+    def generate_feedback(self, visual_analysis, context):
+        """
+        Uses Claude to provide:
+        - Specific, actionable UX improvements
+        - Accessibility violation explanations
+        - Design best practice recommendations
+        - Competitive analysis insights
+        """
+        
+        prompt = f"""
+        You are a senior UX designer and accessibility expert.
+        
+        Visual Analysis Results:
+        {visual_analysis}
+        
+        Context:
+        - Industry: {context.industry}
+        - Target Users: {context.user_demographics}
+        - Platform: {context.platform}
+        
+        Provide detailed feedback on:
+        1. Usability issues and improvements
+        2. Accessibility violations and fixes
+        3. Visual design enhancements
+        4. Mobile responsiveness concerns
+        5. Conversion optimization opportunities
+        
+        Format as actionable recommendations with priority levels.
+        """

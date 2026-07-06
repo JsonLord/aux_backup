@@ -1,12 +1,10 @@
 ---
-title: Aux Backup
-emoji: 📊
-colorFrom: gray
-colorTo: pink
-sdk: gradio
-sdk_version: 6.19.0
-python_version: '3.13'
-app_file: app.py
+title: UX Analysis Orchestrator
+emoji: 📈
+colorFrom: blue
+colorTo: red
+sdk: docker
+app_port: 7860
 pinned: false
 ---
 

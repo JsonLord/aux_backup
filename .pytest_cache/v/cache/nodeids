@@ -1,0 +1,9 @@
+[
+  "mcp/connectivity_test.py::test_gitmcp",
+  "mcp/connectivity_test.py::test_hf_mcp_server",
+  "mcp/connectivity_test.py::test_jules_api",
+  "test_comm_fallback.py::test_jules_comm_fallbacks",
+  "test_injector.py::test_tool_injector",
+  "test_log_refresh.py::test_log_refresh",
+  "test_sequential_thinking.py::test_sequential_thinking"
+]

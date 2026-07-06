@@ -1,0 +1,12 @@
+{
+  "test_models.py": true,
+  "test_remote_api.py": true,
+  "test_remote_api_v3.py": true,
+  "mcp/connectivity_test.py::test_gitmcp": true,
+  "mcp/connectivity_test.py::test_hf_mcp_server": true,
+  "mcp/connectivity_test.py::test_jules_api": true,
+  "test_comm_fallback.py::test_jules_comm_fallbacks": true,
+  "test_injector.py::test_tool_injector": true,
+  "test_log_refresh.py::test_log_refresh": true,
+  "test_sequential_thinking.py::test_sequential_thinking": true
+}
