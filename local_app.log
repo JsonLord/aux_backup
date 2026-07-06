@@ -1,8 +1,10 @@
-INFO:     Started server process [113163]
+/home/jules/.pyenv/versions/3.12.13/lib/python3.12/site-packages/gradio/components/chatbot.py:242: UserWarning: You have not specified a value for the `type` parameter. Defaulting to the 'tuples' format for chatbot messages, but this is deprecated and will be removed in a future version of Gradio. Please set type='messages' instead, which uses openai-style dictionaries with 'role' and 'content' keys.
+  warnings.warn(
+INFO:     Started server process [136505]
 INFO:     Waiting for application startup.
 INFO:     Application startup complete.
 INFO:     Uvicorn running on http://0.0.0.0:7860 (Press CTRL+C to quit)
 INFO:     Shutting down
 INFO:     Waiting for application shutdown.
 INFO:     Application shutdown complete.
-INFO:     Finished server process [113163]
+INFO:     Finished server process [136505]
