@@ -1,5 +1,5 @@
-gradio
-gradio_client
+gradio==5.15.0
+gradio_client==1.7.0
 PyGithub
 openai
 requests
