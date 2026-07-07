@@ -1750,6 +1750,38 @@ if __name__ == "__main__":
     def info():
         return {"app": "UX Analysis Orchestrator", "version": "1.0.0"}
 
+    @fastapi_app.get("/api-docs")
+    def api_docs():
+        return {
+            "endpoints": [
+                {
+                    "path": "/health",
+                    "method": "GET",
+                    "purpose": "Health check"
+                },
+                {
+                    "path": "/api/info",
+                    "method": "GET",
+                    "purpose": "App information"
+                },
+                {
+                    "path": "/api-docs",
+                    "method": "GET",
+                    "purpose": "API documentation"
+                },
+                {
+                    "path": "/",
+                    "method": "GET",
+                    "purpose": "Gradio UI"
+                },
+                {
+                    "path": "/static_slides/{path}",
+                    "method": "GET",
+                    "purpose": "Static slide deck files"
+                }
+            ]
+        }
+
     # Mount static files for slides
     fastapi_app.mount("/static_slides", StaticFiles(directory=SLIDES_OUTPUT_ROOT), name="static_slides")
 
