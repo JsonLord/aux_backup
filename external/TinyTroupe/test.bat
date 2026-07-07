@@ -1,1 +1,0 @@
-pytest -s --refresh_cache
