@@ -36,7 +36,7 @@ COPY . .
 
 # Patch Gradio and Gradio Client to avoid runtime errors (MUST RUN AS ROOT)
 RUN python -c "import os, gradio.components.base as b; path=b.__file__; c=open(path).read(); open(path, 'w').write(c.replace('if callable(getattr(self, value))', 'if value != \"__provides__\" and callable(getattr(self, value))').replace('getattr(self, value)', '(getattr(self, value) if value != \"__provides__\" else None)'))"
-RUN python -c "import os, gradio_client.utils as u; path=u.__file__; c=open(path).read(); open(path, 'w').write(c.replace('if \"const\" in schema:', 'if isinstance(schema, dict) and \"const\" in schema:').replace('if \"enum\" in schema:', 'if isinstance(schema, dict) and \"enum\" in schema:'))"
+RUN python -c "import os, gradio_client.utils as u; path=u.__file__; c=open(path).read(); open(path, 'w').write(c.replace('def _json_schema_to_python_type(schema: Any, defs) -> str:', 'def _json_schema_to_python_type(schema: Any, defs) -> str:\n    if not isinstance(schema, dict): return \"Any\"').replace('if \"const\" in schema:', 'if isinstance(schema, dict) and \"const\" in schema:').replace('if \"enum\" in schema:', 'if isinstance(schema, dict) and \"enum\" in schema:'))"
 
 # Change ownership to non-root user
 RUN chown -R user:user /app
