@@ -1,6 +1,4 @@
-gradio==5.15.0
-pydantic<2.10
-zope-interface
+gradio
 PyGithub
 openai
 requests
@@ -19,6 +17,7 @@ python-docx
 markdown
 jupyter
 matplotlib
+pydantic
 textdistance
 scipy
 transformers
