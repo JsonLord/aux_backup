@@ -1,5 +1,31 @@
 import os
 import sys
+
+# Monkey-patch Gradio to avoid AttributeError: __provides__ with zope.interface
+try:
+    import gradio.components.base
+    _original_init = gradio.components.base.Component.__init__
+    def _patched_init(self, *args, **kwargs):
+        if not hasattr(self.__class__, "server_fns"):
+            self.__class__.server_fns = []
+        _original_init(self, *args, **kwargs)
+        if hasattr(self, "server_fns"):
+            self.server_fns = [f for f in self.server_fns if f is not None]
+    
+    # More direct approach based on the error log:
+    # The error happens in: if callable(getattr(self, value))
+    # where dir(self.__class__) includes '__provides__' which fails on getattr.
+    
+    import builtins
+    _original_getattr = getattr
+    def _patched_getattr(obj, name, *args):
+        if name == "__provides__":
+            return None
+        return _original_getattr(obj, name, *args)
+    builtins.getattr = _patched_getattr
+except Exception as e:
+    print(f"Failed to apply Gradio patch: {e}")
+
 import subprocess
 import re
 import time
@@ -1723,38 +1749,6 @@ if __name__ == "__main__":
     @fastapi_app.get("/api/info")
     def info():
         return {"app": "UX Analysis Orchestrator", "version": "1.0.0"}
-
-    @fastapi_app.get("/api-docs")
-    def api_docs():
-        return {
-            "endpoints": [
-                {
-                    "path": "/health",
-                    "method": "GET",
-                    "purpose": "Health check"
-                },
-                {
-                    "path": "/api/info",
-                    "method": "GET",
-                    "purpose": "App information"
-                },
-                {
-                    "path": "/api-docs",
-                    "method": "GET",
-                    "purpose": "API documentation"
-                },
-                {
-                    "path": "/",
-                    "method": "GET",
-                    "purpose": "Gradio UI"
-                },
-                {
-                    "path": "/static_slides/{path}",
-                    "method": "GET",
-                    "purpose": "Static slide deck files"
-                }
-            ]
-        }
 
     # Mount static files for slides
     fastapi_app.mount("/static_slides", StaticFiles(directory=SLIDES_OUTPUT_ROOT), name="static_slides")
