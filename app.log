@@ -1,0 +1,12 @@
+INFO:agent-app:=== Space Secrets Requirement Reminder ===
+INFO:agent-app:[OK] BLABLADOR_API_KEY is set.
+INFO:agent-app:[OK] GITHUB_TOKEN is set.
+INFO:agent-app:[OK] JULES_API_KEY is set.
+INFO:agent-app:[OK] HF_TOKEN is set.
+INFO:agent-app:[OK] HF_PROFILE is set.
+INFO:agent-app:==========================================
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/telemetry/https%3A/api.gradio.app/gradio-initiated-analytics "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET https://api.gradio.app/pkg-version "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: GET http://localhost:7860/gradio_api/startup-events "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: HEAD http://localhost:7860/ "HTTP/1.1 200 OK"
+INFO:httpx:HTTP Request: HEAD https://huggingface.co/api/telemetry/https%3A/api.gradio.app/gradio-launched-telemetry "HTTP/1.1 200 OK"

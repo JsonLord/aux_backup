@@ -1,0 +1,226 @@
+
+```python
+from gradio_client import Client
+client = Client("diamond-in/Browser-Use-mcp")
+```
+
+---
+
+# 1. **/browse_and_extract**  
+_Read visible text from a page (like a human reading a section)._
+
+### Parameters
+- `url` (str)
+- `selector` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    selector="body",
+    use_persistent=False,
+    api_name="/browse_and_extract"
+)
+print(result)
+```
+
+---
+
+# 2. **/screenshot**  
+_Take a screenshot (like a human capturing the screen)._
+
+### Parameters
+- `url` (str)
+- `full_page` (bool)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    full_page=False,
+    use_persistent=False,
+    api_name="/screenshot"
+)
+print(result)
+```
+
+---
+
+# 3. **/click**  
+_Click an element (like a human clicking)._
+
+### Parameters
+- `url` (str)
+- `selector` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    selector="#login-button",
+    use_persistent=False,
+    api_name="/click"
+)
+print(result)
+```
+
+---
+
+# 4. **/hover_element**  
+_Hover over an element (like moving the mouse over something)._
+
+### Parameters
+- `url` (str)
+- `selector` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    selector=".menu-item",
+    use_persistent=False,
+    api_name="/hover_element"
+)
+print(result)
+```
+
+---
+
+# 5. **/scroll_page**  
+_Scroll the page (like using a mouse wheel)._
+
+### Parameters
+- `url` (str)
+- `direction` ("top" | "bottom" | "up" | "down")
+- `pixels` (float)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    direction="down",
+    pixels=500,
+    use_persistent=False,
+    api_name="/scroll_page"
+)
+print(result)
+```
+
+---
+
+# 6. **/fill**  
+_Type text into a field (like a human typing)._
+
+### Parameters
+- `url` (str)
+- `selector` (str)
+- `text` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com/login",
+    selector="#email",
+    text="leon@example.com",
+    use_persistent=False,
+    api_name="/fill"
+)
+print(result)
+```
+
+---
+
+# 7. **/submit_form**  
+_Submit a form (like clicking a submit button)._
+
+### Parameters
+- `url` (str)
+- `form_data` (str)
+- `submit_button` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com/signup",
+    form_data='{"#email": "leon@example.com", "#password": "123456"}',
+    submit_button="#submit",
+    use_persistent=False,
+    api_name="/submit_form"
+)
+print(result)
+```
+
+---
+
+# 8. **/press_key**  
+_Press a keyboard key (like typing or triggering shortcuts)._
+
+### Parameters
+- `url` (str)
+- `key` (str)
+- `selector` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    key="Enter",
+    selector="body",
+    use_persistent=False,
+    api_name="/press_key"
+)
+print(result)
+```
+
+---
+
+# 9. **/wait_for_element**  
+_Wait for something to appear (like waiting for a page to load)._
+
+### Parameters
+- `url` (str)
+- `selector` (str)
+- `timeout` (float)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    selector="#content",
+    timeout=10,
+    use_persistent=False,
+    api_name="/wait_for_element"
+)
+print(result)
+```
+
+---
+
+# 10. **/get_page_info**  
+_Get high‑level page info (like observing what’s on the page)._
+
+### Parameters
+- `url` (str)
+- `use_persistent` (bool)
+
+### Code Snippet
+```python
+result = client.predict(
+    url="https://example.com",
+    use_persistent=False,
+    api_name="/get_page_info"
+)
+print(result)
+```
+
+
+Just tell me the direction you want to take next.

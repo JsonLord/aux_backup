@@ -1,0 +1,11 @@
+.git/
+external/
+__pycache__/
+*.pyc
+app_output.log
+*.png
+verification/
+external/
+site/
+test_slides/
+__pycache__/
