@@ -1,4 +1,6 @@
-gradio==5.9.1
+gradio==5.15.0
+gradio-client==1.7.0
+zope-interface==6.4.post2
 PyGithub
 openai
 requests
@@ -21,6 +23,7 @@ pydantic
 textdistance
 scipy
 transformers
+huggingface-hub
 lxml_html_clean
 beautifulsoup4
 playwright
