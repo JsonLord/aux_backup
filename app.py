@@ -1714,7 +1714,7 @@ if __name__ == "__main__":
     print("-----------------------------------------")
 
     # Wrap with FastAPI for health check and API endpoints
-    fastapi_app = FastAPI()
+    # fastapi_app = FastAPI()
 
     @fastapi_app.get("/health")
     def health():
