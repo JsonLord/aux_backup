@@ -25,7 +25,7 @@ https://github.com/Jules-Astier/journeytest-core
 External npm dependency. Do not vendor.
 
 **Version:**
-`0.1.2`
+`@baguette-studios/journeytest-core@0.1.2` (exact npm pin)
 
 **Required baseline:**
 commit: `9139d581fc6a882257ea4c46bdf16d59547c0ae5`
@@ -48,26 +48,26 @@ If middleware hooks are required that upstream doesn't expose, fork to `JsonLord
 **Upstream:**
 https://github.com/microsoft/TinyTroupe
 
-**Current project fork:**
-https://github.com/JsonLord/TinyTroupe
-
 **Disposition:**
 External Python dependency. Do not vendor.
 
 **Pinned commit:**
-`43d951eea015aea09972dc95537c9bbbc74ba207`
+`a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4`
 
 **Branch:**
-`main`
+release `v0.7.0`
 
 **Usage:**
 Pin in `pyproject.toml`:
 
 ```toml
 dependencies = [
-    "tinytroupe @ git+https://github.com/JsonLord/TinyTroupe.git@43d951eea015aea09972dc95537c9bbbc74ba207"
+    "tinytroupe @ git+https://github.com/microsoft/TinyTroupe.git@a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4"
 ]
 ```
+
+Blablador compatibility belongs in `services/persona_service`; never patch the
+installed upstream package at application startup.
 
 ---
 

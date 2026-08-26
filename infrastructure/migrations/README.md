@@ -1,3 +1,6 @@
 # Migrations
 
-**PLACEHOLDER:** Alembic/PostgreSQL migrations arrive with the production persistence work in Stage 1. The current SQLite store creates its minimal development schema idempotently.
+**PLACEHOLDER:** Alembic/PostgreSQL migrations remain required to close Stage 1. The
+SQLite development store performs additive, idempotent schema upgrades and now
+includes workspace/owner attribution and artifact retention metadata; it is not the
+production migration mechanism.

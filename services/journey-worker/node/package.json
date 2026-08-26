@@ -3,5 +3,6 @@
   "version": "0.1.0",
   "private": true,
   "engines": {"node": ">=24"},
-  "scripts": {"check": "node --check src/index.js", "start": "node src/index.js"}
+  "dependencies": {"@baguette-studios/journeytest-core": "0.1.2"},
+  "scripts": {"check": "node --check src/index.js && node --check src/behavior.js && node --check src/journeytest.js", "start": "node src/index.js", "test": "node --test test/*.test.js"}
 }

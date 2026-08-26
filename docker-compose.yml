@@ -6,13 +6,25 @@ services:
     environment:
       DATABASE_URL: sqlite:////data/control-plane.db
       ARTIFACT_ROOT: /data/artifacts
+      JOURNEY_WORKER_URL: http://journey-worker:8080
     volumes: ["platform-data:/data"]
     ports: ["8000:8000"]
   journey-worker:
     build:
       context: .
       dockerfile: infrastructure/docker/journey-worker.Dockerfile
+    environment:
+      JOURNEY_ENGINE: journeytest
     ports: ["8080:8080"]
+  persona-runtime:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/persona-runtime.Dockerfile
+    environment:
+      PERSONA_GENERATOR: tinytroupe
+      SEMANTIC_ENGINE: ${SEMANTIC_ENGINE:-mock}
+      BLABLADOR_API_KEY: ${BLABLADOR_API_KEY:-}
+    ports: ["8090:8090"]
   # PLACEHOLDER: PostgreSQL, Redis, Eyeson and durable workers are added in later spec stages.
 volumes:
   platform-data:

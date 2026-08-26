@@ -310,13 +310,20 @@ For production:
 - object storage adapter for artifacts.
 - optional queue adapter for deep Eyeson analysis.
 
-Do not require Redis for the first complete version. Define a `JobQueue` interface with an in-memory implementation and allow Redis/BullMQ later.
+Do not require Redis for the first local complete version. Define a `JobQueue`
+interface with an in-memory implementation. Production uses externally hosted Redis
+and Celery; neither durable workers nor Redis/PostgreSQL run inside the HF Space.
 
 ---
 
 ## 5. Dependency integration strategy
 
 ### 5.1 JourneyTest-core
+
+Resolved baseline: exact npm dependency
+`@baguette-studios/journeytest-core@0.1.2`, release commit
+`9139d581fc6a882257ea4c46bdf16d59547c0ae5`. Use its package API before considering
+a fork. If extension points prove insufficient, fork from this commit only.
 
 During development, pin a commit or local package path.
 
@@ -331,15 +338,47 @@ The Eyeson backend should import JourneyTest via package API, not shell out to i
 
 ### 5.2 TinyTroupe
 
-Pin a Git commit or released Python version in the persona-runtime lockfile.
+Pin `microsoft/TinyTroupe` v0.7.0 at commit
+`a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4` in the persona-runtime lockfile. Do not
+patch installed TinyTroupe files at startup. Blablador compatibility belongs in the
+persona adapter; fork from this commit only if an adapter cannot provide it.
 
 ### 5.3 DSPy
 
 Pin the version in the same Python environment as TinyTroupe.
 
+DSPy is gated by parity evaluation and is not the default semantic engine. The
+default direct baseline is `DirectLLMSemanticEngine` using the existing
+OpenAI-compatible Helmholtz Blablador provider with model `alias-huge`. CI uses a
+deterministic mock engine. Domain schemas never depend on provider response formats.
+
 ### 5.4 AI-UX
 
 No runtime dependency in v1. If later reused, extract only the relevant rendering/prototyping component behind an interface.
+
+### 5.5 Resolved deployment, tenancy, storage and migration defaults
+
+- HF Spaces hosts Gradio, the thin HTTPS API proxy, and HF OAuth/OIDC only. Durable
+  FastAPI/Celery/Journey/Eyeson/persona/report workers run outside the Space with
+  externally hosted PostgreSQL and Redis.
+- Stable user identity is the HF OIDC subject. Every session, job and artifact has a
+  `workspace_id` and `owner_user_id`; workspaces are personal or HF organization
+  workspaces. Service calls use separate service credentials. Object keys are
+  prefixed `workspace/session/`.
+- Cloudflare R2 is the default implementation of the generic S3-compatible artifact
+  interface. Raw evidence retention is 30 days, structured reports/job metadata 180
+  days, and pinned runs indefinite. Direct multipart uploads are limited to 25 MB;
+  larger objects use presigned uploads, with an initial 1 GB object maximum.
+- Existing GitHub-branch sessions remain read-only for at least one major migration
+  cycle through `LegacyGitHubSessionProvider`. New work never writes analysis state
+  to branches. `POST /v1/legacy/github/import` ingests a legacy branch as a new
+  session without rerunning it.
+- Gradio callback migration order is Analysis Orchestrator, Report Viewer, Live
+  Monitoring, Persona & Behavior Trace, Cohort Pain Maps, Full New UI, Presentation
+  Carousel, Developer Handoff/Agents.txt, System, then Alternative Styling.
+- Eyeson provenance is captured as a squashed subtree import with original URL and
+  commit recorded in `docs/upstream-sources.md`; it need not stay synchronized as a
+  permanent subtree.
 
 ---
 

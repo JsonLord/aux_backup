@@ -1,0 +1,3 @@
+# Runtime pins resolved on 2026-08-26. TinyTroupe must not be patched in place.
+tinytroupe @ git+https://github.com/microsoft/TinyTroupe.git@a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4
+# PLACEHOLDER: pin DSPy after selecting a release and recording its hash.

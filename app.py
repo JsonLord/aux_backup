@@ -10,90 +10,7 @@ import uuid
 import shutil
 from gradio_client import Client
 from datetime import datetime
-
-# TinyTroupe and mkslides are now pre-cloned and pre-installed in Dockerfile:
-# git clone -b fix/jules-final-submission-branch https://github.com/JsonLord/TinyTroupe.git external/TinyTroupe
-# We only keep the patching logic if needed, or ensure it's done during build
-def patch_tinytroupe():
-    path = "external/TinyTroupe/tinytroupe/openai_utils.py"
-    if os.path.exists(path):
-        with open(path, "r") as f:
-            content = f.read()
-
-        # 1. Import concurrent.futures and add parallel helper to the class
-        if "import concurrent.futures" not in content:
-            content = "import concurrent.futures\n" + content
-
-        # Add the parallel helper to OpenAIClient
-        parallel_helper = """
-    def _raw_model_call_parallel(self, model_names, chat_api_params):
-        def make_call(m_name):
-            try:
-                p = chat_api_params.copy()
-                p["model"] = m_name
-                # Adjust for reasoning models if needed
-                if self._is_reasoning_model(m_name):
-                    if "max_tokens" in p:
-                        p["max_completion_tokens"] = p.pop("max_tokens")
-                    p.pop("temperature", None)
-                    p.pop("top_p", None)
-                    p.pop("frequency_penalty", None)
-                    p.pop("presence_penalty", None)
-                    p.pop("stream", None)
-
-                return self.client.chat.completions.create(**p)
-            except Exception as e:
-                return e
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=len(model_names)) as executor:
-            futures = {executor.submit(make_call, m): m for m in model_names}
-            for future in concurrent.futures.as_completed(futures):
-                res = future.result()
-                if not isinstance(res, Exception):
-                    return res
-        return Exception("All parallel calls failed")
-"""
-        if "_raw_model_call_parallel" not in content:
-            content = content.replace("class OpenAIClient:", "class OpenAIClient:" + parallel_helper)
-
-        # 2. Ensure alias-huge is used (alias-large is deprecated/down)
-        content = content.replace('"alias-fast"', '"alias-huge"')
-        content = content.replace('"alias-large"', '"alias-huge"')
-
-        # 3. Handle 502 errors by waiting 35 seconds and setting a parallel retry flag
-        # We need to modify the send_message loop
-
-        # Inject parallel_retry = False before the loop
-        content = content.replace("i = 0", "parallel_retry = False\n        i = 0")
-
-        # Modify the model call inside the loop
-        if 'if parallel_retry:' not in content:
-            old_call = "response = self._raw_model_call(model, chat_api_params)"
-            new_call = """if parallel_retry:
-                        logger.info("Attempting parallel call to alias-huge and alias-fast.")
-                        response = self._raw_model_call_parallel(["alias-huge", "alias-fast"], chat_api_params)
-                        if isinstance(response, Exception):
-                            raise response
-                    else:
-                        response = self._raw_model_call(model, chat_api_params)"""
-            content = content.replace(old_call, new_call)
-
-        # Update the 502 catch block
-        pattern = r"if isinstance\(e, openai\.APIStatusError\) and e\.status_code == 502 and isinstance\(self, HelmholtzBlabladorClient\):.*?except Exception as fallback_e:.*?logger\.error\(f\"Fallback to OpenAI also failed: \{fallback_e\}\"\)"
-
-        new_502_block = """if isinstance(e, openai.APIStatusError) and e.status_code == 502 and isinstance(self, HelmholtzBlabladorClient):
-                    logger.warning("Helmholtz API returned a 502 error. Waiting 35 seconds and enabling parallel retry...")
-                    parallel_retry = True
-                    time.sleep(35)"""
-
-        content = re.sub(pattern, new_502_block, content, flags=re.DOTALL)
-
-        with open(path, "w") as f:
-            f.write(content)
-        print("TinyTroupe patched to handle 502 errors with 35s wait and parallel retries.")
-
-if os.path.exists("external/TinyTroupe"):
-    patch_tinytroupe()
+from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient
 
 import gradio as gr
 from fastapi import FastAPI
@@ -105,26 +22,12 @@ import requests
 from openai import OpenAI
 import logging
 
-# Add external/TinyTroupe to sys.path
-TINYTROUPE_PATH = os.path.join(os.getcwd(), "external", "TinyTroupe")
-sys.path.append(TINYTROUPE_PATH)
-
-# Try to import tinytroupe
-try:
-    import tinytroupe
-    from tinytroupe.agent import TinyPerson
-    from tinytroupe.factory.tiny_person_factory import TinyPersonFactory
-    from tinytroupe import config_manager
-    print("TinyTroupe imported successfully")
-except ImportError as e:
-    print(f"Error importing TinyTroupe: {e}")
-
 # Configuration from environment variables
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_TOKEN") or os.environ.get("GITHUB_API_KEY")
-ANALYSIS_API_KEY = os.environ.get("ANALYSIS_API_KEY") or os.environ.get("JULES_API_KEY")
 BLABLADOR_API_KEY = os.environ.get("BLABLADOR_API_KEY")
 BLABLADOR_BASE_URL = "https://api.helmholtz-blablador.fz-juelich.de/v1"
-ANALYSIS_API_URL = "https://jules.googleapis.com/v1alpha"
+control_plane = ControlPlaneClient()
+persona_runtime = PersonaRuntimeClient()
 
 # GitHub Client
 gh = Github(auth=Auth.Token(GITHUB_TOKEN)) if GITHUB_TOKEN else None
@@ -357,7 +260,7 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
         num_personas = int(num_personas) - len(personas)
     elif force_method == "TinyTroupe":
         add_log("Forcing TinyTroupe generation...")
-        return generate_personas_from_tiny_factory(theme, customer_profile, num_personas)
+        return persona_runtime.generate(theme, customer_profile, num_personas, scenario=theme)
 
     client = get_blablador_client()
     if not client:
@@ -498,101 +401,12 @@ def generate_persona_from_deeppersona(theme, customer_profile):
         return None
 
 def generate_personas_from_tiny_factory(theme, customer_profile, num_personas):
-    add_log(f"Generating {num_personas} personas from harvesthealth/tiny_factory...")
-    try:
-        gr_client = Client("harvesthealth/tiny_factory")
-        result = gr_client.predict(
-            business_description=theme,
-            customer_profile=customer_profile,
-            num_personas=float(num_personas),
-            blablador_api_key=BLABLADOR_API_KEY,
-            api_name="/generate_personas"
-        )
-        # Assuming the result is a list of personas in the format we need
-        if isinstance(result, list):
-            return result
-        elif isinstance(result, dict) and "personas" in result:
-            return result["personas"]
-        else:
-            add_log(f"Unexpected format from tiny_factory: {type(result)}")
-            # If it's a string, maybe it's JSON?
-            if isinstance(result, str):
-                try:
-                    return json.loads(result)
-                except:
-                    pass
-            return []
-    except Exception as e:
-        add_log(f"Tiny Factory generation failed: {e}")
-        return []
+    """Compatibility wrapper; persona generation belongs to persona-runtime."""
+    return persona_runtime.generate(theme, customer_profile, num_personas, scenario=theme)
 
 def generate_personas(theme, customer_profile, num_personas):
-    add_log(f"Generating {num_personas} personas...")
-    
-    # Try Tiny Factory first
-    final_personas = generate_personas_from_tiny_factory(theme, customer_profile, num_personas)
-    if len(final_personas) >= int(num_personas):
-        add_log("Successfully generated all personas from Tiny Factory.")
-        return final_personas[:int(num_personas)]
-    
-    add_log("Falling back to TinyTroupe logic for remaining personas...")
-    
-    # Ensure alias-huge is used
-    config_manager.update("model", "alias-huge")
-    config_manager.update("reasoning_model", "alias-huge")
-
-    context = f"A company related to {theme}. Target customers: {customer_profile}"
-
-    # Manually define sampling plan if LLM fails to generate one correctly
-    try:
-        factory = TinyPersonFactory(context=context)
-        # Attempt to initialize sampling plan, if it fails or produces 0 samples, we'll manually add one
-        try:
-            factory.initialize_sampling_plan()
-        except:
-            pass
-
-        if not factory.remaining_characteristics_sample or any("sampled_values" not in s for s in factory.remaining_characteristics_sample):
-            print("Sampling plan generation failed or returned invalid samples. Creating manual sample.")
-            factory.remaining_characteristics_sample = [{
-                "name": f"User_{i}",
-                "age": 25 + i,
-                "gender": "unknown",
-                "nationality": "unknown",
-                "occupation": theme,
-                "background": customer_profile
-            } for i in range(int(num_personas))]
-        else:
-            # If it has sampled_values but it's nested (it should be flattened by factory)
-            # Actually, the error shows it's a list of dictionaries that might be errors
-            pass
-
-        people = factory.generate_people(number_of_people=int(num_personas) - len(final_personas), verbose=True)
-        if not people:
-            print("TinyTroupe generated 0 people. Using fallback.")
-            raise Exception("No people generated.")
-    except Exception as e:
-        print(f"Error in generate_personas: {e}")
-        # Fallback: create dummy people if everything fails
-        personas_data = []
-        for i in range(int(num_personas) - len(final_personas)):
-            idx = len(final_personas) + i
-            personas_data.append({
-                "name": f"User_{idx}",
-                "minibio": f"A simulated user interested in {theme}.",
-                "persona": {"name": f"User_{idx}", "occupation": theme, "background": customer_profile}
-            })
-        return personas_data
-
-    personas_data = final_personas
-    if people:
-        for person in people:
-            personas_data.append({
-                "name": person.name,
-                "minibio": person.minibio(),
-                "persona": person._persona
-            })
-    return personas_data
+    """Compatibility wrapper for legacy callbacks during tab migration."""
+    return persona_runtime.generate(theme, customer_profile, num_personas, scenario=theme)
 
 def generate_tasks(theme, customer_profile, url):
     client = get_blablador_client()
@@ -673,7 +487,10 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
         tasks_text = "\n".join(tasks) if isinstance(tasks, list) else str(tasks)
 
         yield "Selecting or creating personas...", tasks_text, None, tasks
-        personas = select_or_create_personas(theme, customer_profile, num_personas, force_method=method, example_file=example_file)
+        if method == "TinyTroupe":
+            personas = persona_runtime.generate(theme, customer_profile, num_personas, scenario=f"Test {url}")
+        else:
+            personas = select_or_create_personas(theme, customer_profile, num_personas, force_method=method, example_file=example_file)
 
         yield "Generation complete!", tasks_text, personas, tasks
     except Exception as e:
@@ -689,109 +506,21 @@ def check_branch_exists(repo_full_name, branch_name):
         return False
 
 def start_and_monitor_sessions(personas, tasks, url, session_id):
-    repo_name = REPO_NAME
-    
-    # Ticketing system: Session ID is used as the branch name for analysis
-    if not session_id:
-        session_id = f"sess-{uuid.uuid4().hex[:8]}"
-        add_log(f"Auto-generated Session ID (Branch): {session_id}")
-
-    # For starting analysis, we don't strictly require the branch to exist yet 
-    # as Jules might create it or we might be starting on main.
-    if not check_branch_exists(repo_name, session_id):
-        add_log(f"Warning: Branch '{session_id}' not found on GitHub. Proceeding with analysis (Jules may create it).")
-
     if not personas or not tasks:
         yield "Error: Personas or Tasks missing. Please generate them first.", "", "", ""
         return
-
-    if not ANALYSIS_API_KEY:
-        yield "Error: Analysis API key not set.", "", "", ""
-        return
-
-    with open("analysis_template.md", "r") as f:
-        template = f.read()
-
-    sessions = []
-    jules_uuids = []
-    
-    for persona in personas:
-        # Use provided session_id or append to it if multiple personas?
-        # For simplicity, we use session_id as the report_id too
-        report_id = session_id
-        
-        # Format prompt
-        prompt = template.replace("{{persona_context}}", json.dumps(persona))
-        prompt = prompt.replace("{{tasks_list}}", json.dumps(tasks))
-        prompt = prompt.replace("{{url}}", url)
-        prompt = prompt.replace("{{report_id}}", report_id)
-        prompt = prompt.replace("{{blablador_api_key}}", BLABLADOR_API_KEY if BLABLADOR_API_KEY else "YOUR_API_KEY")
-
-        # Call Analysis API
-        headers = {
-            "X-Goog-Api-Key": ANALYSIS_API_KEY,
-            "Content-Type": "application/json"
-        }
-        data = {
-            "prompt": prompt,
-            "sourceContext": {
-                "source": f"sources/github/{repo_name}",
-                "githubRepoContext": {
-                    "startingBranch": "main"
-                }
-            },
-            "automationMode": "AUTO_CREATE_PR",
-            "title": f"UX Analysis for {persona['name']} ({session_id})"
-        }
-
-        response = requests.post(f"{ANALYSIS_API_URL}/sessions", headers=headers, json=data)
-        if response.status_code == 200:
-            sess_data = response.json()
-            sessions.append(sess_data)
-            jules_uuids.append(sess_data['id'])
-            # Yield session ID immediately so UI can update. 3rd output is Branch Name, 4th is Jules UUID
-            yield f"Session created: {sess_data['id']}. ID: {session_id}", "", session_id, sess_data['id']
-        else:
-            yield f"Error creating session for {persona['name']}: {response.text}", "", "", ""
+    try:
+        session = control_plane.create_session({"legacy_session_id": session_id})
+        job = control_plane.create_job({"session_id": session["session_id"], "type": "combined_test", "metadata": {"personas": personas, "tasks": tasks, "url": url}})
+        yield f"Analysis queued: {job['job_id']}", "", session["session_id"], job["job_id"]
+        job = control_plane.wait_for_job(job["job_id"])
+        if job["status"] != "succeeded":
+            yield f"Analysis failed: {job.get('error')}", "", session["session_id"], job["job_id"]
             return
-
-    # Monitoring
-    all_reports = ""
-    last_jules_uuid = jules_uuids[-1] if jules_uuids else ""
-    while sessions:
-        for i, session in enumerate(sessions):
-            curr_jules_uuid = session['id']
-            last_jules_uuid = curr_jules_uuid
-            res = requests.get(f"{ANALYSIS_API_URL}/sessions/{curr_jules_uuid}", headers=headers)
-            if res.status_code == 200:
-                current_session = res.json()
-                yield f"Monitoring sessions... Status of {current_session.get('title')}: {current_session.get('state', 'UNKNOWN')}", all_reports, session_id, curr_jules_uuid
-
-                # Check for PR in outputs
-                outputs = current_session.get("outputs", [])
-                pr_url = None
-                for out in outputs:
-                    if "pullRequest" in out:
-                        pr_url = out["pullRequest"]["url"]
-                        break
-
-                if pr_url:
-                    yield f"PR created for {current_session.get('title')}: {pr_url}. Pulling report...", all_reports, session_id, curr_jules_uuid
-                    report_content = pull_report_from_pr(pr_url)
-                    all_reports += f"\n\n# Report for {current_session.get('title')}\n\n{report_content}"
-                    sessions.pop(i)
-                    break # Restart loop since we modified the list
-            else:
-                print(f"Error polling session {curr_jules_uuid}: {res.text}")
-
-        if sessions:
-            time.sleep(30) # Poll every 30 seconds
-
-    # Upon completion, automatically trigger HF upload
-    add_log("Analysis complete. Triggering HF upload...")
-    deploy_to_hf()
-    
-    yield "All sessions complete and changes pushed to HF!", all_reports, session_id, last_jules_uuid
+        report = control_plane.get_artifact_content(job["output_artifacts"][0])
+        yield "Analysis complete.", f"```json\n{report}\n```", session["session_id"], job["job_id"]
+    except Exception as exc:
+        yield f"Control-plane error: {exc}", "", "", ""
 
 def get_reports_in_branch(repo_full_name, branch_name, filter_type=None):
     if not gh or not repo_full_name or not branch_name:
@@ -1130,38 +859,18 @@ You are an expert Frontend Developer. Your task is to implement the following "L
     return prompt
 
 def generate_full_ui_call(repo, branch, session_id, selected_solutions_json, url):
-    if not ANALYSIS_API_KEY or not session_id:
-        return "Error: API Key or Session ID missing. Start a session first."
-    
+    if not session_id:
+        return "Error: Job ID missing. Start an analysis first."
     try:
-        if not os.path.exists("ui_generation_template.md"):
-            return "Error: ui_generation_template.md not found."
-        with open("ui_generation_template.md", "r") as f:
-            template = f.read()
-    except Exception as e:
-        return f"Error reading template: {e}"
-    
-    prompt = template.replace("{{selected_solutions}}", selected_solutions_json)
-    prompt = prompt.replace("{{url}}", url if url else "the analyzed website")
-    prompt = prompt.replace("{{analysis_report}}", "See previous activities in this session")
-    prompt = prompt.replace("{{report_id}}", session_id[:8])
-    prompt = prompt.replace("{{screenshots_dir}}", f"user_experience_reports/screenshots/{session_id[:8]}")
-    
-    headers = {
-        "X-Goog-Api-Key": ANALYSIS_API_KEY,
-        "Content-Type": "application/json"
-    }
-    data = {
-        "prompt": prompt
-    }
-    
-    add_log(f"Sending UI generation request to session {session_id}...")
-    response = requests.post(f"{ANALYSIS_API_URL}/sessions/{session_id}:sendMessage", headers=headers, json=data)
-    if response.status_code == 200:
-        return f"✅ UI generation requested for session {session_id}. Please wait a few minutes and refresh."
-    else:
-        add_log(f"API Error: {response.text}")
-        return f"❌ Error: {response.text}"
+        parent = control_plane.get_job(session_id)
+        job = control_plane.run_job("ui_adaptation", {"title": "UX solution prototype", "request": generate_agents_prompt(selected_solutions_json), "url": url}, session_id=parent["session_id"])
+        if job["status"] != "succeeded":
+            return f"❌ Prototype generation failed: {job.get('error')}"
+        html = control_plane.get_artifact_content(job["output_artifacts"][0])
+        return f'<iframe srcdoc="{html.replace(chr(34), "&quot;")}" width="100%" height="800" frameborder="0"></iframe>'
+    except Exception as exc:
+        add_log(f"Control-plane error: {exc}")
+        return f"❌ Error: {exc}"
 
 def poll_for_generated_ui(repo_full_name, branch_name, session_id):
     if not gh or not repo_full_name or not branch_name or not session_id:
@@ -1176,26 +885,21 @@ def poll_for_generated_ui(repo_full_name, branch_name, session_id):
 
 def blablador_chat_adaptation(message="", history=[], jules_uuid=""):
     print(f"DEBUG: blablador_chat_adaptation called with message='{message}', history='{history}', jules_uuid='{jules_uuid}'")
-    if not BLABLADOR_API_KEY or not jules_uuid:
-        return history + [("System", "Error: BLABLADOR_API_KEY or Jules UUID missing.")], ""
+    if not jules_uuid:
+        return history + [("System", "Error: Analysis job ID missing.")], ""
     
     # This should call sendMessage to the same session_id for real-time adaptation
     # but also use alias-code for the chat experience if desired.
     # The user asked to call alias-code model on blablador endpoint.
     
-    client = get_blablador_client()
     prompt = f"User request for UI adaptation: {message}\n\nPlease update the generated UI and save it."
     
     try:
-        response = client.chat.completions.create(
-            model="alias-code",
-            messages=[{"role": "user", "content": prompt}]
-        )
-        agent_msg = response.choices[0].message.content
-        
-        # Also notify Jules session to actually do the work if needed
-        headers = {"X-Goog-Api-Key": ANALYSIS_API_KEY, "Content-Type": "application/json"}
-        requests.post(f"{ANALYSIS_API_URL}/sessions/{jules_uuid}:sendMessage", headers=headers, json={"prompt": message})
+        parent = control_plane.get_job(jules_uuid)
+        job = control_plane.run_job("ui_adaptation", {"title": "Interactive UI adaptation", "request": prompt}, session_id=parent["session_id"])
+        if job["status"] != "succeeded":
+            raise RuntimeError(job.get("error"))
+        agent_msg = f"Adaptation completed as job {job['job_id']}. The responsive prototype is stored as artifact {job['output_artifacts'][0]}."
         
         history.append((message, agent_msg))
         return history, ""
@@ -1329,6 +1033,30 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             session_id_orch = gr.Textbox(label="Session ID (GitHub Branch Name)", interactive=True, placeholder="Enter a GitHub branch name to start analysis on...")
             session_id_sync_list.append(session_id_orch)
             report_output = gr.Markdown(label="Active Session Reports")
+
+        with gr.Tab("Persona Studio"):
+            gr.Markdown("## Persona Studio\nInspect identity, functional restrictions, behavioral characteristics, and generation provenance. Changes are explicit and persisted through the persona runtime.")
+            with gr.Row():
+                persona_index = gr.Dropdown(label="Persona", choices=[], interactive=True)
+                refresh_personas_btn = gr.Button("Refresh generated personas")
+            persona_view = gr.JSON(label="Complete synthetic-user profile")
+            persona_editor = gr.Code(label="Manual JSON editor", language="json", interactive=True, lines=24)
+            with gr.Accordion("Behavior characteristics (0–1)", open=True):
+                behavior_sliders = {}
+                for trait in ["patience", "persistence", "irritability", "angerReactivity", "angerRecovery", "impulsivity", "ambiguityTolerance", "failureTolerance", "repeatFailureTolerance", "selfEfficacy", "digitalConfidence", "helpSeeking", "exploration", "verificationTendency", "riskTolerance"]:
+                    behavior_sliders[trait] = gr.Slider(0, 1, value=.5, step=.01, label=trait)
+            with gr.Accordion("Functional restrictions and abilities", open=False):
+                color_vision = gr.Dropdown(["typical", "protanopia", "deuteranopia", "tritanopia", "custom"], value="typical", label="Color vision")
+                visual_acuity = gr.Slider(0, 1, value=1, step=.01, label="Visual acuity")
+                contrast_sensitivity = gr.Slider(0, 1, value=1, step=.01, label="Contrast sensitivity")
+                pointer_precision = gr.Slider(0, 1, value=.9, step=.01, label="Pointer precision")
+                processing_speed = gr.Slider(0, 1, value=.8, step=.01, label="Processing speed")
+                working_memory = gr.Slider(1, 12, value=5, step=1, label="Working-memory items")
+                reading_speed = gr.Slider(60, 500, value=220, step=5, label="Reading speed (words/minute)")
+            with gr.Row():
+                apply_tweaks_btn = gr.Button("Apply tweak controls", variant="secondary")
+                save_persona_btn = gr.Button("Save manual profile", variant="primary")
+            persona_studio_status = gr.Markdown()
 
         with gr.Tab("Presentation Carousel"):
             gr.Markdown("### View Presentation Slides")
@@ -1659,11 +1387,49 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     # Actually it's inside the Tab block in previous edit.
 
     # Event handlers
+    studio_outputs = [persona_view, persona_editor, *behavior_sliders.values(), color_vision, visual_acuity, contrast_sensitivity, pointer_precision, processing_speed, working_memory, reading_speed]
+
+    def persona_choices(personas):
+        personas = personas or []
+        choices = [(item.get("persona", {}).get("name", item.get("name", item.get("id", "Persona"))), str(index)) for index, item in enumerate(personas)]
+        return gr.update(choices=choices, value=choices[0][1] if choices else None)
+
+    def load_persona(personas, index):
+        profile = (personas or [])[int(index or 0)]
+        behavior, abilities = profile.get("behavior", {}), profile.get("abilities", {})
+        vision, motor = abilities.get("vision", {}), abilities.get("motor", {})
+        cognition, reading = abilities.get("cognition", {}), abilities.get("reading", {})
+        return [profile, json.dumps(profile, indent=2), *[behavior.get(trait, .5) for trait in behavior_sliders], vision.get("colorVision", "typical"), vision.get("acuity", 1), vision.get("contrastSensitivity", 1), motor.get("pointerPrecision", .9), cognition.get("processingSpeed", .8), cognition.get("workingMemoryItems", 5), reading.get("wordsPerMinute", 220)]
+
+    def apply_persona_tweaks(profile_json, *values):
+        profile = json.loads(profile_json)
+        trait_values, ability_values = values[:len(behavior_sliders)], values[len(behavior_sliders):]
+        profile.setdefault("behavior", {}).update(dict(zip(behavior_sliders, trait_values)))
+        color, acuity, contrast, pointer, processing, memory, reading = ability_values
+        abilities = profile.setdefault("abilities", {})
+        abilities.setdefault("vision", {}).update(colorVision=color, acuity=acuity, contrastSensitivity=contrast)
+        abilities.setdefault("motor", {})["pointerPrecision"] = pointer
+        abilities.setdefault("cognition", {}).update(processingSpeed=processing, workingMemoryItems=int(memory))
+        abilities.setdefault("reading", {})["wordsPerMinute"] = int(reading)
+        return profile, json.dumps(profile, indent=2), "Tweaks applied locally. Save to persist them."
+
+    def save_manual_persona(profile_json, personas, index):
+        profile = json.loads(profile_json)
+        saved = persona_runtime.update(profile)
+        updated = list(personas or [])
+        updated[int(index or 0)] = saved
+        return saved, json.dumps(saved, indent=2), updated, f"Saved `{saved['id']}` as a manually edited profile."
+
     generate_btn.click(
         fn=handle_generate,
         inputs=[theme_input, profile_input, num_personas_input, persona_method, example_persona_select, url_input],
         outputs=[status_output, task_list_display, persona_display, last_generated_tasks_state]
-    )
+    ).then(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
+
+    refresh_personas_btn.click(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
+    persona_index.change(fn=load_persona, inputs=[persona_display, persona_index], outputs=studio_outputs)
+    apply_tweaks_btn.click(fn=apply_persona_tweaks, inputs=[persona_editor, *behavior_sliders.values(), color_vision, visual_acuity, contrast_sensitivity, pointer_precision, processing_speed, working_memory, reading_speed], outputs=[persona_view, persona_editor, persona_studio_status])
+    save_persona_btn.click(fn=save_manual_persona, inputs=[persona_editor, persona_display, persona_index], outputs=[persona_view, persona_editor, persona_display, persona_studio_status])
 
     start_session_btn.click(
         fn=start_and_monitor_sessions,
