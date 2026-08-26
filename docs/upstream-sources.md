@@ -55,17 +55,17 @@ https://github.com/JsonLord/TinyTroupe
 External Python dependency. Do not vendor.
 
 **Pinned commit:**
-`53a92ec2e47e9bc8fcf79d2dce6e65146ff513e7`
+`43d951eea015aea09972dc95537c9bbbc74ba207`
 
 **Branch:**
-`fix/jules-final-submission-branch`
+`main`
 
 **Usage:**
 Pin in `pyproject.toml`:
 
 ```toml
 dependencies = [
-    "tinytroupe @ git+https://github.com/JsonLord/TinyTroupe.git@53a92ec2e47e9bc8fcf79d2dce6e65146ff513e7"
+    "tinytroupe @ git+https://github.com/JsonLord/TinyTroupe.git@43d951eea015aea09972dc95537c9bbbc74ba207"
 ]
 ```
 
