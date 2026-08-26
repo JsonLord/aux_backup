@@ -13,6 +13,11 @@ profiles = persona_store_from_environment()
 identity = IdentityProvider(membership_store=profiles if hasattr(profiles, "upsert_workspace_membership") else None)
 
 
+def require_write(auth):
+    if auth.get("role", "owner") not in {"owner", "admin", "write", "contributor", "service"}:
+        raise HTTPException(403, "workspace role is read-only")
+
+
 @app.get("/healthz")
 def health():
     return {"status": "ok", "tinytroupeAvailable": generator.tinytroupe_available, "dspyAvailable": generator.compiler.dspy_available}
@@ -20,6 +25,7 @@ def health():
 
 @app.post("/v1/personas/generate", response_model=list[SyntheticUserProfile])
 def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
+    require_write(auth)
     generated = generator.generate(body.theme, body.customer_profile, body.count, body.scenario, body.seed)
     for item in generated:
         profiles.save(item, auth["workspace_id"], auth["owner_user_id"])
@@ -41,6 +47,7 @@ def get_persona(persona_id: str, auth=Depends(identity)):
 
 @app.patch("/v1/personas/{persona_id}", response_model=SyntheticUserProfile)
 def patch(persona_id: str, body: PersonaPatchRequest, auth=Depends(identity)):
+    require_write(auth)
     try:
         profiles.get_for_workspace(persona_id, auth["workspace_id"])
     except KeyError:

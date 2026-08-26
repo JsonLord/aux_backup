@@ -7,9 +7,18 @@ sdk: docker
 app_port: 7860
 pinned: false
 hf_oauth: true
+hf_oauth_scopes:
+  - openid
+  - profile
+hf_oauth_expiration_minutes: 480
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+The Space uses native HF OAuth for login and workspace discovery. External control
+plane and persona deployments must set `AUTH_MODE=hf_token`; see
+[`docs/hf-workspaces.md`](docs/hf-workspaces.md) for the identity, role, revocation,
+and PostgreSQL RLS flow.
 
 ## New control plane
 

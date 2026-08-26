@@ -14,6 +14,15 @@ def client(tmp_path: Path, legacy_provider=None):
     return TestClient(create_app(store, legacy_provider=legacy_provider)), store
 
 
+def test_read_only_workspace_role_cannot_mutate(tmp_path):
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    def viewer(): return {"workspace_id": "alpha", "owner_user_id": "user-a", "role": "read"}
+    api = TestClient(create_app(store, identity_provider=viewer))
+    assert api.get("/v1/me").status_code == 200
+    response = api.post("/v1/sessions", json={})
+    assert response.status_code == 403
+
+
 def test_health_session_job_idempotency_and_ordered_events(tmp_path):
     api, store = client(tmp_path)
     assert api.get("/healthz").status_code == 200

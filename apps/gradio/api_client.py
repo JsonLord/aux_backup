@@ -10,9 +10,16 @@ import requests
 
 
 class ControlPlaneClient:
-    def __init__(self, base_url: str | None = None, workspace_id: str | None = None, user_id: str | None = None):
+    def __init__(self, base_url: str | None = None, workspace_id: str | None = None, user_id: str | None = None, authorization: str | None = None):
         self.base_url = (base_url or os.getenv("CONTROL_PLANE_URL", "http://localhost:8000")).rstrip("/")
         self.headers = {"X-Workspace-ID": workspace_id or os.getenv("WORKSPACE_ID", "local"), "X-User-ID": user_id or os.getenv("OWNER_USER_ID", "local")}
+        authorization = authorization or os.getenv("CONTROL_PLANE_AUTHORIZATION")
+        if authorization: self.headers["Authorization"] = authorization
+
+    def me(self):
+        response = requests.get(f"{self.base_url}/v1/me", headers=self.headers, timeout=30)
+        response.raise_for_status()
+        return response.json()
 
     def create_session(self, metadata=None):
         response = requests.post(f"{self.base_url}/v1/sessions", headers=self.headers, json={"metadata": metadata or {}}, timeout=30)
@@ -80,10 +87,10 @@ class ControlPlaneClient:
 
 
 class PersonaRuntimeClient:
-    def __init__(self, base_url: str | None = None, workspace_id: str | None = None, user_id: str | None = None):
+    def __init__(self, base_url: str | None = None, workspace_id: str | None = None, user_id: str | None = None, authorization: str | None = None):
         self.base_url = (base_url or os.getenv("PERSONA_RUNTIME_URL", "http://localhost:8090")).rstrip("/")
         self.headers = {"X-Workspace-ID": workspace_id or os.getenv("WORKSPACE_ID", "local"), "X-User-ID": user_id or os.getenv("OWNER_USER_ID", "local")}
-        authorization = os.getenv("PERSONA_AUTHORIZATION") or (f"Bearer {os.environ['HF_OIDC_TOKEN']}" if os.getenv("HF_OIDC_TOKEN") else None)
+        authorization = authorization or os.getenv("PERSONA_AUTHORIZATION") or (f"Bearer {os.environ['HF_OIDC_TOKEN']}" if os.getenv("HF_OIDC_TOKEN") else None)
         if authorization: self.headers["Authorization"] = authorization
 
     def generate(self, theme, customer_profile, count, scenario="", seed=1):

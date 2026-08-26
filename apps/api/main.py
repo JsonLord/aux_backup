@@ -42,6 +42,10 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
             raise HTTPException(404, f"{noun} not found")
         return record
 
+    def require_write(auth):
+        if auth.get("role", "owner") not in {"owner", "admin", "write", "contributor", "service"}:
+            raise HTTPException(403, "workspace role is read-only")
+
     @app.get("/healthz")
     def health(): return {"status": "ok"}
 
@@ -62,6 +66,10 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
     def services():
         return {"services": [{"name": "control-plane", "version": app.version, "status": "ready", "storage": store.backend}], "placeholders": ["journey-worker", "eyeson-worker", "semantic-service"]}
 
+    @app.get("/v1/me")
+    def me(auth=Depends(identity)):
+        return {"user": auth.get("user", {"id": auth["owner_user_id"]}), "workspaces": auth.get("workspaces", [{"id": auth["workspace_id"], "name": auth["workspace_id"], "type": "local", "role": "owner"}]), "selected_workspace_id": auth["workspace_id"]}
+
     @app.get("/v1/legacy/github/branches")
     def legacy_branches(repository: str, auth=Depends(identity)):
         del auth
@@ -72,6 +80,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/legacy/github/import", status_code=201)
     def import_legacy(body: LegacyGitHubImport, auth=Depends(identity)):
+        require_write(auth)
         try:
             imported = legacy_provider.read_artifacts(body.repository, body.branch)
         except (requests.RequestException, ValueError) as exc:
@@ -86,7 +95,9 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
         return {"session": session, "artifact_ids": artifact_ids, "imported": len(artifact_ids), "read_only": True}
 
     @app.post("/v1/sessions", status_code=201)
-    def create_session(body: SessionCreate, auth=Depends(identity)): return store.create_session(body.model_dump() if hasattr(body, "model_dump") else body.dict(), **auth)
+    def create_session(body: SessionCreate, auth=Depends(identity)):
+        require_write(auth)
+        return store.create_session(body.model_dump() if hasattr(body, "model_dump") else body.dict(), workspace_id=auth["workspace_id"], owner_user_id=auth["owner_user_id"])
 
     @app.get("/v1/sessions")
     def list_sessions(auth=Depends(identity)): return {"items": store.list_sessions(auth["workspace_id"])}
@@ -96,6 +107,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.delete("/v1/sessions/{session_id}", status_code=204)
     def delete_session(session_id: str, auth=Depends(identity)):
+        require_write(auth)
         authorized(store.get_session(session_id), auth, "session")
         store.delete_session(session_id)
 
@@ -111,6 +123,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/jobs", status_code=202)
     def create_job(body: JobCreate, response: Response, background_tasks: BackgroundTasks, auth=Depends(identity)):
+        require_write(auth)
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         authorized(store.get_session(payload["session_id"]), auth, "session")
         record, created = store.create_job(payload)
@@ -137,6 +150,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/jobs/{job_id}/cancel", status_code=202)
     def cancel_job(job_id: str, auth=Depends(identity)):
+        require_write(auth)
         job = authorized(store.get_job(job_id), auth, "job")
         if job["status"] in ("succeeded", "failed", "cancelled"):
             raise HTTPException(409, "terminal jobs cannot be cancelled")
@@ -146,6 +160,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/jobs/{job_id}/retry", status_code=202)
     def retry_job(job_id: str, background_tasks: BackgroundTasks, auth=Depends(identity)):
+        require_write(auth)
         job = authorized(store.get_job(job_id), auth, "job")
         if job["status"] not in ("failed", "cancelled"):
             raise HTTPException(409, "only failed or cancelled jobs can be retried")
@@ -175,6 +190,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/artifacts", status_code=201)
     def create_artifact(body: ArtifactCreate, auth=Depends(identity)):
+        require_write(auth)
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         authorized(store.get_session(payload["session_id"]), auth, "session")
         return store.create_artifact(payload)
@@ -193,6 +209,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/artifacts/uploads", status_code=201)
     def create_upload(body: PresignedArtifactCreate, auth=Depends(identity)):
+        require_write(auth)
         payload = body.model_dump()
         authorized(store.get_session(payload["session_id"]), auth, "session")
         storage = getattr(store, "artifact_storage", None)
@@ -207,6 +224,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/artifacts/{artifact_id}/uploads/parts/{part_number}")
     def presign_part(artifact_id: str, part_number: int, upload_id: str, auth=Depends(identity)):
+        require_write(auth)
         artifact = authorized(store.get_artifact(artifact_id), auth, "artifact")
         storage = getattr(store, "artifact_storage", None)
         if not storage or storage.backend != "r2": raise HTTPException(409, "multipart uploads require R2")
@@ -214,6 +232,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/artifacts/{artifact_id}/uploads/complete")
     def complete_upload(artifact_id: str, body: MultipartComplete, auth=Depends(identity)):
+        require_write(auth)
         artifact = authorized(store.get_artifact(artifact_id), auth, "artifact")
         storage = getattr(store, "artifact_storage", None)
         if not storage or storage.backend != "r2": raise HTTPException(409, "multipart uploads require R2")
@@ -227,6 +246,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.patch("/v1/artifacts/{artifact_id}/pin")
     def pin_artifact(artifact_id: str, body: ArtifactPin, auth=Depends(identity)):
+        require_write(auth)
         authorized(store.get_artifact(artifact_id), auth, "artifact")
         return store.pin_artifact(artifact_id, body.pinned)
 

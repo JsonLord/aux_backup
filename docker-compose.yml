@@ -4,10 +4,12 @@ services:
       context: .
       dockerfile: infrastructure/docker/control-plane.Dockerfile
     environment:
-      DATABASE_URL: postgresql+psycopg://aux:aux@postgres:5432/aux
+      DATABASE_URL: postgresql+psycopg://aux_app:aux-app-development-secret@postgres:5432/aux
+      MIGRATION_DATABASE_URL: postgresql+psycopg://aux:aux@postgres:5432/aux
       JOB_QUEUE: celery
       REDIS_URL: redis://redis:6379/0
       AUTH_MODE: ${AUTH_MODE:-local}
+      HF_OIDC_USERINFO_URL: ${HF_OIDC_USERINFO_URL:-https://huggingface.co/oauth/userinfo}
       ARTIFACT_STORAGE: r2
       R2_ENDPOINT_URL: http://minio:9000
       R2_PUBLIC_ENDPOINT_URL: http://localhost:9000
@@ -15,7 +17,7 @@ services:
       R2_SECRET_ACCESS_KEY: aux-development-secret
       R2_BUCKET: artifacts
       JOURNEY_WORKER_URL: http://journey-worker:8080
-    command: ["sh", "-c", "alembic upgrade head && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"]
+    command: ["sh", "-c", "DATABASE_URL=$$MIGRATION_DATABASE_URL alembic upgrade head && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"]
     depends_on:
       postgres: {condition: service_healthy}
       redis: {condition: service_healthy}
@@ -38,10 +40,11 @@ services:
       SEMANTIC_ENGINE: ${SEMANTIC_ENGINE:-mock}
       BLABLADOR_API_KEY: ${BLABLADOR_API_KEY:-}
       PERSONA_DATABASE_PATH: /data/personas.db
-      PERSONA_DATABASE_URL: postgresql+psycopg://aux:aux@postgres:5432/aux
+      PERSONA_DATABASE_URL: postgresql+psycopg://aux_app:aux-app-development-secret@postgres:5432/aux
       AUTH_MODE: ${AUTH_MODE:-local}
       HF_OIDC_AUDIENCE: ${HF_OIDC_AUDIENCE:-}
       HF_OIDC_JWKS_URL: ${HF_OIDC_JWKS_URL:-}
+      HF_OIDC_USERINFO_URL: ${HF_OIDC_USERINFO_URL:-https://huggingface.co/oauth/userinfo}
     volumes: ["platform-data:/data"]
     ports: ["8090:8090"]
     depends_on:
@@ -51,7 +54,7 @@ services:
     build: {context: ., dockerfile: infrastructure/docker/control-plane.Dockerfile}
     command: ["celery", "-A", "apps.api.tasks:celery_app", "worker", "--loglevel=INFO", "-Q", "jobs"]
     environment: &production-env
-      DATABASE_URL: postgresql+psycopg://aux:aux@postgres:5432/aux
+      DATABASE_URL: postgresql+psycopg://aux_worker:aux-worker-development-secret@postgres:5432/aux
       JOB_QUEUE: celery
       REDIS_URL: redis://redis:6379/0
       ARTIFACT_STORAGE: r2
@@ -76,6 +79,9 @@ services:
     image: postgres:17-alpine
     environment: {POSTGRES_DB: aux, POSTGRES_USER: aux, POSTGRES_PASSWORD: aux}
     volumes: ["postgres-data:/var/lib/postgresql/data"]
+    configs:
+      - source: postgres-init
+        target: /docker-entrypoint-initdb.d/001-roles.sql
     healthcheck: {test: ["CMD-SHELL", "pg_isready -U aux"], interval: 5s, timeout: 3s, retries: 20}
   redis:
     image: redis:8-alpine
@@ -97,3 +103,6 @@ volumes:
   postgres-data:
   redis-data:
   object-data:
+configs:
+  postgres-init:
+    file: ./infrastructure/postgres/init.sql

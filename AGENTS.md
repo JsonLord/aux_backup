@@ -19,6 +19,7 @@ Treat `spec.md` as the architectural contract and deliver it in the numbered sta
 - The semantic compiler boundary now selects the direct OpenAI-compatible Blablador `alias-huge` baseline when credentials are present and a deterministic mock in CI/offline environments. DSPy stays gated behind parity evaluation.
 - Stage 1 production-adapter implementation is complete: PostgreSQL/Alembic, Redis/Celery execution and retention, verified HF OIDC roles/service credentials, R2 storage/presigned multipart flows, Compose services, and a production-stack acceptance test exist. Formal acceptance remains pending execution of that test in a Docker-enabled runner; see `docs/stage-1-audit.md`.
 - Read-only legacy GitHub branch discovery/import now ingests bounded historical report/evidence artifacts into tenant-owned sessions without rerunning or writing to GitHub. Local artifacts now receive 30/180-day expiration metadata, support pinning, and can be swept when expired.
+- Native HF Space OAuth is now wired into Gradio through `LoginButton`, per-callback OAuth profile/token injection, namespaced personal/organization workspace selection, `/v1/me`, live HF userinfo revalidation, persisted membership refresh/revocation, role-aware writes, and PostgreSQL RLS. Local header identity remains explicit development-only behavior.
 - Jules is no longer in the root application's runtime path. Historical MCP helpers, connectivity scripts, API notes, templates, and imported upstream references still need archival or removal.
 
 ## Open questions
@@ -53,3 +54,11 @@ offline generator explicitly labeled as a fallback.
 - Human-review all 100 `semantic_parity_v1.jsonl` candidates, generate and commit the
   Python 3.12 `uv.lock`, then run the frozen direct-versus-DSPy 3.3.0 parity report.
   DSPy must not become the default before that report is approved.
+
+### HF workspace acceptance
+
+In a deployed HF Space, validate login, logout, token expiry, personal workspace
+selection, organization role mapping, security-restricted organization exclusion, and
+membership removal. Configure the external APIs with `AUTH_MODE=hf_token`; do not use
+`AUTH_MODE=local` outside development. Run the two-user isolation test against a
+non-superuser PostgreSQL connection so the committed RLS policies are exercised.

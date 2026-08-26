@@ -21,7 +21,12 @@ class PostgresStore:
         self._row_factory = dict_row
 
     def connect(self):
-        return self._psycopg.connect(self.database_url, row_factory=self._row_factory)
+        from .tenant import current_workspace
+        connection = self._psycopg.connect(self.database_url, row_factory=self._row_factory)
+        workspace = current_workspace()
+        if workspace:
+            connection.execute("SELECT set_config('app.workspace_id', %s, false)", (workspace,))
+        return connection
 
     def ping(self):
         with self.connect() as db, db.cursor() as cursor: cursor.execute("SELECT 1")
@@ -194,6 +199,16 @@ class PostgresStore:
 
     def workspace_member(self, workspace_id, user_id):
         return self._one("SELECT * FROM workspace_memberships WHERE workspace_id=%s AND user_id=%s", (workspace_id, user_id))
+
+    def sync_hf_identity(self, user, workspaces):
+        now = self.now()
+        with self.connect() as db, db.cursor() as cursor:
+            cursor.execute("INSERT INTO users (user_id,username,display_name,picture,last_verified_at) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (user_id) DO UPDATE SET username=EXCLUDED.username,display_name=EXCLUDED.display_name,picture=EXCLUDED.picture,last_verified_at=EXCLUDED.last_verified_at", (user["id"], user.get("username"), user.get("name"), user.get("picture"), now))
+            cursor.execute("UPDATE workspace_memberships SET active=false WHERE user_id=%s AND source='hf'", (user["id"],))
+            for workspace in workspaces:
+                provider_ref = workspace["id"].split(":", 2)[-1]
+                cursor.execute("INSERT INTO workspaces (workspace_id,workspace_type,name,provider_ref,updated_at) VALUES (%s,%s,%s,%s,%s) ON CONFLICT (workspace_id) DO UPDATE SET name=EXCLUDED.name,updated_at=EXCLUDED.updated_at", (workspace["id"], workspace["type"], workspace["name"], provider_ref, now))
+                cursor.execute("INSERT INTO workspace_memberships (workspace_id,user_id,role,verified_at,source,active) VALUES (%s,%s,%s,%s,'hf',true) ON CONFLICT (workspace_id,user_id) DO UPDATE SET role=EXCLUDED.role,verified_at=EXCLUDED.verified_at,source='hf',active=true", (workspace["id"], user["id"], workspace["role"], now))
 
     def create_service_credential(self, name, workspace_ids):
         credential_id, secret, salt = f"svc_{uuid4().hex}", os.urandom(32).hex(), os.urandom(16)
