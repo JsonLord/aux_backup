@@ -1,6 +1,10 @@
+import pytest
 from fastapi.testclient import TestClient
+from pydantic import ValidationError
 
+from services.persona_service.compiler import PersonaCompiler, TRAITS
 from services.persona_service.main import app, profiles
+from services.persona_service.models import BehaviorProfile
 from services.persona_service.semantic import DirectLLMSemanticEngine, MockSemanticEngine
 from services.persona_service.store import PersonaStore
 from services.persona_service.generator import TinyTroupeGenerator
@@ -84,3 +88,35 @@ def test_direct_engine_normalizes_provider_response(monkeypatch):
     monkeypatch.setattr("services.persona_service.semantic.requests.post", lambda *args, **kwargs: Response())
     engine = DirectLLMSemanticEngine(api_key="fixture", base_url="https://provider.invalid")
     assert engine.compile_behavior({"name": "Ada"}, "checkout", ("patience",), 9) == {"patience": 1.0}
+
+
+def test_compiled_profile_validates_exact_behavior_schema(monkeypatch):
+    monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
+    compiled = PersonaCompiler().compile({"name": "Ada"}, "checkout", 9)
+    validated = BehaviorProfile.model_validate(compiled)
+    assert set(validated.model_dump()) == {"seed", *TRAITS}
+    assert validated.seed == 9
+    with pytest.raises(ValidationError):
+        BehaviorProfile.model_validate({**compiled, "unversionedTrait": .5})
+
+
+def test_generation_compiles_and_persists_once(monkeypatch):
+    generator = TinyTroupeGenerator()
+    calls = 0
+    original = generator.compiler.compile_with_metadata
+
+    def counted(*args, **kwargs):
+        nonlocal calls
+        calls += 1
+        return original(*args, **kwargs)
+
+    monkeypatch.setattr(generator.compiler, "compile_with_metadata", counted)
+    profile = generator.generate("checkout", "customers", 1, "Buy", 31)[0]
+    assert calls == 1
+    assert BehaviorProfile.model_validate(profile["behavior"])
+    assert profile["generation"]["compilerVersion"].startswith("persona-compiler-v1/")
+    store = PersonaStore(":memory:")
+    store.save(profile)
+    assert store[profile["id"]]["behavior"] == profile["behavior"]
+    assert calls == 1
+    store.close()
