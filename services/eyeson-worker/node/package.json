@@ -1,0 +1,7 @@
+{
+  "name": "@aux/eyeson-worker",
+  "version": "0.1.0",
+  "private": true,
+  "engines": {"node": ">=24"},
+  "scripts": {"check": "node --check src/index.js && node --check src/painResolver.js && node --check src/alternatives.js && node --check src/knowledge.js && node --check src/aggregate.js && node --check src/enricher.js && node --check src/report.js && node --check src/scheduler.js && node --check src/lineage.js && node --check src/observability.js && node --check src/privacy.js", "start": "node src/index.js", "test": "node --test test/*.test.js"}
+}

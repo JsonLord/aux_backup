@@ -30,7 +30,16 @@ services:
       dockerfile: infrastructure/docker/journey-worker.Dockerfile
     environment:
       JOURNEY_ENGINE: journeytest
+      EYESON_WORKER_URL: http://eyeson-worker:8081
     ports: ["8080:8080"]
+    depends_on:
+      eyeson-worker: {condition: service_healthy}
+  eyeson-worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/eyeson-worker.Dockerfile
+    ports: ["8081:8081"]
+    healthcheck: {test: ["CMD", "node", "-e", "fetch('http://localhost:8081/healthz').then(r=>{if(!r.ok)process.exit(1)})"], interval: 5s, timeout: 3s, retries: 20}
   persona-runtime:
     build:
       context: .

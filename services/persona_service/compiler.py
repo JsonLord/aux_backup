@@ -7,9 +7,12 @@ from __future__ import annotations
 
 import importlib
 import importlib.util
+import math
 import os
+from dataclasses import dataclass
 from typing import Any
 
+from .models import BehaviorProfile
 from .semantic import semantic_engine
 
 
@@ -22,13 +25,25 @@ TRAITS = (
 
 
 def _bounded(value: Any) -> float:
-    return round(max(0.0, min(1.0, float(value))), 3)
+    numeric = float(value)
+    if not math.isfinite(numeric):
+        raise ValueError("behavior traits must be finite numbers")
+    return round(max(0.0, min(1.0, numeric)), 3)
+
+
+@dataclass(frozen=True)
+class CompilationResult:
+    profile: BehaviorProfile
+    compiler_version: str
 
 
 class PersonaCompiler:
-    version = "deterministic-1.0"
+    version = "persona-compiler-v1"
 
     def compile(self, persona: dict[str, Any], scenario: str, seed: int) -> dict[str, Any]:
+        return self.compile_with_metadata(persona, scenario, seed).profile.model_dump()
+
+    def compile_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int) -> CompilationResult:
         if os.getenv("PERSONA_COMPILER", "native") == "dspy":
             if not self.dspy_available:
                 raise RuntimeError("PERSONA_COMPILER=dspy but DSPy is not installed")
@@ -36,13 +51,13 @@ class PersonaCompiler:
             prediction = program(tiny_person=persona, scenario=scenario)
             key_map = {"angerReactivity": "anger_reactivity", "angerRecovery": "anger_recovery", "ambiguityTolerance": "ambiguity_tolerance", "failureTolerance": "failure_tolerance", "repeatFailureTolerance": "repeat_failure_tolerance", "selfEfficacy": "self_efficacy", "digitalConfidence": "digital_confidence", "helpSeeking": "help_seeking", "verificationTendency": "verification_tendency", "riskTolerance": "risk_tolerance"}
             values = {trait: _bounded(getattr(prediction, key_map.get(trait, trait))) for trait in TRAITS}
-            values.update(seed=seed, compiler="dspy-predict", scenario=scenario)
-            return values
+            values["seed"] = seed
+            return CompilationResult(BehaviorProfile.model_validate(values), "dspy-predict@3.3.0")
         # PLACEHOLDER: DSPy remains gated until the reviewed parity corpus is complete.
         engine = semantic_engine()
         values = {trait: _bounded(value) for trait, value in engine.compile_behavior(persona, scenario, TRAITS, seed).items()}
-        values.update(seed=seed, compiler=engine.name, scenario=scenario)
-        return values
+        values["seed"] = seed
+        return CompilationResult(BehaviorProfile.model_validate(values), engine.name)
 
     @property
     def dspy_available(self) -> bool:

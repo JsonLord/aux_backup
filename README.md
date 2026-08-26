@@ -65,3 +65,17 @@ selected profile into an immutable `persona.profile` artifact; the job, Journey 
 result, persisted report, and Live Monitoring all reference or render that exact
 snapshot. Validate the pinned TinyTroupe package path separately with
 `RUN_TINY_TROUPE_ACCEPTANCE=1 pytest -q tests/integration/test_tinytroupe_runtime.py`.
+
+## Self-contained Docker Space demo
+
+`spaces/aux-demo` is a small local-folder demo that can be deployed independently of
+the unfinished live-browser stack. It is explicitly labeled as an offline contract
+preview. With a write-scoped Hugging Face token, create/update the Space and print its
+build/runtime logs with:
+
+```bash
+HF_TOKEN=hf_... python scripts/deploy_hf_space.py YOUR_NAMESPACE/aux-synthetic-ux-demo
+```
+
+See [`docs/hf-space-demo.md`](docs/hf-space-demo.md) for limitations and deployment
+details.

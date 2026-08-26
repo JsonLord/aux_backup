@@ -78,6 +78,10 @@ class TinyTroupeGenerator:
         raise RuntimeError("TinyTroupe TinyPerson exposes no supported serialization method")
 
     def _profile(self, persona, scenario, seed, model):
+        # Compilation happens exactly once for this new synthetic user. The validated
+        # result is embedded in the durable profile rather than recomputed per run.
+        compilation = self.compiler.compile_with_metadata(persona, scenario, seed)
         return {"id": f"persona_{uuid4().hex}", "source": "tinytroupe", "persona": persona,
-                "abilities": default_abilities(), "behavior": self.compiler.compile(persona, scenario, seed),
-                "generation": {"seed": seed, "model": model, "compilerVersion": self.compiler.version}}
+                "abilities": default_abilities(), "behavior": compilation.profile.model_dump(),
+                "generation": {"seed": seed, "model": model,
+                               "compilerVersion": f"{self.compiler.version}/{compilation.compiler_version}"}}
