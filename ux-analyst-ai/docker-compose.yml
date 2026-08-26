@@ -1,0 +1,46 @@
+version: '3.8'
+
+services:
+  ux-analyst-ai:
+    build: .
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=production
+      - PORT=3000
+      - DATABASE_URL=sqlite:./data/uxanalyst.db
+      - SCREENSHOT_STORAGE_PATH=./data/screenshots
+      - MAX_CONCURRENT_ANALYSES=3
+      - ANALYSIS_TIMEOUT_MS=300000
+      - DEFAULT_VIEWPORT_WIDTH=1920
+      - DEFAULT_VIEWPORT_HEIGHT=1080
+      - RATE_LIMIT_WINDOW_MS=900000
+      - RATE_LIMIT_MAX_REQUESTS=10
+      # Set your Gemini API key here or via .env file
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - GEMINI_MODEL=gemini-1.5-flash
+    volumes:
+      - ux_data:/app/data
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "node", "-e", "require('http').get('http://localhost:3000/api/health', (res) => { process.exit(res.statusCode === 200 ? 0 : 1) })"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Optional: Add a reverse proxy
+  nginx:
+    image: nginx:alpine
+    ports:
+      - "80:80"
+    volumes:
+      - ./nginx.conf:/etc/nginx/nginx.conf:ro
+    depends_on:
+      - ux-analyst-ai
+    restart: unless-stopped
+    profiles: ["with-proxy"]
+
+volumes:
+  ux_data:
+    driver: local

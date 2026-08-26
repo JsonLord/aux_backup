@@ -1,0 +1,21 @@
+{
+  "name": "ux-analyst-ai",
+  "version": "1.0.0",
+  "description": "AI-powered UX analysis tool that provides instant expert-level feedback on website design and usability",
+  "main": "backend/server.js",
+  "scripts": {
+    "dev": "concurrently \"npm run dev:backend\" \"npm run dev:frontend\"",
+    "dev:backend": "cd backend && npm run dev",
+    "dev:frontend": "cd frontend && npm run dev",
+    "start": "cd backend && npm start",
+    "build": "cd frontend && npm run build",
+    "test": "cd backend && npm test",
+    "install:all": "npm install && cd backend && npm install && cd ../frontend && npm install"
+  },
+  "keywords": ["ux", "ai", "analysis", "accessibility", "claude", "puppeteer"],
+  "author": "",
+  "license": "MIT",
+  "devDependencies": {
+    "concurrently": "^8.2.2"
+  }
+}
