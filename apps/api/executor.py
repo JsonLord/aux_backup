@@ -19,8 +19,8 @@ class JobExecutor:
         self.store = store
 
     def run(self, job_id: str) -> None:
-        job = self.store.get_job(job_id)
-        if not job or job["status"] != "queued":
+        job = self.store.claim_job(job_id)
+        if not job:
             return
         dependencies = [self.store.get_job(item) for item in job["depends_on"]]
         if any(item is None or item["status"] != "succeeded" for item in dependencies):
@@ -59,10 +59,15 @@ class JobExecutor:
 
     def _combined_test(self, job: dict[str, Any]) -> dict[str, Any]:
         data = job["metadata"]
-        personas, tasks = data.get("personas", []), data.get("tasks", [])
+        persona_artifacts, tasks = data.get("persona_artifacts", []), data.get("tasks", [])
+        personas = []
+        for artifact_id in persona_artifacts:
+            artifact = self.store.get_artifact(artifact_id)
+            if not artifact or artifact["session_id"] != job["session_id"] or artifact["kind"] != "persona.profile":
+                raise ValueError(f"invalid persona profile artifact: {artifact_id}")
+            personas.append(json.loads(self.store.read_artifact(artifact_id)))
         if not personas or not tasks:
-            raise ValueError("combined_test requires non-empty metadata.personas and metadata.tasks")
-        names = [p.get("persona", {}).get("name", p.get("name", "Synthetic user")) for p in personas]
+            raise ValueError("combined_test requires persona profile artifacts and non-empty metadata.tasks")
         journeys = []
         worker_url = os.getenv("JOURNEY_WORKER_URL")
         if worker_url:
@@ -72,7 +77,7 @@ class JobExecutor:
                 with request.urlopen(call, timeout=120) as response:
                     journeys.append(json.loads(response.read()))
         findings = [{"severity": "medium", "title": f"Validate task clarity: {task}", "evidence": "Inferred from the configured task; browser evidence is pending JourneyTest integration."} for task in tasks]
-        return {"schema_version": "1.0", "mode": "user_journey", "url": data.get("url"), "executive_summary": f"Prepared {len(tasks)} task scenarios for {len(personas)} synthetic users.", "synthetic_users": names, "journey_outcome": {"status": "simulated" if journeys else "configured", "tasks": tasks, "runs": journeys}, "critical_pain_points": findings, "evidence_language": "inferred", "limitations": ["PLACEHOLDER: live JourneyTest browser evidence is not yet connected."]}
+        return {"schema_version": "1.0", "mode": "user_journey", "url": data.get("url"), "executive_summary": f"Prepared {len(tasks)} task scenarios for {len(personas)} synthetic users.", "synthetic_users": personas, "persona_artifacts": persona_artifacts, "journey_outcome": {"status": "simulated" if journeys else "configured", "tasks": tasks, "runs": journeys}, "critical_pain_points": findings, "evidence_language": "inferred", "limitations": ["PLACEHOLDER: live JourneyTest browser evidence is not yet connected."]}
 
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]

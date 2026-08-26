@@ -1,7 +1,7 @@
 FROM python:3.12-slim
 WORKDIR /app
 COPY pyproject.toml ./
-RUN pip install --no-cache-dir .
+RUN pip install --no-cache-dir '.[production]'
 COPY services/persona_service/requirements.lock ./persona-requirements.lock
 RUN pip install --no-cache-dir -r persona-requirements.lock
 COPY services ./services

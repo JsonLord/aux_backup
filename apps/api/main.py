@@ -2,20 +2,23 @@
 import asyncio
 import base64
 import json
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Response, status
-from fastapi.responses import FileResponse, StreamingResponse
+from fastapi.responses import FileResponse, RedirectResponse, StreamingResponse
 import requests
 
+from .auth import IdentityProvider
 from .executor import JobExecutor
 from .legacy import LegacyGitHubSessionProvider
-from .models import ArtifactCreate, ArtifactPin, JobCreate, LegacyGitHubImport, SessionCreate
-from .store import Store
+from .models import ArtifactCreate, ArtifactPin, JobCreate, LegacyGitHubImport, MultipartComplete, PresignedArtifactCreate, SessionCreate
+from .queue import job_queue
+from .store import Store, create_store
 
 
-def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionProvider | None = None) -> FastAPI:
-    store = store or Store()
+def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionProvider | None = None, identity_provider=None) -> FastAPI:
+    store = store or create_store()
     legacy_provider = legacy_provider or LegacyGitHubSessionProvider()
 
     @asynccontextmanager
@@ -26,14 +29,12 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
     app = FastAPI(title="Synthetic UX Testing Platform", version="0.1.0", lifespan=lifespan)
     app.state.store = store
     executor = JobExecutor(store)
+    identity = identity_provider or IdentityProvider(membership_store=store if store.backend == "postgresql" else None)
 
     def required(value, noun):
         if value is None:
             raise HTTPException(404, f"{noun} not found")
         return value
-
-    def identity(x_workspace_id: str = Header("local", alias="X-Workspace-ID"), x_user_id: str = Header("local", alias="X-User-ID")):
-        return {"workspace_id": x_workspace_id, "owner_user_id": x_user_id}
 
     def authorized(record, auth, noun):
         record = required(record, noun)
@@ -41,15 +42,33 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
             raise HTTPException(404, f"{noun} not found")
         return record
 
+    def require_write(auth):
+        if auth.get("role", "owner") not in {"owner", "admin", "write", "contributor", "service"}:
+            raise HTTPException(403, "workspace role is read-only")
+
     @app.get("/healthz")
     def health(): return {"status": "ok"}
 
     @app.get("/readyz")
-    def ready(): return {"status": "ready", "storage": "sqlite"}
+    def ready():
+        try:
+            store.ping()
+            artifact_storage = getattr(store, "artifact_storage", None)
+            if artifact_storage: artifact_storage.ping()
+            if store.backend == "postgresql" and os.getenv("JOB_QUEUE") == "celery":
+                from redis import Redis
+                Redis.from_url(os.environ["REDIS_URL"]).ping()
+        except Exception as error:
+            raise HTTPException(503, "production dependency is unavailable") from error
+        return {"status": "ready", "storage": store.backend, "artifacts": getattr(getattr(store, "artifact_storage", None), "backend", "filesystem")}
 
     @app.get("/v1/system/services")
     def services():
-        return {"services": [{"name": "control-plane", "version": app.version, "status": "ready"}], "placeholders": ["postgresql", "redis", "journey-worker", "eyeson-worker", "persona-service", "semantic-service"]}
+        return {"services": [{"name": "control-plane", "version": app.version, "status": "ready", "storage": store.backend}], "placeholders": ["journey-worker", "eyeson-worker", "semantic-service"]}
+
+    @app.get("/v1/me")
+    def me(auth=Depends(identity)):
+        return {"user": auth.get("user", {"id": auth["owner_user_id"]}), "workspaces": auth.get("workspaces", [{"id": auth["workspace_id"], "name": auth["workspace_id"], "type": "local", "role": "owner"}]), "selected_workspace_id": auth["workspace_id"]}
 
     @app.get("/v1/legacy/github/branches")
     def legacy_branches(repository: str, auth=Depends(identity)):
@@ -61,6 +80,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/legacy/github/import", status_code=201)
     def import_legacy(body: LegacyGitHubImport, auth=Depends(identity)):
+        require_write(auth)
         try:
             imported = legacy_provider.read_artifacts(body.repository, body.branch)
         except (requests.RequestException, ValueError) as exc:
@@ -75,13 +95,19 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
         return {"session": session, "artifact_ids": artifact_ids, "imported": len(artifact_ids), "read_only": True}
 
     @app.post("/v1/sessions", status_code=201)
-    def create_session(body: SessionCreate, auth=Depends(identity)): return store.create_session(body.model_dump() if hasattr(body, "model_dump") else body.dict(), **auth)
+    def create_session(body: SessionCreate, auth=Depends(identity)):
+        require_write(auth)
+        return store.create_session(body.model_dump() if hasattr(body, "model_dump") else body.dict(), workspace_id=auth["workspace_id"], owner_user_id=auth["owner_user_id"])
+
+    @app.get("/v1/sessions")
+    def list_sessions(auth=Depends(identity)): return {"items": store.list_sessions(auth["workspace_id"])}
 
     @app.get("/v1/sessions/{session_id}")
     def get_session(session_id: str, auth=Depends(identity)): return authorized(store.get_session(session_id), auth, "session")
 
     @app.delete("/v1/sessions/{session_id}", status_code=204)
     def delete_session(session_id: str, auth=Depends(identity)):
+        require_write(auth)
         authorized(store.get_session(session_id), auth, "session")
         store.delete_session(session_id)
 
@@ -97,13 +123,14 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/jobs", status_code=202)
     def create_job(body: JobCreate, response: Response, background_tasks: BackgroundTasks, auth=Depends(identity)):
+        require_write(auth)
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         authorized(store.get_session(payload["session_id"]), auth, "session")
         record, created = store.create_job(payload)
         if not created:
             response.status_code = status.HTTP_200_OK
         else:
-            background_tasks.add_task(executor.run, record["job_id"])
+            job_queue(executor, background_tasks).enqueue(record["job_id"])
         return record
 
     @app.get("/v1/jobs/{job_id}")
@@ -123,6 +150,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/jobs/{job_id}/cancel", status_code=202)
     def cancel_job(job_id: str, auth=Depends(identity)):
+        require_write(auth)
         job = authorized(store.get_job(job_id), auth, "job")
         if job["status"] in ("succeeded", "failed", "cancelled"):
             raise HTTPException(409, "terminal jobs cannot be cancelled")
@@ -132,12 +160,13 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/jobs/{job_id}/retry", status_code=202)
     def retry_job(job_id: str, background_tasks: BackgroundTasks, auth=Depends(identity)):
+        require_write(auth)
         job = authorized(store.get_job(job_id), auth, "job")
         if job["status"] not in ("failed", "cancelled"):
             raise HTTPException(409, "only failed or cancelled jobs can be retried")
         store.update_job(job_id, "queued", attempt=job["attempt"] + 1, started_at=None, ended_at=None, error=None)
         store.event(job_id, "job.retried", 0, {"attempt": job["attempt"] + 1})
-        background_tasks.add_task(executor.run, job_id)
+        job_queue(executor, background_tasks).enqueue(job_id)
         return store.get_job(job_id)
 
     @app.get("/v1/jobs/{job_id}/events")
@@ -161,6 +190,7 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
 
     @app.post("/v1/artifacts", status_code=201)
     def create_artifact(body: ArtifactCreate, auth=Depends(identity)):
+        require_write(auth)
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         authorized(store.get_session(payload["session_id"]), auth, "session")
         return store.create_artifact(payload)
@@ -172,10 +202,51 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
     @app.get("/v1/artifacts/{artifact_id}/content")
     def artifact_content(artifact_id: str, auth=Depends(identity)):
         artifact = authorized(store.get_artifact(artifact_id), auth, "artifact")
+        storage = getattr(store, "artifact_storage", None)
+        if storage and storage.backend == "r2":
+            return RedirectResponse(storage.presign_download(artifact["path"]), status_code=307)
         return FileResponse(artifact["path"], media_type=artifact["content_type"])
+
+    @app.post("/v1/artifacts/uploads", status_code=201)
+    def create_upload(body: PresignedArtifactCreate, auth=Depends(identity)):
+        require_write(auth)
+        payload = body.model_dump()
+        authorized(store.get_session(payload["session_id"]), auth, "session")
+        storage = getattr(store, "artifact_storage", None)
+        if not storage or storage.backend != "r2" or not hasattr(store, "reserve_artifact"):
+            raise HTTPException(409, "presigned uploads require the R2 production adapter")
+        artifact = store.reserve_artifact(payload)
+        if body.multipart:
+            upload_id = storage.create_multipart(artifact["path"], body.content_type)
+            return {"artifact": artifact, "multipart": True, "upload_id": upload_id}
+        upload = storage.presign_upload(auth["workspace_id"], body.session_id, artifact["artifact_id"], body.size, body.content_type)
+        return {"artifact": artifact, "multipart": False, "upload": storage.response(upload)}
+
+    @app.post("/v1/artifacts/{artifact_id}/uploads/parts/{part_number}")
+    def presign_part(artifact_id: str, part_number: int, upload_id: str, auth=Depends(identity)):
+        require_write(auth)
+        artifact = authorized(store.get_artifact(artifact_id), auth, "artifact")
+        storage = getattr(store, "artifact_storage", None)
+        if not storage or storage.backend != "r2": raise HTTPException(409, "multipart uploads require R2")
+        return {"part_number": part_number, "url": storage.presign_part(artifact["path"], upload_id, part_number)}
+
+    @app.post("/v1/artifacts/{artifact_id}/uploads/complete")
+    def complete_upload(artifact_id: str, body: MultipartComplete, auth=Depends(identity)):
+        require_write(auth)
+        artifact = authorized(store.get_artifact(artifact_id), auth, "artifact")
+        storage = getattr(store, "artifact_storage", None)
+        if not storage or storage.backend != "r2": raise HTTPException(409, "multipart uploads require R2")
+        if body.upload_id:
+            if not body.parts: raise HTTPException(422, "multipart completion requires parts")
+            storage.complete_multipart(artifact["path"], body.upload_id, [item.model_dump() for item in body.parts])
+        expected = artifact["metadata"].get("expected_size")
+        if expected is not None and storage.size(artifact["path"]) != expected:
+            raise HTTPException(409, "uploaded object size does not match reservation")
+        return store.complete_artifact_upload(artifact_id)
 
     @app.patch("/v1/artifacts/{artifact_id}/pin")
     def pin_artifact(artifact_id: str, body: ArtifactPin, auth=Depends(identity)):
+        require_write(auth)
         authorized(store.get_artifact(artifact_id), auth, "artifact")
         return store.pin_artifact(artifact_id, body.pinned)
 

@@ -14,6 +14,15 @@ def client(tmp_path: Path, legacy_provider=None):
     return TestClient(create_app(store, legacy_provider=legacy_provider)), store
 
 
+def test_read_only_workspace_role_cannot_mutate(tmp_path):
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    def viewer(): return {"workspace_id": "alpha", "owner_user_id": "user-a", "role": "read"}
+    api = TestClient(create_app(store, identity_provider=viewer))
+    assert api.get("/v1/me").status_code == 200
+    response = api.post("/v1/sessions", json={})
+    assert response.status_code == 403
+
+
 def test_health_session_job_idempotency_and_ordered_events(tmp_path):
     api, store = client(tmp_path)
     assert api.get("/healthz").status_code == 200
@@ -42,10 +51,12 @@ def test_artifact_is_persistent_across_store_instances(tmp_path):
 def test_combined_test_executes_and_exposes_result_and_attempt(tmp_path):
     api, _ = client(tmp_path)
     session_id = api.post("/v1/sessions", json={}).json()["session_id"]
+    persona = api.post("/v1/artifacts", json={"session_id": session_id, "kind": "persona.profile", "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "abilities": {}, "behavior": {}, "generation": {"seed": 1}}}).json()
     response = api.post("/v1/jobs", json={
         "session_id": session_id,
         "type": "combined_test",
-        "metadata": {"url": "https://example.com", "personas": [{"name": "Ada"}], "tasks": ["Find support"]},
+        "input_artifacts": [persona["artifact_id"]],
+        "metadata": {"url": "https://example.com", "persona_artifacts": [persona["artifact_id"]], "tasks": ["Find support"]},
     })
     assert response.status_code == 202
     job = api.get(f"/v1/jobs/{response.json()['job_id']}").json()
@@ -78,6 +89,7 @@ def test_workspace_isolation_and_prefixed_artifact_keys(tmp_path):
     assert f"alpha/{session['session_id']}" in artifact["path"]
     assert api.get(f"/v1/artifacts/{artifact['artifact_id']}/content", headers=beta).status_code == 404
     beta_session = api.post("/v1/sessions", json={}, headers=beta).json()
+    assert [item["session_id"] for item in api.get("/v1/sessions", headers=alpha).json()["items"]] == [session["session_id"]]
     alpha_job = api.post("/v1/jobs", headers=alpha, json={"session_id": session["session_id"], "type": "unknown", "idempotency_key": "same"}).json()
     beta_job = api.post("/v1/jobs", headers=beta, json={"session_id": beta_session["session_id"], "type": "unknown", "idempotency_key": "same"}).json()
     assert alpha_job["job_id"] != beta_job["job_id"]
@@ -87,7 +99,8 @@ def test_workspace_isolation_and_prefixed_artifact_keys(tmp_path):
 def test_waiting_dependency_is_rescheduled_after_success(tmp_path):
     store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
     session = store.create_session({"metadata": {}, "external_ref": {}})
-    base = {"session_id": session["session_id"], "type": "combined_test", "version": "1.0", "pipeline_run_id": None, "input_artifacts": [], "seed": 1, "metadata": {"url": "https://example.com", "personas": [{"name": "Ada"}], "tasks": ["Find help"]}, "idempotency_key": None}
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile", "content_type": "application/json", "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "abilities": {}, "behavior": {}, "generation": {"seed": 1}}, "metadata": {}})
+    base = {"session_id": session["session_id"], "type": "combined_test", "version": "1.0", "pipeline_run_id": None, "input_artifacts": [persona["artifact_id"]], "seed": 1, "metadata": {"url": "https://example.com", "persona_artifacts": [persona["artifact_id"]], "tasks": ["Find help"]}, "idempotency_key": None}
     dependency, _ = store.create_job({**base, "depends_on": []})
     dependent, _ = store.create_job({**base, "depends_on": [dependency["job_id"]]})
     executor = JobExecutor(store)
@@ -96,6 +109,44 @@ def test_waiting_dependency_is_rescheduled_after_success(tmp_path):
     executor.run(dependency["job_id"])
     assert store.get_job(dependent["job_id"])["status"] == "succeeded"
     assert "job.dependencies_satisfied" in [event["type"] for event in store.events(dependent["job_id"])]
+
+
+def test_only_one_executor_can_claim_a_job(tmp_path):
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "unknown", "version": "1.0", "pipeline_run_id": None, "depends_on": [], "input_artifacts": [], "seed": None, "metadata": {}, "idempotency_key": None})
+    assert store.claim_job(job["job_id"])["status"] == "claimed"
+    assert store.claim_job(job["job_id"]) is None
+
+
+def test_persona_snapshots_reach_worker_and_persist_in_report(tmp_path, monkeypatch):
+    import json
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    profiles = [{"id": f"persona_{name.lower()}", "source": "manual", "persona": {"name": name}, "abilities": {}, "behavior": {"patience": patience}, "generation": {"seed": seed, "model": "fixture", "compilerVersion": "1"}} for name, patience, seed in (("Ada", .8, 1), ("Lin", .2, 2))]
+    artifacts = [store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile", "content_type": "application/json", "content": profile, "metadata": {"immutable_run_snapshot": True}}) for profile in profiles]
+    received = []
+
+    class WorkerResponse:
+        def __init__(self, request): self.request = request
+        def __enter__(self):
+            payload = json.loads(self.request.data)
+            received.append(payload["profile"])
+            self.payload = json.dumps({"runId": payload["runId"], "simulationProfile": payload["profile"], "steps": []}).encode()
+            return self
+        def __exit__(self, *args): pass
+        def read(self): return self.payload
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", lambda request, timeout: WorkerResponse(request))
+    ids = [artifact["artifact_id"] for artifact in artifacts]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0", "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1, "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Find help"]}, "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    report = json.loads(store.read_artifact(completed["output_artifacts"][0]))
+    assert received == profiles
+    assert report["synthetic_users"] == profiles
+    assert [run["simulationProfile"] for run in report["journey_outcome"]["runs"]] == profiles
 
 
 def test_existing_sqlite_schema_receives_additive_tenant_columns(tmp_path):

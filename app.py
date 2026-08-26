@@ -11,6 +11,7 @@ import shutil
 from gradio_client import Client
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient
+from apps.gradio.auth import request_identity, workspaces_from_profile
 
 import gradio as gr
 from fastapi import FastAPI
@@ -28,6 +29,14 @@ BLABLADOR_API_KEY = os.environ.get("BLABLADOR_API_KEY")
 BLABLADOR_BASE_URL = "https://api.helmholtz-blablador.fz-juelich.de/v1"
 control_plane = ControlPlaneClient()
 persona_runtime = PersonaRuntimeClient()
+
+
+def authenticated_clients(workspace_id, oauth_profile, oauth_token):
+    identity = request_identity(oauth_profile, oauth_token, workspace_id)
+    return (
+        ControlPlaneClient(workspace_id=identity.workspace_id, user_id=identity.user_id, authorization=identity.authorization),
+        PersonaRuntimeClient(workspace_id=identity.workspace_id, user_id=identity.user_id, authorization=identity.authorization),
+    )
 
 # GitHub Client
 gh = Github(auth=Auth.Token(GITHUB_TOKEN)) if GITHUB_TOKEN else None
@@ -215,7 +224,7 @@ def upload_persona_to_pool(persona_data):
     except Exception as e:
         print(f"Error uploading persona to pool: {e}")
 
-def select_or_create_personas(theme, customer_profile, num_personas, force_method=None, example_file=None):
+def select_or_create_personas(theme, customer_profile, num_personas, force_method=None, example_file=None, persona_client=None):
     if force_method == "Example Persona" and example_file:
         add_log(f"Loading example persona from {example_file}...")
         try:
@@ -260,16 +269,16 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
         num_personas = int(num_personas) - len(personas)
     elif force_method == "TinyTroupe":
         add_log("Forcing TinyTroupe generation...")
-        return persona_runtime.generate(theme, customer_profile, num_personas, scenario=theme)
+        return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
 
     client = get_blablador_client()
     if not client:
-        return generate_personas(theme, customer_profile, num_personas)
+        return generate_personas(theme, customer_profile, num_personas, persona_client)
 
     pool = get_persona_pool()
     if not pool:
         print("Pool is empty, generating new personas.")
-        new_personas = generate_personas(theme, customer_profile, num_personas)
+        new_personas = generate_personas(theme, customer_profile, num_personas, persona_client)
         for p in new_personas:
             upload_persona_to_pool(p)
         return new_personas
@@ -326,7 +335,7 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
 
     if to_create_count > 0:
         print(f"Creating {to_create_count} new personas.")
-        newly_created = generate_personas(theme, customer_profile, to_create_count)
+        newly_created = generate_personas(theme, customer_profile, to_create_count, persona_client)
         for p in newly_created:
             upload_persona_to_pool(p)
             final_personas.append(p)
@@ -404,9 +413,9 @@ def generate_personas_from_tiny_factory(theme, customer_profile, num_personas):
     """Compatibility wrapper; persona generation belongs to persona-runtime."""
     return persona_runtime.generate(theme, customer_profile, num_personas, scenario=theme)
 
-def generate_personas(theme, customer_profile, num_personas):
+def generate_personas(theme, customer_profile, num_personas, persona_client=None):
     """Compatibility wrapper for legacy callbacks during tab migration."""
-    return persona_runtime.generate(theme, customer_profile, num_personas, scenario=theme)
+    return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
 
 def generate_tasks(theme, customer_profile, url):
     client = get_blablador_client()
@@ -473,8 +482,9 @@ def generate_tasks(theme, customer_profile, url):
 
     return [f"Task {i+1} for {theme} (Manual fallback)" for i in range(10)]
 
-def handle_generate(theme, customer_profile, num_personas, method, example_file, url):
+def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
     try:
+        _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         current_profile = customer_profile
         if method == "Example Persona" and example_file:
             # Fetch example persona info to use as profile context for task generation
@@ -488,9 +498,9 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
 
         yield "Selecting or creating personas...", tasks_text, None, tasks
         if method == "TinyTroupe":
-            personas = persona_runtime.generate(theme, customer_profile, num_personas, scenario=f"Test {url}")
+            personas = personas_client.generate(theme, customer_profile, num_personas, scenario=f"Test {url}")
         else:
-            personas = select_or_create_personas(theme, customer_profile, num_personas, force_method=method, example_file=example_file)
+            personas = select_or_create_personas(theme, customer_profile, num_personas, force_method=method, example_file=example_file, persona_client=personas_client)
 
         yield "Generation complete!", tasks_text, personas, tasks
     except Exception as e:
@@ -505,19 +515,29 @@ def check_branch_exists(repo_full_name, branch_name):
     except:
         return False
 
-def start_and_monitor_sessions(personas, tasks, url, session_id):
+def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
     if not personas or not tasks:
         yield "Error: Personas or Tasks missing. Please generate them first.", "", "", ""
         return
     try:
-        session = control_plane.create_session({"legacy_session_id": session_id})
-        job = control_plane.create_job({"session_id": session["session_id"], "type": "combined_test", "metadata": {"personas": personas, "tasks": tasks, "url": url}})
+        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        session = session_client.create_session({"legacy_session_id": session_id})
+        persona_artifacts = []
+        for profile in personas:
+            profile = dict(profile)
+            profile.setdefault("id", f"legacy_persona_{uuid.uuid4().hex}")
+            artifact = session_client.create_artifact(
+                session["session_id"], "persona.profile", profile,
+                metadata={"schema_version": "1.0", "persona_id": profile["id"], "immutable_run_snapshot": True},
+            )
+            persona_artifacts.append(artifact["artifact_id"])
+        job = session_client.create_job({"session_id": session["session_id"], "type": "combined_test", "input_artifacts": persona_artifacts, "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": url}})
         yield f"Analysis queued: {job['job_id']}", "", session["session_id"], job["job_id"]
-        job = control_plane.wait_for_job(job["job_id"])
+        job = session_client.wait_for_job(job["job_id"])
         if job["status"] != "succeeded":
             yield f"Analysis failed: {job.get('error')}", "", session["session_id"], job["job_id"]
             return
-        report = control_plane.get_artifact_content(job["output_artifacts"][0])
+        report = session_client.get_artifact_content(job["output_artifacts"][0])
         yield "Analysis complete.", f"```json\n{report}\n```", session["session_id"], job["job_id"]
     except Exception as exc:
         yield f"Control-plane error: {exc}", "", "", ""
@@ -858,15 +878,16 @@ You are an expert Frontend Developer. Your task is to implement the following "L
 """
     return prompt
 
-def generate_full_ui_call(repo, branch, session_id, selected_solutions_json, url):
+def generate_full_ui_call(repo, branch, session_id, selected_solutions_json, url, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
     if not session_id:
         return "Error: Job ID missing. Start an analysis first."
     try:
-        parent = control_plane.get_job(session_id)
-        job = control_plane.run_job("ui_adaptation", {"title": "UX solution prototype", "request": generate_agents_prompt(selected_solutions_json), "url": url}, session_id=parent["session_id"])
+        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        parent = session_client.get_job(session_id)
+        job = session_client.run_job("ui_adaptation", {"title": "UX solution prototype", "request": generate_agents_prompt(selected_solutions_json), "url": url}, session_id=parent["session_id"])
         if job["status"] != "succeeded":
             return f"❌ Prototype generation failed: {job.get('error')}"
-        html = control_plane.get_artifact_content(job["output_artifacts"][0])
+        html = session_client.get_artifact_content(job["output_artifacts"][0])
         return f'<iframe srcdoc="{html.replace(chr(34), "&quot;")}" width="100%" height="800" frameborder="0"></iframe>'
     except Exception as exc:
         add_log(f"Control-plane error: {exc}")
@@ -883,7 +904,7 @@ def poll_for_generated_ui(repo_full_name, branch_name, session_id):
     except:
         return "UI not generated yet. Please wait..."
 
-def blablador_chat_adaptation(message="", history=[], jules_uuid=""):
+def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
     print(f"DEBUG: blablador_chat_adaptation called with message='{message}', history='{history}', jules_uuid='{jules_uuid}'")
     if not jules_uuid:
         return history + [("System", "Error: Analysis job ID missing.")], ""
@@ -895,8 +916,9 @@ def blablador_chat_adaptation(message="", history=[], jules_uuid=""):
     prompt = f"User request for UI adaptation: {message}\n\nPlease update the generated UI and save it."
     
     try:
-        parent = control_plane.get_job(jules_uuid)
-        job = control_plane.run_job("ui_adaptation", {"title": "Interactive UI adaptation", "request": prompt}, session_id=parent["session_id"])
+        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        parent = session_client.get_job(jules_uuid)
+        job = session_client.run_job("ui_adaptation", {"title": "Interactive UI adaptation", "request": prompt}, session_id=parent["session_id"])
         if job["status"] != "succeeded":
             raise RuntimeError(job.get("error"))
         agent_msg = f"Adaptation completed as job {job['job_id']}. The responsive prototype is stored as artifact {job['output_artifacts'][0]}."
@@ -945,6 +967,27 @@ def monitor_repo_for_reports():
 # Gradio UI
 with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     gr.Markdown("# UX Analysis Orchestrator")
+    with gr.Row():
+        login_button = gr.LoginButton()
+        workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True)
+    login_status = gr.Markdown("Sign in with Hugging Face to load your personal and organization workspaces.")
+
+    def load_hf_workspaces(profile: gr.OAuthProfile | None):
+        workspaces = workspaces_from_profile(dict(profile) if profile else None)
+        if not workspaces:
+            return gr.update(choices=[], value=None), "🔒 Sign in with Hugging Face to continue."
+        choices = [(f"{item['name']} ({item['role']})", item["id"]) for item in workspaces]
+        return gr.update(choices=choices, value=choices[0][1]), f"Signed in as **{profile.username}**. Workspace access is revalidated by the control plane on every request."
+
+    demo.load(fn=load_hf_workspaces, outputs=[workspace_selector, login_status])
+
+    def validate_workspace(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        identity = session_client.me()
+        selected = next(item for item in identity["workspaces"] if item["id"] == identity["selected_workspace_id"])
+        return f"Signed in as **{identity['user'].get('username') or identity['user']['id']}** · workspace **{selected['name']}** · role `{selected['role']}`."
+
+    workspace_selector.change(fn=validate_workspace, inputs=[workspace_selector], outputs=[login_status])
 
     active_session_state = gr.State("")
     active_jules_uuid_state = gr.State("")
@@ -1158,7 +1201,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             gr.Markdown("### View UX Reports & Solutions")
             with gr.Row(visible=False):
                 rv_repo_select = gr.Dropdown(label="Repository", choices=[REPO_NAME], value=REPO_NAME, interactive=False)
-                rv_branch_select = gr.Dropdown(label="Branch", choices=get_repo_branches(REPO_NAME))
+                rv_branch_select = gr.Dropdown(label="Imported legacy session", choices=[])
             
             with gr.Row():
                 session_id_rv = gr.Textbox(label="Session ID", placeholder="Enter Session ID to pull results...")
@@ -1194,28 +1237,29 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     
                     solutions_checkboxes.change(fn=update_selected_solutions, inputs=[solutions_checkboxes, all_solutions_state], outputs=[selected_solutions_json_state])
 
-            def rv_update_branches(repo_name, session_id=None):
-                if session_id:
-                    if not check_branch_exists(repo_name, session_id):
-                        return gr.update(), f"[ERROR] Branch '{session_id}' not found. Please wait 30 minutes if newly created."
-                
-                branches = get_repo_branches(repo_name)
-                latest = session_id if session_id and session_id in branches else (branches[0] if branches else "main")
-                log = f"[SYSTEM] Pulled latest branches from {repo_name}\n[SYSTEM] Target branch: {latest}\n[SYSTEM] Found {len(branches)} branches."
-                return gr.update(choices=branches, value=latest), log
+            def rv_update_branches(repo_name, session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                branches = session_client.discover_legacy(repo_name)
+                names = [item["name"] for item in branches]
+                latest = session_id if session_id in names else (names[0] if names else None)
+                return gr.update(choices=names, value=latest), f"[CONTROL PLANE] Discovered {len(names)} read-only legacy sessions. Import creates tenant-owned artifacts."
 
-            def rv_update_reports(repo_name, branch_name):
-                reports = get_reports_in_branch(repo_name, branch_name, filter_type="report")
-                return gr.update(choices=reports, value=reports[0] if reports else None)
+            def rv_update_reports(repo_name, branch_name, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                imported = session_client.import_legacy(repo_name, branch_name)
+                artifacts = session_client.list_artifacts(imported["session"]["session_id"])
+                choices = [(item["metadata"].get("legacy_path", item["artifact_id"]), item["artifact_id"]) for item in artifacts if item["kind"] == "legacy.report"]
+                return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
-            rv_repo_select.change(fn=rv_update_branches, inputs=[rv_repo_select], outputs=[rv_branch_select, rv_terminal_log])
-            def rv_load_wrapper(repo, branch, selected, manual):
-                path = manual if manual else selected
-                return get_report_content(repo, branch, path)
+            rv_repo_select.change(fn=rv_update_branches, inputs=[rv_repo_select, session_id_rv, workspace_selector], outputs=[rv_branch_select, rv_terminal_log])
+            def rv_load_wrapper(repo, branch, selected, manual, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+                del repo, branch, manual
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                return session_client.get_artifact_content(selected) if selected else "Select an imported report."
 
-            rv_refresh_branches_btn.click(fn=rv_update_branches, inputs=[rv_repo_select, session_id_rv], outputs=[rv_branch_select, rv_terminal_log])
-            rv_branch_select.change(fn=rv_update_reports, inputs=[rv_repo_select, rv_branch_select], outputs=[rv_report_select])
-            rv_load_report_btn.click(fn=rv_load_wrapper, inputs=[rv_repo_select, rv_branch_select, rv_report_select, rv_manual_path], outputs=[rv_report_viewer])
+            rv_refresh_branches_btn.click(fn=rv_update_branches, inputs=[rv_repo_select, session_id_rv, workspace_selector], outputs=[rv_branch_select, rv_terminal_log])
+            rv_branch_select.change(fn=rv_update_reports, inputs=[rv_repo_select, rv_branch_select, workspace_selector], outputs=[rv_report_select])
+            rv_load_report_btn.click(fn=rv_load_wrapper, inputs=[rv_repo_select, rv_branch_select, rv_report_select, rv_manual_path, workspace_selector], outputs=[rv_report_viewer])
 
         with gr.Tab("Persona Thought Logs"):
             gr.Markdown("### Persona Internal Monologue & Analysis")
@@ -1288,9 +1332,9 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     ui_chat_msg = gr.Textbox(label="Request Modification", placeholder="e.g. Change primary color to emerald...")
                     ui_chat_send = gr.Button("Send Request")
 
-            generate_full_ui_btn.click(fn=generate_full_ui_call, inputs=[rv_repo_select, rv_branch_select, jules_uuid_ui, selected_solutions_json_state, url_input], outputs=[full_ui_iframe])
+            generate_full_ui_btn.click(fn=generate_full_ui_call, inputs=[rv_repo_select, rv_branch_select, jules_uuid_ui, selected_solutions_json_state, url_input, workspace_selector], outputs=[full_ui_iframe])
             refresh_ui_btn.click(fn=poll_for_generated_ui, inputs=[rv_repo_select, rv_branch_select, session_id_ui], outputs=[full_ui_iframe])
-            ui_chat_send.click(fn=blablador_chat_adaptation, inputs=[ui_chat_msg, ui_chatbot, jules_uuid_ui], outputs=[ui_chatbot, ui_chat_msg])
+            ui_chat_send.click(fn=blablador_chat_adaptation, inputs=[ui_chat_msg, ui_chatbot, jules_uuid_ui, workspace_selector], outputs=[ui_chatbot, ui_chat_msg])
 
 
         with gr.Tab("System"):
@@ -1349,15 +1393,26 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             refresh_feed_btn = gr.Button("Refresh Feed Now")
             global_feed = gr.Markdown(value="Waiting for new reports...")
             
-            def monitor_and_log():
-                reports = monitor_repo_for_reports()
-                logs = "\n".join(github_logs[-20:])
-                return reports, logs
+            def monitor_and_log(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                sessions = session_client.list_sessions()
+                rows, logs, snapshots = [], [], []
+                for session in sessions[:20]:
+                    jobs = session_client.list_jobs(session["session_id"])
+                    rows.extend(f"- `{job['job_id']}` — **{job['status']}** ({job['type']})" for job in jobs)
+                    for artifact in session_client.list_artifacts(session["session_id"]):
+                        if artifact["kind"] == "persona.profile":
+                            profile = json.loads(session_client.get_artifact_content(artifact["artifact_id"]))
+                            snapshots.append(f"### {profile.get('persona', {}).get('name', profile['id'])}\n```json\n{json.dumps(profile, indent=2)}\n```")
+                    logs.append(f"{session['session_id']}: {len(jobs)} persisted jobs")
+                feed = "## Jobs\n" + ("\n".join(rows) or "No persisted jobs yet.")
+                if snapshots: feed += "\n\n## Immutable persona snapshots\n" + "\n\n".join(snapshots)
+                return feed, "\n".join(logs)
 
             # Use a Timer to poll every 60 seconds
             timer = gr.Timer(value=60)
-            timer.tick(fn=monitor_and_log, outputs=[global_feed, live_log])
-            refresh_feed_btn.click(fn=monitor_and_log, outputs=[global_feed, live_log])
+            timer.tick(fn=monitor_and_log, inputs=[workspace_selector], outputs=[global_feed, live_log])
+            refresh_feed_btn.click(fn=monitor_and_log, inputs=[workspace_selector], outputs=[global_feed, live_log])
 
 
         with gr.Tab("Alternative Styling"):
@@ -1413,27 +1468,28 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         abilities.setdefault("reading", {})["wordsPerMinute"] = int(reading)
         return profile, json.dumps(profile, indent=2), "Tweaks applied locally. Save to persist them."
 
-    def save_manual_persona(profile_json, personas, index):
+    def save_manual_persona(profile_json, personas, index, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
         profile = json.loads(profile_json)
-        saved = persona_runtime.update(profile)
+        _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        saved = personas_client.update(profile)
         updated = list(personas or [])
         updated[int(index or 0)] = saved
         return saved, json.dumps(saved, indent=2), updated, f"Saved `{saved['id']}` as a manually edited profile."
 
     generate_btn.click(
         fn=handle_generate,
-        inputs=[theme_input, profile_input, num_personas_input, persona_method, example_persona_select, url_input],
+        inputs=[theme_input, profile_input, num_personas_input, persona_method, example_persona_select, url_input, workspace_selector],
         outputs=[status_output, task_list_display, persona_display, last_generated_tasks_state]
     ).then(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
 
     refresh_personas_btn.click(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
     persona_index.change(fn=load_persona, inputs=[persona_display, persona_index], outputs=studio_outputs)
     apply_tweaks_btn.click(fn=apply_persona_tweaks, inputs=[persona_editor, *behavior_sliders.values(), color_vision, visual_acuity, contrast_sensitivity, pointer_precision, processing_speed, working_memory, reading_speed], outputs=[persona_view, persona_editor, persona_studio_status])
-    save_persona_btn.click(fn=save_manual_persona, inputs=[persona_editor, persona_display, persona_index], outputs=[persona_view, persona_editor, persona_display, persona_studio_status])
+    save_persona_btn.click(fn=save_manual_persona, inputs=[persona_editor, persona_display, persona_index, workspace_selector], outputs=[persona_view, persona_editor, persona_display, persona_studio_status])
 
     start_session_btn.click(
         fn=start_and_monitor_sessions,
-        inputs=[persona_display, last_generated_tasks_state, url_input, session_id_orch],
+        inputs=[persona_display, last_generated_tasks_state, url_input, session_id_orch, workspace_selector],
         outputs=[status_output, report_output, active_session_state, active_jules_uuid_state]
     ).then(
         fn=lambda x: [x] * len(session_id_sync_list),

@@ -15,10 +15,11 @@ from uuid import uuid4
 
 
 class Store:
+    backend = "sqlite"
     def __init__(self, database_url: str | None = None, artifact_root: str | None = None):
         url = database_url or os.getenv("DATABASE_URL", "sqlite:///data/control-plane.db")
         if not url.startswith("sqlite:///"):
-            raise ValueError("PLACEHOLDER: only sqlite DATABASE_URL is implemented; PostgreSQL is next")
+            raise ValueError("Store is the SQLite adapter; use create_store() to select PostgreSQL")
         self.path = Path(url.removeprefix("sqlite:///"))
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self.artifact_root = Path(artifact_root or os.getenv("ARTIFACT_ROOT", "data/artifacts"))
@@ -30,6 +31,10 @@ class Store:
         connection = sqlite3.connect(self.path, check_same_thread=False)
         connection.row_factory = sqlite3.Row
         return connection
+
+    def ping(self):
+        with self.connect() as db: db.execute("SELECT 1").fetchone()
+        return True
 
     def _initialize(self):
         with self.connect() as db:
@@ -105,6 +110,12 @@ class Store:
         with self.connect() as db:
             return self.decode(db.execute("SELECT * FROM sessions WHERE session_id=?", (session_id,)).fetchone())
 
+    def list_sessions(self, workspace_id):
+        with self.connect() as db:
+            return [self.decode(row) for row in db.execute(
+                "SELECT * FROM sessions WHERE workspace_id=? ORDER BY created_at DESC", (workspace_id,)
+            )]
+
     def create_job(self, payload):
         with self.lock:
             session = self.get_session(payload["session_id"])
@@ -127,6 +138,14 @@ class Store:
             self.event(record["job_id"], "job.queued", 0, {})
             record["idempotency_key"] = client_idempotency_key
         return record, True
+
+    def claim_job(self, job_id):
+        """Atomically give one executor ownership of a queued job."""
+        with self.lock, self.connect() as db:
+            claimed = db.execute(
+                "UPDATE jobs SET status='claimed' WHERE job_id=? AND status='queued'", (job_id,)
+            ).rowcount
+        return self.get_job(job_id) if claimed else None
 
     def get_job(self, job_id):
         with self.connect() as db:
@@ -229,6 +248,22 @@ class Store:
         with self.connect() as db:
             return self.decode(db.execute("SELECT * FROM artifacts WHERE artifact_id=?", (artifact_id,)).fetchone())
 
+    def read_artifact(self, artifact_id):
+        artifact = self.get_artifact(artifact_id)
+        if artifact is None: raise KeyError(artifact_id)
+        return Path(artifact["path"]).read_bytes()
+
     def list_artifacts(self, session_id):
         with self.connect() as db:
             return [self.decode(row) for row in db.execute("SELECT * FROM artifacts WHERE session_id=? ORDER BY created_at", (session_id,))]
+
+
+def create_store(database_url: str | None = None, artifact_root: str | None = None, artifact_storage=None):
+    """Select the development or production repository without changing its contract."""
+    url = database_url or os.getenv("DATABASE_URL", "sqlite:///data/control-plane.db")
+    if url.startswith(("postgresql://", "postgresql+psycopg://")):
+        from .artifact_storage import artifact_storage_from_environment
+        from .postgres_store import PostgresStore
+        storage = artifact_storage or artifact_storage_from_environment(artifact_root or os.getenv("ARTIFACT_ROOT", "data/artifacts"))
+        return PostgresStore(url.replace("postgresql+psycopg://", "postgresql://", 1), storage)
+    return Store(url, artifact_root)
