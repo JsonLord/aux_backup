@@ -1,0 +1,18 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/control-plane.Dockerfile
+    environment:
+      DATABASE_URL: sqlite:////data/control-plane.db
+      ARTIFACT_ROOT: /data/artifacts
+    volumes: ["platform-data:/data"]
+    ports: ["8000:8000"]
+  journey-worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/journey-worker.Dockerfile
+    ports: ["8080:8080"]
+  # PLACEHOLDER: PostgreSQL, Redis, Eyeson and durable workers are added in later spec stages.
+volumes:
+  platform-data:
