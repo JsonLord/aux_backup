@@ -5,7 +5,9 @@ __pycache__/
 app_output.log
 *.png
 verification/
-external/
 site/
 test_slides/
-__pycache__/
+data/
+.pytest_cache/
+*.py[cod]
+.venv/
