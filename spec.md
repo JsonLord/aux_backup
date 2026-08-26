@@ -1,2864 +1,2924 @@
-# Synthetic UX Testing Platform — Integration & Development Specification
+# Synthetic UX Testing Platform — Full Application Specification
 
-**Document:** `spec.md`  
-**Status:** Proposed implementation specification  
-**Primary product base:** `JsonLord/aux_backup` → recommended new canonical product repository `JsonLord/aux`  
-**Primary purpose:** Combine synthetic persona generation, stateful user-journey execution, visual UX diagnosis, pain-point attribution, grounded recommendations, alternative solution generation, and report/UI presentation into an inspectable job pipeline.
-
----
-
-## 1. Goal
-
-Build a modular synthetic UX testing platform in which:
-
-1. **TinyTroupe generates synthetic people/personas in isolated batch jobs.**
-2. A **persona/behavior compilation job** converts each rich persona into structured, machine-usable behavioral parameters, ability constraints, and task-specific policy.
-3. **DSPy is used for semantic/learnable transformations** where optimization against human data is valuable.
-4. **Native deterministic code is used for state transitions and physical/behavioral mechanics** such as waiting tolerance, frustration accumulation, seeded coping choices, visual transforms, pointer error, reading delays, and stop conditions.
-5. **JourneyTest runs the live browser journey**, owns browser actions, video, snapshots, screenshots, DOM/accessibility evidence, and action/UI-change timelines.
-6. Every JourneyTest screenshot and relevant browser state is published as evidence and can simultaneously feed **Eyeson**.
-7. **Eyeson diagnoses visual/interaction UX pain**, attributes pain to concrete interface elements, creates frustration/confusion/effort visualizations, and generates structured alternative solutions.
-8. A future **UX Knowledge Grounder (RAG)** can retrieve external/internal UX knowledge and ground Eyeson diagnoses and alternatives.
-9. A **report enrichment job** combines JourneyTest, behavior, Eyeson, and grounding results into a product-level report.
-10. A **Gradio UI** preserves and enhances the existing `aux_backup` tab register while becoming a client of the job APIs rather than the owner of business logic.
-11. Every stage can be:
-    - invoked independently;
-    - inspected independently;
-    - replayed from stored inputs;
-    - used as input to a later stage;
-    - composed into predefined or custom job packages.
-
-The system MUST expose versioned FastAPI contracts so that every intermediate stage is interceptable.
+**Status:** Draft implementation specification  
+**Target host application:** `JsonLord/eyeson` (`ux-analyst-ai`)  
+**Browser/runtime dependency:** `Jules-Astier/journeytest-core`  
+**Persona engine:** `microsoft/TinyTroupe`  
+**Semantic program layer:** DSPy  
+**Optional reference/donor:** `JsonLord/AI-UX`  
+**Primary goal:** Run synthetic, persona-aware user journeys against live websites, observe behavior and visual experience, diagnose element-level UX pain, generate grounded alternatives, and present all evidence in a replayable report.
 
 ---
 
-## 2. Non-goals
+## 1. Executive summary
 
-The first implementation MUST NOT:
+The application combines four responsibilities that must remain architecturally distinct:
 
-- replace JourneyTest with a second DSPy/ReAct browser agent;
-- make TinyTroupe directly responsible for raw browser control;
-- make screenshots the only browser observation channel;
-- infer disabilities or impairments solely from age or demographic fields;
-- use the LLM to update deterministic frustration/timing mathematics on every step;
-- use GitHub branches as the primary job queue or database;
-- require the RAG subsystem to exist before the rest of the product can run;
-- require a full redesign of the current Gradio tab navigation;
-- depend on `JsonLord/AI-UX` for the live browser testing runtime.
+1. **Persona generation** — create plausible synthetic users with goals, preferences, experience and personality using TinyTroupe.
+2. **Behavior simulation** — convert stable persona traits plus explicit functional abilities into reproducible dynamic behavior such as patience, retry tolerance, frustration growth, help seeking, impulsive retry and abandonment.
+3. **Live user-journey execution** — use JourneyTest-core as the only authoritative browser/controller, including action execution, semantic page snapshots, screenshots, UI-change observation, video and journey verdicts.
+4. **UX diagnosis and remediation** — use Eyeson to analyze the exact screenshots and interface evidence produced by JourneyTest, connect observed frustration to UI elements, explain likely UX mechanisms, visualize pain, retrieve UX knowledge through a future RAG provider, and propose alternative solutions.
 
----
+The product must expose two primary report modes over the same evidence:
 
-## 3. Architecture decision summary
+- **User Journey** — what the synthetic person did, perceived and experienced.
+- **UX Feedback** — where the interface caused friction, why, how severe it was, and what design changes could reduce it.
 
-### 3.1 Control plane vs execution plane
+Both modes must remain synchronized to the same user, journey step, timestamp and screenshot.
 
-Use two primary language/runtime families.
+The central architectural rule is:
 
-| Layer | Language/runtime | Reason |
-|---|---|---|
-| API orchestration | Python 3.12 | FastAPI, Pydantic, ecosystem fit |
-| Gradio UI | Python 3.12 | Existing `aux_backup` is Gradio/Python |
-| Persona generation | Python 3.12 | TinyTroupe is Python |
-| DSPy semantic layer | Python 3.12 | DSPy is Python; later optimization/evaluation |
-| RAG/knowledge grounding | Python 3.12 | retrieval/indexing ecosystem |
-| Report aggregation | Python 3.12 | structured data/report generation |
-| Browser journey runtime | Node.js 24+, TypeScript | JourneyTest requires Node >=24 and is TypeScript |
-| Live behavior controller | TypeScript in Journey worker | must operate synchronously around browser actions |
-| Eyeson image/visual engine | Node.js 24+, TypeScript target | reuse Sharp/image code; align with Journey execution runtime |
-| Thin worker API wrappers | Python 3.12/FastAPI | every service boundary remains inspectable through FastAPI |
+> **JourneyTest owns the live browser. Eyeson never starts a second browser to re-create the tested state.**
 
-### 3.2 DSPy vs native implementation
-
-DSPy MUST be used selectively.
-
-**Use DSPy for:**
-
-- TinyPersona → structured behavioral prior compilation;
-- ambiguous experience appraisal;
-- persona-sensitive visual interpretation;
-- UX issue interpretation/classification;
-- pain-point semantic diagnosis;
-- grounded solution generation;
-- later optimization against labeled human UX data.
-
-**Use native code for:**
-
-- job orchestration;
-- browser actions;
-- timers and waits;
-- frustration/trust/confusion state mathematics;
-- repetition escalation;
-- seeded probabilistic coping selection;
-- state recovery/decay;
-- visual impairment transforms;
-- pointer imprecision and movement timing;
-- reading delays;
-- working-memory simulation rules;
-- step limits;
-- cancellation;
-- evidence/artifact persistence;
-- API contracts.
-
-A `SemanticEngine` interface MUST allow both:
-
-- `DSPySemanticEngine`
-- `DirectLLMSemanticEngine`
-
-This gives the project a baseline implementation, debugging fallback, and an A/B path for proving whether DSPy improves behavior before making it mandatory everywhere.
+Every screenshot, DOM/accessibility snapshot and UI-change record is captured once by JourneyTest and then distributed to behavior analysis and Eyeson.
 
 ---
 
-## 4. Repository disposition
+## 2. Goals
 
-### 4.1 `JsonLord/aux_backup`
+### 2.1 Product goals
 
-**Disposition: MERGE/EVOLVE into the canonical product repository.**
+The application shall:
 
-Recommended canonical target:
+- Accept a website URL and a user task.
+- Generate one or more synthetic users.
+- Allow multiple iterations per synthetic user.
+- Support adjustable scenario/context and randomness.
+- Allow explicit functional limitations and behavioral traits.
+- Execute the task on the real website.
+- Record browser video and step evidence.
+- Maintain an explicit dynamic user state during the run.
+- Detect frustration, confusion, trust loss, effort, fatigue and progress changes.
+- Apply coping policies such as retry, reread, wait, explore, seek help, backtrack, impulsive retry and abandon.
+- Visually simulate selected perceptual limitations where configured.
+- Feed captured screenshots and semantic evidence to Eyeson.
+- Attribute pain to one or more UI elements with confidence.
+- Produce frustration/confusion/effort overlays on screenshots.
+- Generate structured UX diagnoses.
+- Create alternative design solutions.
+- Keep a RAG/UX knowledge grounding extension point from the first implementation.
+- Generate a final replayable report and machine-readable `run.json`.
+- Aggregate findings across users and iterations.
+- Preserve deterministic replay where a seed and model version are fixed.
 
-`JsonLord/aux`
+### 2.2 Research goals
 
-If the repository name is not changed, the same folder layout applies to `aux_backup`.
+The platform should make later calibration against real usability studies possible. It must therefore preserve:
 
-This repository becomes the product monorepo containing:
+- persona inputs;
+- compiled behavioral parameters;
+- random seeds;
+- model/version identifiers;
+- every observed browser event used to update state;
+- all deterministic state transitions;
+- inferred appraisals with confidence;
+- selected coping actions and probability distributions;
+- screenshots and element boxes;
+- final diagnoses and grounding references.
 
-- FastAPI control plane;
-- Gradio UI;
-- shared contracts;
-- Python persona/DSPy/RAG/report services;
-- FastAPI adapters for TypeScript workers;
-- imported Eyeson engine;
-- integration/e2e tests;
-- Docker Compose deployment definitions.
+### 2.3 Non-goals for v1
 
-The existing large `app.py` MUST be decomposed. Gradio callbacks MUST call application services through APIs rather than contain core business logic.
+The first production version does **not** need to:
 
-### 4.2 `JsonLord/eyeson`
-
-**Disposition: MERGE owned engine code into the product monorepo.**
-
-Recommended destination:
-
-`services/eyeson-engine/`
-
-The original repository may remain archived/read-only for provenance.
-
-Preserve useful parts:
-
-- Sharp-based image analysis;
-- visual design metrics;
-- screenshot processing;
-- AI critique concepts;
-- report/recommendation structures.
-
-Remove or deprecate from the main flow:
-
-- Eyeson opening a separate browser just to recapture a URL;
-- separate navigation state from JourneyTest;
-- screenshot-wide critique without element IDs where element evidence is available.
-
-All new/modified Eyeson engine code SHOULD be TypeScript. Existing JavaScript may remain during migration but touched modules SHOULD be converted.
-
-### 4.3 `Jules-Astier/journeytest-core`
-
-**Disposition: DO NOT physically merge into the product monorepo.**
-
-Use as a pinned npm dependency inside an isolated Journey worker.
-
-Current package family:
-
-`@baguette-studios/journeytest-core`
-
-Because behavioral hooks may require changes not currently exposed publicly, create a small maintained fork only if needed:
-
-`JsonLord/journeytest-core`
-
-The fork SHOULD contain generic extension points only:
-
-- pre-action middleware;
-- post-action/observation middleware;
-- behavior event recorder hooks;
-- screenshot/evidence publisher hooks;
-- optional synchronous perception callback.
-
-Avoid product-specific report/UI code in the fork.
-
-Any generally useful hook SHOULD be designed so it could be contributed upstream.
-
-### 4.4 `microsoft/TinyTroupe` / `JsonLord/TinyTroupe`
-
-**Disposition: DO NOT merge source into the monorepo.**
-
-Use a pinned Python dependency.
-
-If custom patches are required, use the existing `JsonLord/TinyTroupe` fork and commit those changes into that fork.
-
-The product MUST NOT patch installed TinyTroupe source dynamically at container startup.
-
-Pin to an exact commit/tag through `pyproject.toml`/`uv.lock`.
-
-### 4.5 `JsonLord/AI-UX`
-
-**Disposition: DO NOT use as a runtime dependency.**
-
-Reason:
-
-Its useful concepts are prototype/journey visualization and generated visual alternatives, but it does not provide the live observe → act → observe browser cycle required by the target system.
-
-It MAY remain a reference source for future:
-
-- prototype rendering;
-- solution visualization;
-- Figma integration.
-
-### 4.6 `JsonLord/tiny_web`
-
-**Disposition: DEPRECATE as runtime orchestration/database.**
-
-The existing app may continue to export reports/results to a GitHub branch for collaboration, but GitHub branches MUST NOT remain the system-of-record for job state.
-
-Replace branch polling with API/job state.
-
-Add an optional:
-
-`github.export`
-
-job that exports selected artifacts to a branch/PR when desired.
-
-### 4.7 `JsonLord/agent-notes`
-
-**Disposition: OPTIONAL data source only.**
-
-If `PersonaPool` remains useful, expose it through a persona-library adapter.
-
-Do not use this repository for cross-service IPC.
+- claim clinical fidelity for disability simulation;
+- infer medical limitations directly from age or demographics;
+- replace real human usability studies;
+- allow multiple autonomous browser agents to compete for control;
+- run a second Eyeson crawler in parallel with JourneyTest;
+- require a production vector database before the RAG roadmap phase;
+- generate a fully working replacement application for every UX recommendation;
+- use AI-UX as a second journey execution engine.
 
 ---
 
-## 5. Target monorepo layout
+## 3. Source repositories and ownership boundaries
+
+### 3.1 `Jules-Astier/journeytest-core`
+
+**Role:** authoritative browser runtime, action execution, semantic observation, journey verdict, artifacts and base reporting.
+
+Current code anchors observed in the repository:
+
+- `src/core/schemas.ts` — core Zod schemas and run/result types.
+- `src/runner/runJourney.ts` — journey orchestration and final artifact writing.
+- `src/runner/events.ts` — event stream.
+- `src/directors/` — agent/director implementations.
+- `src/drivers/` — browser abstraction and concrete browser driver.
+- `src/reporters/markdown.ts` — Markdown report renderer.
+- `src/reporters/dashboard.ts` — single-run evidence dashboard.
+- `src/reporters/suiteDashboard.ts` — suite/aggregate dashboard.
+- `src/reporters/runComparison.ts` — run comparison.
+- `src/video/` — journey video support.
+
+**Must own:**
+
+- single live browser session;
+- navigation, click, fill, type, key, scroll and wait;
+- semantic snapshot and element references;
+- before/after UI evidence;
+- screenshots/video;
+- task completion verdict;
+- action/timeline event emission;
+- authoritative dynamic behavior state during a journey.
+
+**Must not own:**
+
+- TinyTroupe internals;
+- DSPy program definitions;
+- deep visual UX critique;
+- UX knowledge retrieval;
+- visual design solution rendering.
+
+---
+
+### 3.2 `JsonLord/eyeson`
+
+**Role:** product host, UX analysis layer, report enrichment and final frontend.
+
+The repository already contains a full application under `ux-analyst-ai/` with:
+
+- `backend/`
+- `frontend/`
+- `cli/`
+- `mcp-server/`
+- `docker-compose.yml`
+
+The backend is already service-oriented, with `backend/services`, `backend/routes`, `backend/interfaces`, `backend/core` and a central bootstrap/server.
+
+**Eyeson becomes the integration host application.** Do not create another top-level web app unless necessary.
+
+**Must own:**
+
+- experiment configuration API;
+- starting/stopping orchestrated runs;
+- multi-user/multi-iteration orchestration;
+- artifact indexing and report persistence;
+- Eyeson visual analysis;
+- pain-point resolution;
+- UX classification;
+- solution generation;
+- RAG provider interface;
+- frontend configuration screen;
+- live/replay frontend;
+- user-journey and UX-feedback report views;
+- aggregate root-cause view.
+
+**Must not own:**
+
+- a separate browser crawler for journey states;
+- an independent user-journey agent loop.
+
+Existing URL-based Eyeson analysis may remain for standalone legacy usage, but the integrated product path must accept **captured evidence**, not only URLs.
+
+---
+
+### 3.3 `microsoft/TinyTroupe`
+
+**Role:** persona identity and high-level psychological/social characterization.
+
+Relevant current package areas include:
+
+- `tinytroupe/agent/tiny_person.py`
+- `tinytroupe/agent/mental_faculty.py`
+- `tinytroupe/agent/memory.py`
+- `tinytroupe/agent/grounding.py`
+- `tinytroupe/profiling.py`
+- `tinytroupe/factory/`
+- `tinytroupe/experimentation/`
+
+TinyTroupe shall be installed as a Python dependency in the persona runtime. It should not receive raw browser ownership in the default architecture.
+
+**Must own:**
+
+- persona narrative/profile;
+- goals and motivations;
+- personality;
+- preferences;
+- knowledge/skills;
+- technology familiarity;
+- optionally explicit high-level attitudes or coping tendencies.
+
+**Must not infer as fact:**
+
+- visual impairment from age alone;
+- motor impairment from age alone;
+- cognitive impairment from age alone.
+
+Functional abilities are a separate explicit model.
+
+---
+
+### 3.4 DSPy
+
+**Role:** semantic compilation, appraisal and judgment where LLM reasoning adds value.
+
+DSPy is a Python library in the persona runtime, not another browser agent.
+
+Use DSPy for:
+
+- TinyTroupe persona -> numeric/structured behavior-profile compilation;
+- ambiguous experience-event appraisal;
+- persona visual judgment;
+- UX diagnosis/classification;
+- later prompt/demo optimization against human-study metrics.
+
+Do not use DSPy for:
+
+- frustration arithmetic;
+- timers;
+- waiting tolerance execution;
+- random sampling;
+- pointer noise;
+- visual color-transform code;
+- browser execution;
+- hard stop conditions.
+
+---
+
+### 3.5 `JsonLord/AI-UX`
+
+**Role in this architecture:** optional reference/donor only.
+
+AI-UX is a Django-based application with Figma-oriented journey simulation. It must **not** become a second live journey engine.
+
+Potential reusable concepts:
+
+- visual storytelling of a journey;
+- generated cursor/click overlays;
+- before/after solution presentation;
+- Figma/prototype export in a later roadmap phase.
+
+For v1, no runtime dependency is required.
+
+---
+
+## 4. Recommended deployment topology
+
+Use Eyeson's existing `ux-analyst-ai` as the host application.
 
 ```text
-aux/
-├── apps/
-│   ├── api/
-│   │   ├── main.py
-│   │   ├── routers/
-│   │   ├── dependencies/
-│   │   └── settings.py
-│   │
-│   └── gradio/
-│       ├── app.py
-│       ├── tabs/
-│       │   ├── orchestrator.py
-│       │   ├── presentation.py
-│       │   ├── reports.py
-│       │   ├── persona_trace.py
-│       │   ├── pain_maps.py
-│       │   ├── developer_handoff.py
-│       │   ├── full_ui.py
-│       │   ├── system.py
-│       │   ├── monitoring.py
-│       │   └── styling.py
-│       └── api_client.py
-│
-├── services/
-│   ├── persona-service/
-│   │   ├── api/
-│   │   ├── tinytroupe_adapter/
-│   │   ├── models/
-│   │   └── worker/
-│   │
-│   ├── semantic-service/
-│   │   ├── api/
-│   │   ├── dspy_modules/
-│   │   ├── direct_llm/
-│   │   ├── evals/
-│   │   └── worker/
-│   │
-│   ├── journey-worker/
-│   │   ├── api/                  # Python FastAPI wrapper
-│   │   ├── node/                 # Node 24 / TypeScript runtime
-│   │   │   ├── src/
-│   │   │   ├── package.json
-│   │   │   └── tsconfig.json
-│   │   └── worker/
-│   │
-│   ├── eyeson-worker/
-│   │   ├── api/                  # Python FastAPI wrapper
-│   │   ├── engine/               # imported/migrated Eyeson TS engine
-│   │   ├── pain_resolver/
-│   │   └── worker/
-│   │
-│   ├── knowledge-service/
-│   │   ├── api/
-│   │   ├── providers/
-│   │   │   ├── null.py
-│   │   │   ├── local_fixture.py
-│   │   │   └── future_vector.py
-│   │   └── models/
-│   │
-│   └── report-service/
-│       ├── api/
-│       ├── aggregate/
-│       ├── renderers/
-│       └── worker/
-│
-├── packages/
-│   ├── contracts/
-│   │   ├── python/
-│   │   ├── openapi/
-│   │   └── generated-ts/
-│   │
-│   ├── job-client/
-│   ├── artifact-client/
-│   └── ux-taxonomies/
-│
-├── infrastructure/
-│   ├── docker/
-│   ├── compose/
-│   ├── migrations/
-│   └── observability/
-│
-├── fixtures/
-│   ├── ux-lab/
-│   ├── personas/
-│   ├── screenshots/
-│   └── knowledge/
-│
-├── tests/
-│   ├── contract/
-│   ├── integration/
-│   ├── e2e/
-│   └── load/
-│
-├── pyproject.toml
-├── uv.lock
-├── docker-compose.yml
-└── spec.md
+Browser / user
+     |
+     v
+Eyeson frontend
+     |
+     v
+Eyeson backend / experiment orchestrator (Node)
+     |
+     +--------------------------+
+     |                          |
+     v                          v
+JourneyTest-core            Persona runtime
+(Node/TypeScript)           (Python)
+     |                          |
+     |                          +-- TinyTroupe
+     |                          +-- DSPy
+     |
+     +-- agent-browser / browser driver
+     |
+     +-- screenshots / DOM / a11y / UI changes / video
+     |
+     +-------------------------------+
+                                     |
+                                     v
+                              Eyeson analysis services
+                                     |
+                                     +-- pain-point resolver
+                                     +-- visual critique
+                                     +-- alternative generator
+                                     +-- UXKnowledgeProvider (RAG placeholder)
+                                     |
+                                     v
+                              Enriched run/report store
 ```
+
+### 4.1 Recommended service model
+
+For local development:
+
+- `eyeson-backend` — Node service.
+- `eyeson-frontend` — existing frontend.
+- `persona-runtime` — Python process.
+- JourneyTest runs **inside or as a child worker of the Eyeson backend**.
+- Artifacts stored on shared local filesystem volume.
+
+For production:
+
+- Eyeson backend API.
+- one or more JourneyTest workers.
+- persona runtime service.
+- object storage adapter for artifacts.
+- optional queue adapter for deep Eyeson analysis.
+
+Do not require Redis for the first complete version. Define a `JobQueue` interface with an in-memory implementation and allow Redis/BullMQ later.
 
 ---
 
-## 6. Communication rule
+## 5. Dependency integration strategy
 
-### 6.1 Mandatory rule
+### 5.1 JourneyTest-core
 
-No service may import another service's application implementation directly.
+During development, pin a commit or local package path.
 
-Cross-service communication MUST happen via:
+Recommended long-term approach:
 
-1. versioned FastAPI endpoints;
-2. artifact references;
-3. job IDs;
-4. versioned JSON/Pydantic contracts.
+1. Fork `journeytest-core` into the project organization.
+2. Keep upstream remote configured.
+3. Publish the fork as a private/internal npm package or use a pinned Git dependency.
+4. Never depend on unpinned `main` in production.
 
-A queue such as Redis/Celery MAY transport job IDs internally, but domain payloads MUST be persisted and retrievable through the APIs.
+The Eyeson backend should import JourneyTest via package API, not shell out to its CLI for the integrated path.
 
-### 6.2 Why
+### 5.2 TinyTroupe
 
-This enables:
+Pin a Git commit or released Python version in the persona-runtime lockfile.
 
-- intercepting any stage;
-- replaying a stage from an existing artifact;
-- replacing a stage;
-- using one stage alone;
-- debugging failed pipelines;
-- external clients calling individual services;
-- custom pipeline packages.
+### 5.3 DSPy
+
+Pin the version in the same Python environment as TinyTroupe.
+
+### 5.4 AI-UX
+
+No runtime dependency in v1. If later reused, extract only the relevant rendering/prototyping component behind an interface.
 
 ---
 
-## 7. Persistence and job infrastructure
+## 6. Product input model
 
-### 7.1 System of record
+The application input screen shall include the already planned experiment controls:
 
-Use PostgreSQL for:
+- Generate visual solutions: yes/no.
+- Number of simulated users.
+- Use-case scenario.
+- Iterations per synthetic user.
+- Heat/randomness.
+- Number of screens.
+- Task to perform.
+- Website link.
+- Preferred classification system.
 
-- sessions;
-- jobs;
-- job dependencies;
-- job attempts;
-- job events;
-- artifact metadata;
-- pipeline definitions;
-- pipeline runs.
+`Simulated User params` is a section/group, not a single input.
 
-For local development, SQLite MAY be temporarily supported, but CI and integration tests SHOULD include PostgreSQL.
+### 6.1 Additional recommended controls
 
-### 7.2 Artifact storage
+#### Persona generation
 
-Development:
+- Persona source:
+  - TinyTroupe generated;
+  - user supplied;
+  - preset cohort.
+- Persona seed.
+- Persona diversity: low / medium / high.
 
-`./data/artifacts/`
+#### Functional abilities
 
-Production-ready abstraction:
+Default mode: `Auto / Configure`.
 
-S3-compatible object storage.
+When configuring:
 
-Artifact examples:
+- vision profile;
+- color-vision profile;
+- contrast sensitivity;
+- visual acuity transform strength;
+- pointer precision;
+- movement speed;
+- processing speed;
+- working-memory capacity;
+- reading speed;
+- assistive strategy availability.
 
-- TinyTroupe persona JSON;
-- normalized persona JSON;
-- behavior profile JSON;
-- journey definition;
-- JourneyTest `run.json`;
-- JourneyTest raw `report.md`;
-- `dashboard.html`;
-- `video.webm`;
-- screenshots;
-- accessibility snapshots;
-- DOM snapshots;
-- UI-change JSON;
-- behavior event NDJSON;
-- perceived screenshots;
-- Eyeson findings;
-- pain-point JSON;
-- knowledge references;
-- alternatives;
-- enriched report;
-- slide decks;
-- generated UI assets.
+Do not automatically bind these to age.
 
-### 7.3 Queue
+#### Behavioral traits
 
-Heavy jobs MUST NOT rely only on FastAPI `BackgroundTasks`.
+Advanced configuration:
 
-Recommended production target:
+- patience;
+- persistence;
+- irritability;
+- anger reactivity;
+- anger recovery;
+- impulsivity;
+- ambiguity tolerance;
+- first-failure tolerance;
+- repeat-failure tolerance;
+- self-efficacy;
+- digital confidence;
+- help seeking;
+- exploration;
+- verification tendency;
+- risk tolerance.
 
-- Redis;
-- Celery workers or equivalent durable queue;
-- one named queue per execution class.
+Most users should leave these at generated defaults.
 
-Example queues:
+#### Context
 
-```text
-persona
-semantic
-journey
-eyeson
-knowledge
-report
-generation
-export
-```
+- task importance;
+- time pressure;
+- device type;
+- environmental distraction;
+- network profile if simulated;
+- authentication state or preconditions.
 
-The queue message SHOULD contain only:
+#### Execution limits
 
-```json
-{
-  "job_id": "job_...",
-  "attempt": 1
+- max actions;
+- max wall-clock runtime;
+- allowed origins;
+- allow abandonment;
+- allow repeated mistakes;
+- allow help seeking;
+- allow browser back;
+- allow external navigation.
+
+---
+
+## 7. Core experiment entities
+
+### 7.1 ExperimentConfig
+
+```ts
+interface ExperimentConfig {
+  id: string;
+  websiteUrl: string;
+  task: string;
+  useCaseScenario: string;
+
+  userCount: number;
+  iterationsPerUser: number;
+  randomSeed: number;
+  lmTemperature: number;
+  maxScreens: number;
+  maxActions: number;
+
+  classificationSystem: string;
+  generateVisualSolutions: boolean;
+
+  personaConfig: PersonaGenerationConfig;
+  abilityConfig: AbilityGenerationConfig;
+  behaviorConfig: BehaviorGenerationConfig;
+  executionPolicy: ExecutionPolicy;
 }
 ```
 
-The worker obtains the job specification and artifacts through the API/storage layer.
+### 7.2 SyntheticUserProfile
 
----
+```ts
+interface SyntheticUserProfile {
+  id: string;
+  source: "tinytroupe" | "manual" | "preset";
 
-## 8. Core identifiers
+  persona: PersonaSpec;
+  abilities: FunctionalAbilitySpec;
+  behavior: BehaviorProfile;
 
-Every object MUST be traceable.
-
-Required identifiers:
-
-- `session_id`
-- `pipeline_run_id`
-- `job_id`
-- `attempt_id`
-- `persona_id`
-- `synthetic_user_id`
-- `journey_run_id`
-- `step_id`
-- `screen_id`
-- `artifact_id`
-- `pain_point_id`
-- `alternative_id`
-
-Never use a GitHub branch name as the only identifier.
-
-A session MAY have:
-
-`external_ref.github_branch`
-
-for export compatibility.
-
----
-
-## 9. Job model
-
-### 9.1 Job statuses
-
-```text
-queued
-running
-waiting_on_dependency
-succeeded
-failed
-cancel_requested
-cancelled
-```
-
-### 9.2 Base job record
-
-```json
-{
-  "job_id": "job_01...",
-  "session_id": "ses_01...",
-  "pipeline_run_id": "pipe_01...",
-  "type": "persona.generate.batch",
-  "version": "1.0",
-  "status": "queued",
-  "depends_on": [],
-  "input_artifacts": [],
-  "output_artifacts": [],
-  "created_at": "...",
-  "started_at": null,
-  "ended_at": null,
-  "attempt": 1,
-  "seed": 42,
-  "metadata": {}
+  generation: {
+    seed: number;
+    model: string;
+    compilerVersion: string;
+  };
 }
 ```
 
-### 9.3 Job events
+### 7.3 PersonaSpec
 
-Each meaningful transition MUST emit an event.
+Stable descriptive identity.
+
+```ts
+interface PersonaSpec {
+  name?: string;
+  age?: number;
+  occupation?: string;
+  education?: string;
+  context?: string;
+  goals: string[];
+  motivations: string[];
+  preferences: string[];
+  beliefs?: string[];
+  skills: string[];
+  technologyExperience: string;
+  personality: Record<string, unknown>;
+}
+```
+
+### 7.4 FunctionalAbilitySpec
+
+```ts
+interface FunctionalAbilitySpec {
+  vision: {
+    colorVision: "typical" | "protanopia" | "deuteranopia" | "tritanopia" | "custom";
+    acuity: number;
+    contrastSensitivity: number;
+    glareSensitivity?: number;
+  };
+
+  motor: {
+    pointerPrecision: number;
+    movementSpeed: number;
+    dragReliability: number;
+  };
+
+  cognition: {
+    processingSpeed: number;
+    workingMemoryItems: number;
+    distractionSusceptibility: number;
+  };
+
+  reading: {
+    wordsPerMinute: number;
+  };
+
+  compensatoryStrategies: string[];
+}
+```
+
+### 7.5 BehaviorProfile
+
+```ts
+interface BehaviorProfile {
+  seed: number;
+
+  patience: number;
+  persistence: number;
+  irritability: number;
+  angerReactivity: number;
+  angerRecovery: number;
+  impulsivity: number;
+
+  ambiguityTolerance: number;
+  failureTolerance: number;
+  repeatFailureTolerance: number;
+
+  selfEfficacy: number;
+  digitalConfidence: number;
+  helpSeeking: number;
+  exploration: number;
+  verificationTendency: number;
+  riskTolerance: number;
+}
+```
+
+All normalized values are `0..1` unless otherwise stated.
+
+---
+
+## 8. Dynamic user state
+
+The authoritative user state lives in JourneyTest/TypeScript and changes after every meaningful event.
+
+```ts
+interface UserState {
+  step: number;
+  elapsedMs: number;
+
+  frustration: number;
+  anger: number;
+  confusion: number;
+  trust: number;
+  confidence: number;
+
+  cognitiveEffort: number;
+  physicalEffort: number;
+  fatigue: number;
+  perceivedProgress: number;
+
+  consecutiveFailures: number;
+  repeatedEventCounts: Record<string, number>;
+  recentElementIds: string[];
+  rememberedFacts: string[];
+
+  copingMode:
+    | "normal"
+    | "cautious"
+    | "persistent"
+    | "impulsive"
+    | "help_seeking"
+    | "abandoning";
+}
+```
+
+### 8.1 Why state must be native code
+
+State transitions must be:
+
+- reproducible;
+- inspectable;
+- fast;
+- versionable;
+- testable without an LLM;
+- calibratable later against human data.
+
+An LLM may classify what happened, but it must not be the sole authority for `frustration = 0.71`.
+
+---
+
+## 9. Experience events
+
+All browser outcomes are normalized to `ExperienceEvent` objects before state updates.
+
+```ts
+interface ExperienceEvent {
+  id: string;
+  stepId: string;
+  timestampMs: number;
+
+  type:
+    | "waiting"
+    | "success"
+    | "software_failure"
+    | "validation_failure"
+    | "navigation_failure"
+    | "user_error"
+    | "motor_error"
+    | "perception_failure"
+    | "ambiguous_feedback"
+    | "data_loss"
+    | "recovery"
+    | "progress";
+
+  severity: number;
+  durationMs?: number;
+  goalBlocked: boolean;
+  progressVisible: boolean;
+
+  attribution: {
+    software: number;
+    interface: number;
+    capability: number;
+    user: number;
+  };
+
+  recoveryQuality: number;
+  repeatKey?: string;
+  evidenceRefs: string[];
+  classifierConfidence: number;
+}
+```
+
+Attribution values should approximately sum to `1.0`.
+
+### 9.1 Native vs DSPy event classification
+
+Use native rules for obvious cases:
+
+- HTTP/network failure;
+- no DOM change after a timed action;
+- explicit validation error;
+- browser navigation failure;
+- clear success marker.
+
+Use DSPy only when classification is ambiguous.
+
+```text
+Native classifier
+  |
+  +-- confidence >= threshold --> ExperienceEvent
+  |
+  +-- ambiguous ----------------> DSPy AppraiseUXEvent
+```
+
+---
+
+## 10. Behavior state reducer
+
+Implement pure functions in TypeScript.
+
+Suggested path in the JourneyTest fork:
+
+```text
+src/behavior/
+  schemas.ts
+  types.ts
+  initialState.ts
+  stateReducer.ts
+  waitTolerance.ts
+  copingPolicy.ts
+  seededRandom.ts
+  behaviorController.ts
+  experienceClassifier.ts
+  physicalModifiers.ts
+```
+
+### 10.1 State-update principles
+
+State updates may depend on:
+
+- event severity;
+- repetition count;
+- goal blockage;
+- recovery quality;
+- perceived responsibility;
+- task importance;
+- time pressure;
+- user behavior traits;
+- previous emotional momentum.
+
+Repeated events should increase impact non-linearly.
+
+All constants must be versioned and clearly labeled as simulation coefficients until empirically calibrated.
+
+### 10.2 Frustration momentum
+
+A new issue encountered when frustration is already high may create a larger behavioral effect than the same issue at the beginning of a journey.
+
+The reducer should support emotional persistence and recovery.
+
+### 10.3 Separate effort from anger
+
+Track at least:
+
+- frustration;
+- cognitive effort;
+- physical effort;
+- temporal cost.
+
+A user can successfully complete a task without becoming angry but still experience excessive effort.
+
+---
+
+## 11. Waiting tolerance
+
+Waiting tolerance is executable behavior, not prompt prose.
+
+The controller computes a user-specific tolerance from:
+
+- baseline tolerance;
+- patience;
+- current frustration;
+- task importance;
+- time pressure;
+- visible progress;
+- expected complexity;
+- current trust.
+
+Visible progress and clear expectations should increase waiting tolerance.
+
+Example behavior:
+
+```text
+8 seconds, blank state            -> high uncertainty
+8 seconds, "Uploading 72%"       -> lower uncertainty
+20 seconds after "may take 30s"  -> may remain acceptable
+```
+
+The implementation must expose the computed wait threshold in evidence for debugging.
+
+---
+
+## 12. Coping policy
+
+Coping is represented as a policy over the current user state.
+
+```ts
+type CopingDecision =
+  | { type: "retry" }
+  | { type: "reread"; durationMs: number }
+  | { type: "wait"; durationMs: number }
+  | { type: "explore" }
+  | { type: "seek_help" }
+  | { type: "backtrack" }
+  | { type: "impulsive_retry"; repetitions: number }
+  | { type: "abandon"; reason: string };
+```
+
+### 12.1 Policy scoring
+
+Each action receives a score from profile + state + context.
+
+Examples:
+
+- `retry` increases with persistence and self-efficacy.
+- `reread` increases with verification tendency and confusion.
+- `wait` increases with patience and perceived progress.
+- `seek_help` increases with help-seeking tendency and confusion.
+- `impulsive_retry` increases with impulsivity, irritability and anger.
+- `abandon` increases with frustration, fatigue and time pressure and decreases with persistence and task importance.
+
+Convert scores to probabilities using softmax or a documented alternative, then sample with a seeded RNG.
+
+Persist the full probability distribution for every selected coping decision.
+
+### 12.2 Coping intent vs browser action
+
+Coping decisions are **intentions**.
+
+JourneyTest/Pi remains responsible for semantic realization when necessary.
+
+```text
+EXPLORE
+  -> Pi identifies a plausible alternative on the current page
+
+SEEK_HELP
+  -> Pi searches the currently visible interface for help/FAQ/support
+
+BACKTRACK
+  -> native browser-back when safe, or Pi chooses previous route
+
+IMPULSIVE_RETRY
+  -> deterministic action middleware repeats prior target quickly
+```
+
+---
+
+## 13. Physical and perceptual simulation
+
+Functional limitations must affect actual inputs/evidence where possible.
+
+### 13.1 Color vision
+
+Before persona visual judgment:
+
+```text
+original screenshot
+  -> deterministic color-vision transform
+  -> contrast/acuity transform if configured
+  -> perceived screenshot
+  -> multimodal persona judge
+```
+
+Keep both original and perceived screenshot.
+
+### 13.2 Visual acuity / contrast
+
+Implement deterministic image transforms with a versioned profile.
+
+Do not call them clinically exact. In UI/report label them as simulated perception profiles.
+
+### 13.3 Motor precision
+
+Semantic `click(@e17)` always succeeds at the intended element and cannot simulate pointer error.
+
+When motor simulation is enabled:
+
+1. retrieve the element bounding box;
+2. calculate intended coordinates;
+3. apply seeded pointer noise;
+4. use low-level mouse movement/down/up if supported by the driver;
+5. observe the actual result.
+
+Extend JourneyTest's browser driver only where necessary.
+
+### 13.4 Reading speed
+
+Estimate reading/dwell time from visible word count and configured words per minute.
+
+Personality determines whether the actor reads, skims or abandons; reading speed determines the cost when reading occurs.
+
+### 13.5 Working memory
+
+Do not merely tell the model "you have poor memory".
+
+Limit the behavioral context exposed to the actor:
+
+- retain current task goal;
+- retain a bounded set of recent relevant facts;
+- drop older interface facts according to working-memory rules;
+- allow compensatory strategies such as rereading or backtracking.
+
+---
+
+## 14. DSPy architecture
+
+### 14.1 Why use DSPy
+
+DSPy is useful because the application has several repeated semantic transformations that can later be optimized against real usability data.
+
+Use native code for deterministic state and DSPy for semantic compilation/judgment.
+
+Recommended split:
+
+```text
+NATIVE TYPESCRIPT/PYTHON
+- browser execution
+- timers
+- state reducer
+- coping probabilities
+- physical simulation
+- random sampling
+- evidence persistence
+
+DSPy/LLM
+- TinyPersona -> BehaviorProfile
+- ambiguous event appraisal
+- persona visual judgment
+- UX diagnosis/classification
+- alternative rationale
+- later optimization against human data
+```
+
+### 14.2 DSPy module: persona compiler
+
+```python
+class CompileBehaviorProfile(dspy.Signature):
+    """
+    Convert a synthetic persona into structured web-interaction priors.
+    Do not infer medical or physical impairments from demographics alone.
+    """
+
+    tiny_person: dict = dspy.InputField()
+    scenario: str = dspy.InputField()
+
+    patience: float = dspy.OutputField()
+    persistence: float = dspy.OutputField()
+    irritability: float = dspy.OutputField()
+    anger_reactivity: float = dspy.OutputField()
+    anger_recovery: float = dspy.OutputField()
+    failure_tolerance: float = dspy.OutputField()
+    repeat_failure_tolerance: float = dspy.OutputField()
+    ambiguity_tolerance: float = dspy.OutputField()
+    help_seeking: float = dspy.OutputField()
+    exploration: float = dspy.OutputField()
+    digital_confidence: float = dspy.OutputField()
+    verification_tendency: float = dspy.OutputField()
+```
+
+Compile once per synthetic user, not once per browser step.
+
+### 14.3 DSPy module: ambiguous appraisal
+
+```python
+class AppraiseUXEvent(dspy.Signature):
+    persona: dict = dspy.InputField()
+    current_state: dict = dspy.InputField()
+    intended_action: dict = dspy.InputField()
+    before_state: str = dspy.InputField()
+    after_state: str = dspy.InputField()
+    ui_changes: str = dspy.InputField()
+
+    event_type: str = dspy.OutputField()
+    severity: float = dspy.OutputField()
+    goal_blocked: bool = dspy.OutputField()
+    software_attribution: float = dspy.OutputField()
+    interface_attribution: float = dspy.OutputField()
+    capability_attribution: float = dspy.OutputField()
+    user_attribution: float = dspy.OutputField()
+    recovery_quality: float = dspy.OutputField()
+    explanation: str = dspy.OutputField()
+    confidence: float = dspy.OutputField()
+```
+
+### 14.4 DSPy module: persona visual judge
+
+```python
+class PersonaVisualJudge(dspy.Signature):
+    persona: dict = dspy.InputField()
+    behavior_profile: dict = dspy.InputField()
+    user_state: dict = dspy.InputField()
+    screenshot: dspy.Image = dspy.InputField()
+    accessibility_tree: str = dspy.InputField()
+    interface_elements: str = dspy.InputField()
+    task: str = dspy.InputField()
+
+    noticed: list[str] = dspy.OutputField()
+    missed_or_overlooked: list[str] = dspy.OutputField()
+    confusing_elements: list[str] = dspy.OutputField()
+    perceived_progress: float = dspy.OutputField()
+    visual_confidence: float = dspy.OutputField()
+    perceived_trust: float = dspy.OutputField()
+    issue_signals: list[str] = dspy.OutputField()
+```
+
+### 14.5 Do not add a second DSPy ReAct browser agent
+
+JourneyTest's existing agent/director loop remains the only navigation agent.
+
+DSPy returns structured semantic information to that loop.
+
+---
+
+## 15. Persona runtime service
+
+Create a new Python service inside Eyeson or as a sibling directory:
+
+```text
+ux-analyst-ai/persona-runtime/
+  pyproject.toml
+  app.py
+  models/
+    persona.py
+    behavior_profile.py
+    ux_event.py
+    visual_judgement.py
+  tinytroupe_adapter/
+    factory.py
+    serializer.py
+  dspy_programs/
+    compile_persona.py
+    appraise_event.py
+    visual_judge.py
+    ux_diagnosis.py
+  transport/
+    jsonl.py
+    http.py          # optional later
+  tests/
+```
+
+### 15.1 Transport
+
+For the first complete local application, use a long-lived Python subprocess speaking newline-delimited JSON over stdin/stdout.
+
+Reasons:
+
+- minimal infrastructure;
+- easy Docker integration;
+- no extra service discovery;
+- lower latency than spawning Python per call.
+
+Define a provider interface in Node so HTTP can replace JSONL later.
+
+### 15.2 Commands
+
+#### `initialize_persona`
+
+Input:
 
 ```json
 {
-  "sequence": 17,
-  "job_id": "job_01...",
-  "type": "journey.screenshot.created",
-  "timestamp": "...",
-  "progress": 0.43,
-  "data": {
-    "step_id": "step_012",
-    "artifact_id": "art_012"
+  "method": "initialize_persona",
+  "sessionId": "...",
+  "scenario": "...",
+  "personaConfig": {},
+  "abilityConfig": {},
+  "seed": 42
+}
+```
+
+Output:
+
+```json
+{
+  "persona": {},
+  "behaviorProfile": {},
+  "abilities": {}
+}
+```
+
+#### `appraise_event`
+
+Only called when native classification is below confidence threshold.
+
+#### `judge_visual_perception`
+
+Called synchronously only when the actor requires persona-specific visual perception.
+
+#### `diagnose_pain_point`
+
+May be called during report enrichment.
+
+---
+
+## 16. JourneyTest integration changes
+
+### 16.1 `src/core/schemas.ts`
+
+Extend the tester profile or run context with an **optional** simulation section. Preserve backward compatibility.
+
+Add schemas for:
+
+- `BehaviorProfile`;
+- `FunctionalAbilitySpec`;
+- `UserState`;
+- `ExperienceEvent`;
+- `CopingDecision`;
+- `BehaviorTransition`;
+- enriched run UX analysis reference.
+
+Do not force users of upstream JourneyTest to configure synthetic behavior.
+
+### 16.2 `src/runner/runJourney.ts`
+
+Instantiate `BehaviorController` when a simulation profile is present.
+
+Conceptually:
+
+```ts
+const behavior = options.profile.simulation
+  ? new BehaviorController(options.profile.simulation, recorder)
+  : undefined;
+
+const result = await runDirectorWithTimeout({
+  context: {
+    journey,
+    profile,
+    behavior,
+    browser,
+    recorder,
+    artifacts,
   }
+});
+```
+
+At finalization, provide an extension hook before reports are rendered:
+
+```ts
+const enriched = options.runEnricher
+  ? await options.runEnricher.enrich(baseResult)
+  : baseResult;
+```
+
+### 16.3 `src/runner/events.ts`
+
+Add events such as:
+
+- `behavior.state.changed`;
+- `behavior.coping.selected`;
+- `experience.event.created`;
+- `evidence.screenshot.created`;
+- `evidence.snapshot.created`;
+- `ux.analysis.requested`;
+- `ux.analysis.completed`.
+
+These events power live UI and report synchronization.
+
+### 16.4 Browser tool middleware
+
+Wrap existing actions around behavior hooks:
+
+```text
+BehaviorController.beforeAction
+  -> optional hesitation/delay/motor modification
+  -> existing JourneyTest action
+  -> existing UI-change recorder
+  -> ExperienceClassifier
+  -> BehaviorController.apply(event)
+  -> CopingPolicy
+  -> publish transition evidence
+```
+
+### 16.5 `DirectorRunContext`
+
+Add optional:
+
+```ts
+behavior?: BehaviorController;
+```
+
+### 16.6 Agent observations
+
+The agent may receive an auditable behavior summary after actions:
+
+```text
+Observed:
+No navigation occurred. Spinner was visible for 5.4 seconds.
+
+Synthetic-user state:
+frustration 0.48
+confusion 0.62
+trust 0.51
+
+Selected coping intent:
+EXPLORE_ALTERNATIVE
+```
+
+Do not expose hidden chain-of-thought. Only expose explicit simulation state and concise evidence-based rationale.
+
+### 16.7 Driver extensions for motor simulation
+
+If required, add low-level mouse operations to the browser abstraction:
+
+- `mouseMove(x, y)`;
+- `mouseDown(button)`;
+- `mouseUp(button)`.
+
+Use `getElementBox()` to calculate coordinate targets.
+
+### 16.8 Reporter changes
+
+Current reporter files to extend:
+
+- `src/reporters/markdown.ts`;
+- `src/reporters/dashboard.ts`;
+- `src/reporters/suiteDashboard.ts`;
+- optionally `src/reporters/runComparison.ts`.
+
+The JourneyTest fork should remain able to render its original report if `uxAnalysis` is absent.
+
+---
+
+## 17. Evidence model
+
+The basic unit shared between JourneyTest and Eyeson is `JourneyStepEvidence`.
+
+```ts
+interface JourneyStepEvidence {
+  id: string;
+  runId: string;
+  userId: string;
+  iterationId: string;
+  step: number;
+  timestampMs: number;
+
+  action: ActionRecord;
+
+  screenshot?: ArtifactRef;
+  perceivedScreenshot?: ArtifactRef;
+  accessibilitySnapshot?: ArtifactRef;
+  domSnapshot?: ArtifactRef;
+  semanticSnapshot?: ArtifactRef;
+  uiChanges?: ArtifactRef;
+  networkEvidence?: ArtifactRef;
+
+  elementMap?: ElementMap;
+
+  behavior?: {
+    before: UserState;
+    events: ExperienceEvent[];
+    after: UserState;
+    coping?: CopingDecision;
+  };
+
+  eyeson?: {
+    status: "pending" | "processing" | "completed" | "failed";
+    findings?: EyesonFinding[];
+  };
 }
 ```
 
-Events MUST be persisted before being streamed.
+### 17.1 Stable element IDs
+
+Screenshot annotations, semantic snapshot, accessibility tree and DOM representation must share stable element IDs wherever possible.
+
+This is mandatory for element-level pain attribution.
 
 ---
 
-## 10. Canonical FastAPI control-plane endpoints
+## 18. Evidence coordinator
 
-Mount the Gradio application at:
-
-`/ui`
-
-Reserve the standard FastAPI endpoints:
-
-- `/docs`
-- `/redoc`
-- `/openapi.json`
-
-### 10.1 Health
+Add an Eyeson-backend integration service:
 
 ```text
-GET /healthz
-GET /readyz
-GET /v1/system/services
+backend/services/evidenceCoordinator.js
 ```
 
-### 10.2 Sessions
+or TypeScript equivalent after migration.
 
-```text
-POST /v1/sessions
-GET  /v1/sessions/{session_id}
-GET  /v1/sessions/{session_id}/jobs
-GET  /v1/sessions/{session_id}/artifacts
-GET  /v1/sessions/{session_id}/report
-DELETE /v1/sessions/{session_id}
-```
+Responsibilities:
 
-### 10.3 Jobs
+- index JourneyTest artifacts;
+- persist step metadata;
+- publish step events to live UI;
+- trigger Eyeson deep analysis;
+- attach analysis results to the correct step;
+- maintain per-run analysis completion status.
 
-```text
-POST /v1/jobs
-GET  /v1/jobs/{job_id}
-POST /v1/jobs/{job_id}/cancel
-POST /v1/jobs/{job_id}/retry
-GET  /v1/jobs/{job_id}/events
-GET  /v1/jobs/{job_id}/events/stream
-GET  /v1/jobs/{job_id}/result
-```
+Interface:
 
-`events/stream` SHOULD use Server-Sent Events.
-
-### 10.4 Artifacts
-
-```text
-POST /v1/artifacts
-GET  /v1/artifacts/{artifact_id}
-GET  /v1/artifacts/{artifact_id}/content
-GET  /v1/artifacts/{artifact_id}/metadata
-```
-
-### 10.5 Pipeline packages
-
-```text
-GET  /v1/pipeline-packages
-POST /v1/pipeline-packages
-GET  /v1/pipeline-packages/{package_id}
-POST /v1/pipeline-packages/{package_id}/run
-POST /v1/pipelines/run
-GET  /v1/pipelines/{pipeline_run_id}
-POST /v1/pipelines/{pipeline_run_id}/cancel
-```
-
----
-
-## 11. Stage-specific FastAPI endpoints
-
-Each stage MUST also have a direct endpoint.
-
-These are available through the control plane even if implemented by separate workers.
-
-### 11.1 Persona generation
-
-```text
-POST /v1/personas/generate
-POST /v1/personas/generate-batch
-GET  /v1/personas/{persona_id}
-GET  /v1/persona-batches/{batch_id}
-```
-
-Input example:
-
-```json
-{
-  "count": 20,
-  "theme": "international university applications",
-  "customer_profile": "prospective international students",
-  "scenario": "mobile use while commuting",
-  "seed": 123,
-  "generator": "tinytroupe",
-  "additional_constraints": []
+```ts
+interface EvidenceCoordinator {
+  recordAction(...): Promise<void>;
+  recordScreenshot(...): Promise<void>;
+  recordSnapshot(...): Promise<void>;
+  recordBehaviorTransition(...): Promise<void>;
+  enqueueEyesonAnalysis(...): Promise<void>;
+  attachEyesonAnalysis(...): Promise<void>;
 }
 ```
 
-### 11.2 Persona normalization/behavior compilation
-
-```text
-POST /v1/behavior-profiles/compile
-POST /v1/behavior-profiles/compile-batch
-GET  /v1/behavior-profiles/{profile_id}
-```
-
-Inputs:
-
-- TinyTroupe persona artifact;
-- explicit functional abilities;
-- scenario;
-- task;
-- semantic engine (`dspy` or `direct`).
-
-### 11.3 Journey execution
-
-```text
-POST /v1/journeys/run
-GET  /v1/journeys/runs/{journey_run_id}
-POST /v1/journeys/runs/{journey_run_id}/cancel
-GET  /v1/journeys/runs/{journey_run_id}/events/stream
-```
-
-### 11.4 Eyeson analysis
-
-```text
-POST /v1/eyeson/screens/analyze
-POST /v1/eyeson/runs/analyze
-POST /v1/eyeson/pain-points/resolve
-GET  /v1/eyeson/pain-points/{pain_point_id}
-```
-
-### 11.5 Alternatives
-
-```text
-POST /v1/alternatives/generate
-POST /v1/alternatives/{alternative_id}/visualize
-GET  /v1/alternatives/{alternative_id}
-```
-
-### 11.6 Knowledge grounding
-
-```text
-POST /v1/knowledge/search
-GET  /v1/knowledge/providers
-POST /v1/knowledge/index
-```
-
-The first implementation MUST include a `null` provider.
-
-### 11.7 Reports
-
-```text
-POST /v1/reports/build
-GET  /v1/reports/{report_id}
-GET  /v1/reports/{report_id}/markdown
-GET  /v1/reports/{report_id}/html
-```
-
 ---
 
-## 12. Gradio API endpoints
+## 19. Eyeson integrated analysis mode
 
-FastAPI is the canonical machine API.
+Eyeson must gain an **evidence-input API** in addition to its legacy URL-input API.
 
-Gradio API endpoints are convenience endpoints for users already consuming the Gradio application with `gradio_client`.
+### 19.1 Two Eyeson responsibilities
 
-Every important Gradio action MUST have an explicit `api_name`.
+#### A. Fast persona perception
 
-Recommended Gradio API names:
+Synchronous only when required by the actor.
 
-```text
-/generate_persona_batch
-/compile_behavior_profiles
-/run_journey_only
-/run_ux_only
-/run_combined_test
-/run_full_solution_pipeline
-/run_custom_pipeline
-/get_pipeline_status
-/cancel_pipeline
-/get_report
-/get_pain_map
-/generate_alternatives
-/generate_full_ui
-/export_to_github
-```
+Input:
 
-A custom pipeline can also be registered with `gr.api(...)` if it does not map naturally to a visible button.
-
-Gradio callbacks MUST call the FastAPI client. They MUST NOT duplicate job logic.
-
----
-
-## 13. Predefined job packages
-
-### 13.1 `persona_only`
-
-```text
-persona.generate.batch
-→ persona.normalize
-→ behavior.compile
-```
-
-### 13.2 `journey_only`
-
-Inputs:
-
-- pre-existing behavior profile;
+- original screenshot;
+- transformed/perceived screenshot;
+- persona;
+- abilities;
 - task;
-- URL.
+- semantic element map.
 
-```text
-journey.run
-→ report.build(raw)
-```
+Output:
 
-### 13.3 `ux_only`
+- noticed elements;
+- missed elements;
+- perceived progress;
+- visual confusion;
+- visual confidence;
+- trust signal.
 
-Inputs:
+#### B. Deep UX critique
 
-- screenshot(s);
+Normally asynchronous relative to the journey.
+
+Input:
+
+- exact JourneyTest screenshot;
+- before/after evidence;
 - element map;
-- optional behavior evidence.
+- action;
+- behavior transition;
+- classification system.
+
+Output:
+
+- visual issues;
+- interaction feedback issues;
+- hierarchy issues;
+- accessibility signals;
+- element attribution;
+- pain-point candidates;
+- structured recommendations.
+
+### 19.2 Do not block the journey on deep critique
 
 ```text
-eyeson.screen.analyze
-→ pain.resolve
-→ knowledge.search(optional)
-→ alternatives.generate(optional)
-→ report.build
+screenshot created
+  -> persist
+  -> enqueue deep Eyeson analysis
+  -> journey continues
 ```
 
-### 13.4 `combined_test`
-
-```text
-persona.generate.batch
-→ behavior.compile
-→ journey.run
-   ├─ screenshots → eyeson.screen.analyze (fan-out)
-   ├─ behavior events
-   └─ final JourneyTest artifacts
-→ pain.resolve
-→ knowledge.search
-→ alternatives.generate
-→ report.build
-```
-
-### 13.5 `full_solution_pipeline`
-
-```text
-combined_test
-→ alternatives.visualize
-→ optional generated UI
-→ optional rerun alternative
-→ comparison report
-→ presentation generation
-```
+Only fast perception, when explicitly needed for actor decision-making, may block the action loop.
 
 ---
 
-## 14. Custom pipeline definition
+## 20. Pain-point resolution
 
-A custom package is a DAG.
+Add to Eyeson:
+
+```text
+backend/services/painPointResolver.js
+backend/services/painEpisodeAggregator.js
+```
+
+### 20.1 Pain episode
+
+Do not report every tiny state delta as an independent UX issue.
+
+Aggregate contiguous/repeated friction into episodes using:
+
+- frustration growth;
+- confusion growth;
+- trust decline;
+- repeated actions;
+- repeated errors;
+- backtracking;
+- long waits;
+- excessive effort;
+- abandonment;
+- repeated interaction with the same element.
+
+### 20.2 `UXPainPoint`
+
+```ts
+interface UXPainPoint {
+  id: string;
+  runId: string;
+  userId: string;
+  stepIds: string[];
+
+  title: string;
+  summary: string;
+  severity: "low" | "medium" | "high" | "critical";
+  confidence: number;
+
+  screenshotRef: string;
+  videoTimestampMs: number;
+
+  behavioralImpact: {
+    frustrationDelta: number;
+    confusionDelta: number;
+    trustDelta: number;
+    cognitiveEffortDelta: number;
+    physicalEffortDelta: number;
+    elapsedCostMs: number;
+    retries: number;
+    backtracks: number;
+  };
+
+  elements: ElementAttribution[];
+  diagnosis: UXDiagnosis;
+  grounding: GroundingSummary;
+  alternatives: UXAlternative[];
+}
+```
+
+### 20.3 Element attribution
+
+```ts
+interface ElementAttribution {
+  elementId: string;
+  box: BoundingBox;
+  role: "trigger" | "cause" | "feedback" | "obstacle" | "recovery";
+  contribution: number;
+  confidence: number;
+}
+```
+
+A pain point may involve multiple elements.
+
+Use these signals:
+
+- directly acted-on element;
+- UI elements created/changed after action;
+- error/status elements;
+- DOM causal timing;
+- visual saliency;
+- before/after screenshot region;
+- persona perception.
+
+---
+
+## 21. UX diagnosis
+
+Eyeson diagnosis must explicitly separate four layers:
+
+1. **Observed facts** — browser/UI facts.
+2. **Behavioral effect** — state changes and user actions.
+3. **Inferred mechanism** — likely UX cause with confidence.
+4. **Grounded principle** — optional retrieved UX knowledge.
+
+```ts
+interface UXDiagnosis {
+  rootCause: string;
+  mechanism: string;
+  category: string;
+
+  observedEvidence: string[];
+  behavioralEvidence: string[];
+  personaInteraction: string;
+
+  confidence: number;
+}
+```
 
 Example:
 
-```json
-{
-  "name": "three-persona-journey-with-ux",
-  "version": "1.0",
-  "inputs": {
-    "url": "https://example.com",
-    "task": "Complete checkout"
-  },
-  "steps": [
-    {
-      "id": "personas",
-      "type": "persona.generate.batch",
-      "config": {"count": 3}
-    },
-    {
-      "id": "behavior",
-      "type": "behavior.compile",
-      "depends_on": ["personas"],
-      "map_over": "personas.outputs.personas"
-    },
-    {
-      "id": "journey",
-      "type": "journey.run",
-      "depends_on": ["behavior"],
-      "map_over": "behavior.outputs.profiles"
-    },
-    {
-      "id": "eyeson",
-      "type": "eyeson.run.analyze",
-      "depends_on": ["journey"],
-      "map_over": "journey.outputs.runs"
-    },
-    {
-      "id": "report",
-      "type": "report.build",
-      "depends_on": ["journey", "eyeson"]
-    }
-  ]
-}
-```
-
-Validation MUST reject:
-
-- cycles;
-- missing dependencies;
-- unknown job types;
-- incompatible artifact types;
-- missing required inputs.
-
----
-
-## 15. Artifact contracts
-
-### 15.1 Persona artifact
-
-```json
-{
-  "schema_version": "1.0",
-  "persona_id": "per_...",
-  "generator": {
-    "name": "tinytroupe",
-    "version": "...",
-    "commit": "..."
-  },
-  "seed": 42,
-  "persona": {},
-  "provenance": {}
-}
-```
-
-### 15.2 Behavior profile artifact
-
-```json
-{
-  "schema_version": "1.0",
-  "profile_id": "beh_...",
-  "persona_id": "per_...",
-  "traits": {
-    "patience": 0.4,
-    "persistence": 0.8,
-    "irritability": 0.6,
-    "anger_reactivity": 0.7,
-    "anger_recovery": 0.3,
-    "impulsivity": 0.2,
-    "failure_tolerance": 0.5,
-    "repeat_failure_tolerance": 0.3,
-    "ambiguity_tolerance": 0.4,
-    "help_seeking": 0.5,
-    "exploration": 0.4,
-    "risk_tolerance": 0.3,
-    "self_efficacy": 0.7,
-    "digital_confidence": 0.6,
-    "verification_tendency": 0.8
-  },
-  "abilities": {
-    "vision": {},
-    "motor": {},
-    "cognition": {}
-  },
-  "context": {},
-  "semantic_engine": "dspy",
-  "compiler_version": "1.0",
-  "seed": 42
-}
-```
-
-### 15.3 Ability rule
-
-Age/demographic information MUST NOT automatically produce an impairment.
-
-If an ability value is unspecified:
-
-- leave it typical/default;
-- or sample from an explicitly selected population model;
-- record the model used.
-
-### 15.4 Journey runtime profile
-
-```json
-{
-  "schema_version": "1.0",
-  "synthetic_user_id": "usr_...",
-  "persona_artifact_id": "art_...",
-  "behavior_profile_artifact_id": "art_...",
-  "task": {},
-  "scenario": {},
-  "seed": 42
-}
-```
-
-### 15.5 User state
-
-```json
-{
-  "frustration": 0.0,
-  "anger": 0.0,
-  "confusion": 0.0,
-  "trust": 0.7,
-  "confidence": 0.7,
-  "cognitive_effort": 0.0,
-  "physical_effort": 0.0,
-  "fatigue": 0.0,
-  "perceived_progress": 0.0,
-  "consecutive_failures": 0,
-  "coping_mode": "normal"
-}
-```
-
-### 15.6 Experience event
-
-```json
-{
-  "event_id": "evt_...",
-  "type": "software_failure",
-  "severity": 0.7,
-  "duration_ms": 6400,
-  "goal_blocked": true,
-  "progress_visible": false,
-  "repeat_key": "checkout-submit",
-  "attribution": {
-    "software": 0.6,
-    "interface": 0.3,
-    "capability": 0.0,
-    "user": 0.1
-  },
-  "recovery_quality": 0.2,
-  "evidence": []
-}
-```
-
-### 15.7 Coping decision
-
-```json
-{
-  "decision": "impulsive_retry",
-  "probabilities": {
-    "retry": 0.22,
-    "reread": 0.06,
-    "wait": 0.03,
-    "explore": 0.07,
-    "seek_help": 0.09,
-    "impulsive_retry": 0.42,
-    "abandon": 0.11
-  },
-  "seed": 42,
-  "sample_index": 11
-}
-```
-
-### 15.8 Screen evidence
-
-```json
-{
-  "screen_id": "screen_...",
-  "journey_run_id": "jr_...",
-  "step_id": "step_012",
-  "timestamp_ms": 48730,
-  "url": "https://example.com/checkout",
-  "screenshot_artifact_id": "art_...",
-  "snapshot_artifact_id": "art_...",
-  "ui_change_artifact_id": "art_...",
-  "elements": [
-    {
-      "id": "@e17",
-      "role": "button",
-      "label": "Continue",
-      "box": {
-        "x": 315,
-        "y": 532,
-        "width": 132,
-        "height": 44
-      }
-    }
-  ]
-}
-```
-
-### 15.9 Pain point
-
-```json
-{
-  "pain_point_id": "pain_...",
-  "title": "Insufficient feedback after Continue",
-  "severity": "high",
-  "steps": ["step_012", "step_013"],
-  "behavioral_impact": {
-    "frustration_delta": 0.31,
-    "confusion_delta": 0.22,
-    "trust_delta": -0.14,
-    "retries": 2,
-    "backtracks": 0,
-    "elapsed_cost_ms": 11300
-  },
-  "elements": [
-    {
-      "element_id": "@e17",
-      "role": "trigger",
-      "contribution": 0.6,
-      "confidence": 0.9
-    }
-  ],
-  "diagnosis": {},
-  "grounding": {},
-  "alternatives": []
-}
-```
-
-### 15.10 Alternative
-
-```json
-{
-  "alternative_id": "alt_...",
-  "pain_point_ids": ["pain_..."],
-  "title": "Persistent processing state",
-  "strategy": "feedback",
-  "proposed_change": "Disable duplicate submission and show persistent processing feedback.",
-  "rationale": "...",
-  "expected_impact": {
-    "frustration": "lower",
-    "confusion": "lower",
-    "task_success": "higher"
-  },
-  "effort": "low",
-  "confidence": 0.82,
-  "grounding_refs": [],
-  "visual_artifact_id": null
-}
-```
-
----
-
-## 16. JourneyTest integration
-
-### 16.1 Ownership
-
-JourneyTest MUST own:
-
-- live browser session;
-- URL navigation;
-- click/fill/type/scroll/wait;
-- video recording;
-- screenshots;
-- semantic/accessibility snapshots;
-- DOM state;
-- UI-change observation;
-- network/console evidence;
-- journey success/fail/blocker criteria;
-- raw JourneyTest `run.json`.
-
-### 16.2 Product wrapper
-
-Do not break JourneyTest's strict upstream `RunResult` schema.
-
-Instead create a product-level envelope:
-
-```json
-{
-  "schema_version": "1.0",
-  "session_id": "...",
-  "synthetic_user_id": "...",
-  "journeytest": {
-    "run_result_artifact_id": "...",
-    "dashboard_artifact_id": "...",
-    "video_artifact_id": "..."
-  },
-  "behavior": {},
-  "eyeson": {},
-  "grounding": {},
-  "alternatives": {},
-  "report": {}
-}
-```
-
-This isolates upstream changes from the product schema.
-
-### 16.3 Behavior hooks
-
-Behavior logic MUST be injected around JourneyTest browser actions.
-
-Conceptual flow:
-
 ```text
-before action
-→ BehaviorController.beforeAction
-→ physical/timing modifiers
-→ JourneyTest browser action
-→ JourneyTest UI-change observation
-→ native experience classifier
-→ DSPy appraisal only if ambiguous
-→ StateReducer
-→ CopingPolicy
-→ next agent observation/action
+Observed:
+- Continue clicked twice.
+- No navigation for 6.4 seconds.
+- Spinner appeared, then disappeared.
+
+Behavioral effect:
+- frustration +0.24
+- trust -0.11
+- two retries
+
+Inference:
+Insufficient system-status feedback made it unclear whether submission was accepted.
+
+Persona interaction:
+Low waiting tolerance amplified the effect.
 ```
 
-### 16.4 Synchronous vs asynchronous analysis
-
-Synchronous:
-
-- information required for the next user decision;
-- persona perception when visual limitations change what the user can see;
-- state/coping calculation.
-
-Asynchronous:
-
-- deep Eyeson critique;
-- report prose;
-- knowledge grounding;
-- alternative generation;
-- presentation generation.
-
 ---
 
-## 17. Behavior controller
+## 22. Pain visualizations
 
-The live behavior controller SHOULD live in the Journey worker's TypeScript process.
-
-Reason:
-
-- no network round trip for every state update;
-- deterministic behavior;
-- low latency;
-- direct access to action/result metadata;
-- seed reproducibility.
-
-Required modules:
-
-```text
-behavior/
-├── state.ts
-├── stateReducer.ts
-├── waitingTolerance.ts
-├── failureModel.ts
-├── copingPolicy.ts
-├── seededRandom.ts
-├── motorModel.ts
-├── readingModel.ts
-├── perceptionPolicy.ts
-└── events.ts
-```
-
-DSPy MAY be called through FastAPI only for ambiguous semantic appraisal.
-
----
-
-## 18. Persona and DSPy jobs
-
-### 18.1 Job A — persona generation
-
-`persona.generate.batch`
-
-Input:
-
-- target population description;
-- theme;
-- scenario;
-- count;
-- seed.
-
-Output:
-
-- one persona artifact per person;
-- one batch manifest.
-
-This job MUST be reusable without starting a browser.
-
-### 18.2 Job B — persona normalization
-
-`persona.normalize`
-
-Purpose:
-
-Convert TinyTroupe-specific JSON into the product's stable persona contract.
-
-Do not discard the original persona artifact.
-
-### 18.3 Job C — behavior compilation
-
-`behavior.compile`
-
-Input:
-
-- normalized persona;
-- explicit functional ability profile;
-- scenario;
-- task.
-
-Output:
-
-- behavior profile;
-- provenance;
-- semantic engine used.
-
-DSPy is appropriate here because this mapping can later be optimized against observed human behavior.
-
-### 18.4 Job D — agent runtime assembly
-
-`agent-runtime.prepare`
-
-Input:
-
-- behavior profile;
-- task;
-- scenario;
-- browser/device context.
-
-Output:
-
-- Journey runtime profile;
-- initial UserState;
-- explicit physical/perception constraints.
-
----
-
-## 19. Eyeson integration
-
-### 19.1 Eyeson MUST be an evidence consumer
-
-Eyeson MUST NOT open a second browser session during a combined run.
-
-JourneyTest is the source of canonical screenshots and state.
-
-When JourneyTest emits:
-
-`journey.screenshot.created`
-
-the orchestrator SHOULD enqueue or fan out:
-
-`eyeson.screen.analyze`
-
-### 19.2 Eyeson responsibilities
-
-Eyeson SHOULD provide:
-
-- screenshot visual analysis;
-- element-region analysis;
-- before/after crop comparison;
-- visual hierarchy/saliency;
-- typography/spacing/color metrics;
-- pain-point candidate ranking;
-- frustration/confusion/effort overlays;
-- root-cause diagnosis;
-- alternative generation input;
-- optional persona-view visual analysis.
-
-### 19.3 Element mapping
-
-Every screenshot intended for element-level UX reasoning SHOULD include:
-
-- stable semantic element ID;
-- role;
-- accessible label;
-- bounding box;
-- visibility;
-- current state;
-- relation to clicked/changed element.
-
-The screenshot, semantic snapshot, and element map MUST refer to the same browser state.
-
----
-
-## 20. Pain and frustration visualization
-
-The UI/report MUST distinguish:
+The frontend shall support screenshot overlays by mode:
 
 - frustration;
 - confusion;
-- missed/overlooked controls;
-- repeated actions;
+- missed/overlooked elements;
+- repeated action;
 - cognitive effort;
 - physical effort;
-- trust drop.
+- Eyeson issue severity.
 
-Do not collapse all metrics into one heatmap.
+### 22.1 Friction score
 
-Element friction score MAY begin as:
-
-```text
-behavioral_delta
-× attribution_confidence
-× element_contribution
-```
-
-The UI MUST label model-derived scores as estimates until empirically calibrated.
-
----
-
-## 21. RAG/UX knowledge roadmap placeholder
-
-### 21.1 Interface
-
-Create immediately:
-
-```python
-class UXKnowledgeProvider(Protocol):
-    async def search(self, query: UXKnowledgeQuery) -> list[UXKnowledgeResult]:
-        ...
-```
-
-### 21.2 Providers
-
-Initial:
-
-- `NullUXKnowledgeProvider`
-- `FixtureUXKnowledgeProvider`
-
-Roadmap:
-
-- WCAG/WAI corpus;
-- Nielsen heuristic corpus;
-- GOV.UK/design-system patterns;
-- Material/HIG/platform guidance where licensing/usage permits;
-- published UX research;
-- internal design system;
-- internal user-research reports;
-- support tickets;
-- experiment/A-B results.
-
-### 21.3 Rule
-
-Diagnosis first, retrieval second.
-
-Correct:
+Element-level friction may initially be calculated from:
 
 ```text
-observed behavioral pain
-+ visual evidence
-→ diagnosis
-→ retrieve relevant knowledge
-→ ground/refine recommendation
+friction contribution
+= behavioral delta
+  * attribution confidence
+  * element contribution
 ```
 
-Avoid:
+The exact formula is a versioned simulation metric, not an empirical truth.
 
-```text
-retrieve heuristic
-→ search UI for something that violates it
-```
+### 22.2 Interaction
 
-### 21.4 Grounding status
+Clicking a highlighted region must show:
 
-Every finding/alternative MUST expose:
-
-```text
-not_configured
-pending
-grounded
-failed
-```
-
-Never represent an ungrounded model recommendation as grounded.
-
----
-
-## 22. Report architecture
-
-### 22.1 Keep raw JourneyTest report
-
-Preserve raw:
-
-- `run.json`
-- `report.md`
-- `dashboard.html`
-
-as source artifacts.
-
-### 22.2 Add product-level enriched report
-
-Create a separate report job.
-
-The enriched report MUST include:
-
-1. Executive summary
-2. Synthetic user
-3. Behavioral/ability profile
-4. Journey outcome
-5. Experience trajectory
-6. Critical pain episodes
-7. Element-level UX diagnosis
-8. Eyeson visual review
-9. Alternatives
-10. Grounding/knowledge basis
-11. Full evidence timeline
-12. Raw JourneyTest artifact links
-
-### 22.3 Evidence vs inference
-
-Every report item SHOULD visually separate:
-
-**Observed**
-
-- browser action;
-- waiting time;
-- DOM/UI changes;
-- screenshots;
-- retries;
-- behavior state delta.
-
-**Inferred**
-
-- likely root cause;
-- persona interaction;
-- attribution confidence.
-
-**Grounded**
-
-- external/internal knowledge references.
-
-**Proposed**
-
-- alternative solution;
-- expected impact;
-- effort/confidence.
-
----
-
-## 23. Gradio UI plan
-
-The existing tab register is retained and enhanced.
-
-### 23.1 Analysis Orchestrator
-
-Keep tab name.
-
-Enhance with:
-
-- URL;
-- task;
-- scenario;
-- persona generation method;
-- number of personas;
-- iterations per persona;
-- seed/randomness;
-- device/viewport;
-- testing mode:
-  - Journey only
-  - UX feedback only
-  - Combined
-  - Full solution
-  - Custom pipeline
-- semantic engine:
-  - Direct
-  - DSPy
-- ability profile:
-  - Typical/default
-  - Explicit preset
-  - Advanced manual
-- RAG grounding:
-  - Off
-  - Fixture
-  - Configured provider
-- pipeline DAG preview;
-- Start button;
-- Cancel button;
-- live stage status.
-
-Replace GitHub-branch session orchestration with `session_id`.
-
-Optional field:
-
-`Export branch name`.
-
-### 23.2 Presentation Carousel
-
-Keep.
-
-Source presentation decks from report artifacts rather than only polling GitHub.
-
-Add:
-
-- run selector;
-- report version;
-- original vs alternative comparison decks.
-
-### 23.3 Report Viewer
-
-Keep.
-
-Add top-level mode switch:
-
-```text
-User Journey | UX Feedback | Root Causes | Solutions | Knowledge
-```
-
-Persist:
-
-- selected synthetic user;
-- selected step;
-- video timestamp;
-- selected screen
-
-when switching modes.
-
-#### User Journey
-
-Show:
-
-- video;
-- current screenshot;
-- timeline;
-- frustration/confusion/trust/fatigue graphs;
-- current coping decision;
-- behavioral state transitions;
-- raw evidence links.
-
-#### UX Feedback
-
-Show:
-
-- screenshot;
-- element overlays;
-- Eyeson findings;
-- severity;
-- affected behavior;
-- linked video moment.
-
-#### Root Causes
-
-Show:
-
-- pain episodes;
-- affected users;
-- causal element graph;
-- behavioral impacts;
-- attribution confidence.
-
-#### Solutions
-
-Show:
-
-- structured alternatives;
-- impact/effort/confidence;
-- generated visual variants when available;
-- select solutions for downstream UI generation.
-
-#### Knowledge
-
-Show:
-
-- grounding status;
-- retrieved sources;
-- principle/relevance;
-- clear distinction between retrieved content and model inference.
-
-### 23.4 Persona Thought Logs
-
-Preserve tab position but rename visible heading to:
-
-`Persona & Behavior Trace`
-
-Do not make provider-private hidden chain-of-thought a system dependency.
-
-Show auditable simulation outputs:
-
-- persona identity;
-- TinyTroupe explicit simulated thoughts if generated as output;
-- goals;
-- attention;
-- emotions;
-- concise decision rationale;
-- UserState;
-- ExperienceEvent;
-- CopingDecision;
-- action;
-- result.
-
-### 23.5 Average User Journey Heatmaps
-
-Keep tab; enhance heading to:
-
-`Cohort Pain Maps & Heatmaps`
-
-Controls:
-
-```text
-Frustration
-Confusion
-Missed elements
-Repeated actions
-Cognitive effort
-Physical effort
-Eyeson issue density
-```
-
-Filters:
-
-- persona;
-- cohort;
-- ability profile;
-- step/screen;
-- completed/abandoned;
-- iteration.
-
-### 23.6 Agents.txt
-
-Keep.
-
-Enhance to:
-
-`Developer Handoff (Agents.txt)`
-
-Output:
-
-- selected pain points;
-- grounded recommendations;
-- selected alternatives;
-- evidence refs;
-- implementation acceptance criteria;
-- coding-agent prompt;
-- downloadable JSON/Markdown.
-
-### 23.7 Full New UI
-
-Keep.
-
-Enhance with:
-
-- original screenshot/site;
-- selected alternatives;
-- generated alternative;
-- side-by-side comparison;
-- "Rerun selected synthetic users" action;
-- before/after scorecard;
-- design chat.
-
-### 23.8 System
-
-Keep.
-
-Show:
-
-- service health;
-- worker queue health;
-- versions/commits:
-  - TinyTroupe
-  - JourneyTest
-  - Eyeson
-  - DSPy
-- model providers;
-- FastAPI OpenAPI links;
-- Gradio API link;
-- storage status;
-- database status;
-- artifact retention;
-- GitHub export configuration.
-
-### 23.9 Live Monitoring
-
-Keep.
-
-Replace branch polling as primary behavior with:
-
-- pipeline DAG;
-- job status cards;
-- SSE event stream;
-- current running persona;
-- current JourneyTest step;
-- screenshot thumbnails;
-- Eyeson queue depth;
-- cancellation/retry controls.
-
-GitHub export monitoring MAY remain a secondary panel.
-
-### 23.10 Alternative Styling
-
-Keep.
-
-Use for:
-
-- visual solution styles;
-- generated alternative variants;
-- future Figma/onlook integration;
-- design-system selection;
-- visual generation settings.
-
----
-
-## 24. Gradio code structure
-
-Do not keep all tabs in one `app.py`.
-
-Each tab MUST be a function/module.
-
-Example:
-
-```python
-def build_report_tab(client: OrchestratorClient, state: AppState):
-    ...
-```
-
-Shared UI state SHOULD contain IDs, not large business objects.
-
-Example:
-
-```python
-@dataclass
-class AppState:
-    session_id: str | None
-    pipeline_run_id: str | None
-    synthetic_user_id: str | None
-    step_id: str | None
-    report_id: str | None
-```
-
----
-
-## 25. Current Gradio/FastAPI migration rules
-
-The current application mounts Gradio into FastAPI. Keep that architecture, but:
-
-- mount Gradio at `/ui`;
-- keep `/docs` for FastAPI OpenAPI;
-- remove the handwritten `/api-docs` JSON endpoint;
-- explicitly name Gradio APIs with `api_name`;
-- remove runtime monkey-patching of Gradio site-packages;
-- pin a tested Gradio version in `uv.lock`;
-- upgrade Gradio only after UI/API smoke tests pass.
-
----
-
-## 26. Type contracts
-
-Canonical external contracts SHOULD be Pydantic models in the Python control plane.
-
-Generate OpenAPI.
-
-TypeScript worker clients SHOULD be generated from OpenAPI or checked against exported JSON Schema.
-
-Do not manually maintain divergent Python and TypeScript definitions without contract tests.
-
-Every artifact schema MUST include:
-
-- `schema_version`;
-- producer name;
-- producer version;
-- created timestamp;
-- provenance/input artifact references.
-
----
-
-## 27. Observability
-
-### 27.1 Application traces
-
-Record:
-
-```text
-session
-→ pipeline
-→ job
-→ stage
-→ LLM call
-→ browser action
-→ evidence
-→ behavior transition
-→ Eyeson finding
-→ alternative
-```
-
-### 27.2 Langfuse
-
-Add an optional Langfuse adapter.
-
-Log:
-
-- prompts/signatures;
-- model name;
-- inputs/outputs after redaction;
-- explicit decision rationale;
-- behavior state transitions;
-- job IDs;
-- artifact IDs.
-
-Do not require hidden provider chain-of-thought.
-
-### 27.3 Correlation
-
-Every log line SHOULD contain:
-
-- `session_id`
-- `pipeline_run_id`
-- `job_id`
-- `synthetic_user_id` where applicable.
-
----
-
-## 28. Security and robustness
-
-- Treat website content as untrusted data.
-- Preserve JourneyTest's origin restrictions.
-- Add SSRF protections for target URLs.
-- Use dedicated test accounts.
-- Redact secrets from text logs.
-- Treat screenshots/video as potentially containing secrets.
-- Do not expose raw auth/browser-state files as artifacts.
-- Use API auth before public deployment.
-- Add request size limits.
-- Add per-service timeout and concurrency limits.
-- Cancellation MUST propagate to subprocess workers.
-- Node subprocesses MUST be terminated on cancellation/timeout.
-- Artifact paths MUST be sandboxed to the session/job directory.
-
----
-
-# 29. Development stages and mandatory tests
-
-No stage is complete until its acceptance tests pass.
-
----
-
-## Stage 0 — Baseline and repository consolidation
-
-### Deliverables
-
-- create canonical product monorepo from `aux_backup`;
-- import Eyeson engine under `services/eyeson-worker/engine`;
-- preserve existing Gradio tab register;
-- split Gradio entrypoint from business logic;
-- create Docker Compose;
-- add Python 3.12 control-plane image;
-- add Node 24 Journey worker image;
-- lock Python dependencies with `uv`;
-- lock Node dependencies;
-- remove runtime source patching where possible;
-- add service version endpoint.
-
-### Required tests
-
-**Repository smoke**
-
-```text
-PASS: Python control-plane image builds.
-PASS: Journey worker Node 24 image builds.
-PASS: Eyeson worker image builds.
-PASS: TinyTroupe imports from pinned dependency.
-PASS: Gradio starts.
-PASS: FastAPI /healthz returns 200.
-```
-
-**UI preservation**
-
-Automated browser smoke MUST verify tabs exist:
-
-```text
-Analysis Orchestrator
-Presentation Carousel
-Report Viewer
-Persona Thought Logs / Persona & Behavior Trace
-Average User Journey Heatmaps
-Agents.txt
-Full New UI
-System
-Live Monitoring
-Alternative Styling
-```
-
-**Regression**
-
-Existing persona example loading MUST still work.
-
-### Exit criterion
-
-A developer can run:
-
-```bash
-docker compose up
-```
-
-and reach `/ui`, `/docs`, and `/healthz`.
-
----
-
-## Stage 1 — Job control plane
-
-### Deliverables
-
-- Session model;
-- Job model;
-- Artifact model;
-- Pipeline model;
-- PostgreSQL migrations;
-- Redis/queue;
-- worker base class;
-- SSE event stream;
-- cancellation;
-- retries;
-- artifact service.
-
-### Required tests
-
-**API**
-
-```text
-PASS: POST /v1/sessions returns a session ID.
-PASS: POST /v1/jobs returns HTTP 202 and job ID.
-PASS: GET job transitions queued → running → succeeded.
-PASS: failed job stores structured error.
-PASS: retry creates a new attempt.
-PASS: cancel moves a running fixture job to cancelled.
-PASS: events are ordered by sequence.
-PASS: SSE reconnect can resume from last event ID.
-```
-
-**Persistence**
-
-```text
-PASS: restart API while job metadata remains available.
-PASS: artifact survives API restart.
-```
-
-**Idempotency**
-
-Same idempotency key MUST NOT start duplicate expensive jobs.
-
-### Exit criterion
-
-A dummy 5-second worker can be queued, monitored, cancelled, retried, and inspected entirely through FastAPI.
-
----
-
-## Stage 2 — TinyTroupe persona batch service
-
-### Deliverables
-
-- TinyTroupe adapter;
-- persona generation endpoint;
-- batch generation;
-- normalized persona schema;
-- persona library adapter;
-- artifact provenance.
-
-### Required tests
-
-```text
-PASS: request count=5 produces exactly 5 persona artifacts.
-PASS: every output validates against PersonaArtifact schema.
-PASS: original TinyTroupe JSON is preserved.
-PASS: normalized persona has stable product schema.
-PASS: generator version/commit is stored.
-PASS: batch can run without JourneyTest.
-PASS: one persona artifact can be fetched and reused later.
-```
-
-**Bias/ability separation**
-
-```text
-PASS: age alone does not create a non-typical vision/motor/cognition limitation.
-PASS: explicitly requested limitation is preserved.
-PASS: ability provenance says whether value was user-set, default, or sampled.
-```
-
-### Exit criterion
-
-The Persona tab/API can generate reusable persona batches independently.
-
----
-
-## Stage 3 — Semantic engine and DSPy parity
-
-### Deliverables
-
-- `SemanticEngine` protocol;
-- direct structured-LLM implementation;
-- DSPy implementation;
-- `CompileBehaviorProfile`;
-- basic DSPy evaluation dataset;
-- same Pydantic output contract for both engines.
-
-### Required tests
-
-**Contract parity**
-
-```text
-PASS: direct engine output validates.
-PASS: DSPy engine output validates.
-PASS: numeric traits remain within [0,1].
-PASS: required fields never disappear.
-```
-
-**Reproducibility**
-
-Record:
-
-- model;
-- DSPy program version;
-- prompt/signature version;
-- seed;
-- input persona artifact.
-
-**Evaluation gate**
-
-Create a small labeled fixture dataset.
-
-DSPy SHOULD NOT become the default compiler until:
-
-```text
-PASS: schema validity >= direct baseline.
-PASS: hallucination/unsupported-trait rate <= direct baseline.
-PASS: human-reviewed persona fidelity >= agreed threshold.
-```
-
-### Exit criterion
-
-A behavior profile can be compiled with either `semantic_engine=dspy` or `semantic_engine=direct` through the same API.
-
----
-
-## Stage 4 — JourneyTest worker API
-
-### Deliverables
-
-- FastAPI wrapper around Node 24 JourneyTest worker;
-- pinned JourneyTest package/fork;
-- NDJSON progress protocol from Node subprocess to wrapper;
-- artifact publishing;
-- cancellation;
-- raw JourneyTest report preservation.
-
-### Required fixture application
-
-Create `fixtures/ux-lab` with deterministic routes:
-
-```text
-/simple-success
-/delayed-response
-/repeated-failure
-/ambiguous-save
-/form-error
-/small-target
-/color-only-status
-/prompt-injection
-```
-
-### Required tests
-
-```text
-PASS: Journey worker runs /simple-success.
-PASS: raw JourneyTest verdict is passed.
-PASS: run.json is stored.
-PASS: video.webm is stored when video is enabled.
-PASS: at least one screenshot is stored.
-PASS: semantic snapshot is stored.
-PASS: UI-change artifact is stored for changing action.
-PASS: FastAPI request returns 202 rather than blocking until journey completion.
-PASS: cancellation terminates the Node process.
-```
-
-**Security**
-
-```text
-PASS: page text in /prompt-injection cannot redefine system/tool rules.
-PASS: disallowed origin navigation is blocked.
-```
-
-### Exit criterion
-
-JourneyTest can be used independently as a backend job through FastAPI.
-
----
-
-## Stage 5 — Stateful behavior and coping runtime
-
-### Deliverables
-
-- UserState;
-- ExperienceEvent;
-- StateReducer;
-- waiting tolerance;
-- repetition model;
-- anger/frustration recovery;
-- CopingPolicy;
-- seeded RNG;
-- JourneyTest pre/post action hooks;
-- behavior event artifact.
-
-### Required tests
-
-**Waiting**
-
-Given identical task/context:
-
-```text
-PASS: low-patience profile has lower effective wait tolerance than high-patience profile.
-```
-
-**Repeated failure**
-
-```text
-PASS: repeated identical failures increase repetition count.
-PASS: third repeated failure produces >= first-failure frustration delta under escalation model.
-```
-
-**Anger**
-
-```text
-PASS: high anger-recovery profile decays anger faster than low-recovery profile after recovery event.
-```
-
-**Persistence**
-
-```text
-PASS: high-persistence/low-anger user does not automatically abandon after one recoverable failure.
-PASS: low-persistence/high-frustration profile can select abandon.
-```
-
-**Seed**
-
-```text
-PASS: identical profile + seed + event history produces identical coping choices.
-PASS: different seeds can produce different valid choices.
-```
-
-**Separation**
-
-```text
-PASS: native StateReducer can run with all LLM providers disabled.
-```
-
-### Exit criterion
-
-A journey visibly diverges between at least two behavior profiles on the delayed/repeated-failure fixtures.
-
----
-
-## Stage 6 — Eyeson screenshot evidence pipeline
-
-### Deliverables
-
-- Eyeson engine imported/migrated;
-- Journey screenshot event → Eyeson job fan-out;
-- screenshot hash/deduplication;
-- element map support;
-- crop generation;
-- deep analysis can run asynchronously;
-- optional persona perception path.
-
-### Required tests
-
-```text
-PASS: Eyeson analyzes a JourneyTest screenshot without opening a new browser.
-PASS: Eyeson result references the exact source screen_id.
-PASS: duplicate screenshot hash does not create duplicate deep-analysis job unless forced.
-PASS: element bounding boxes survive API serialization.
-PASS: known small-target fixture identifies the target region.
-PASS: deep Eyeson analysis does not block JourneyTest's next browser action.
-```
-
-**Synchronous perception**
-
-For a color-vision fixture:
-
-```text
-PASS: transformed persona-view artifact differs from original.
-PASS: original screenshot remains unchanged and available.
-```
-
-### Exit criterion
-
-Each JourneyTest screen can be independently analyzed by Eyeson and linked back to its exact step/video moment.
-
----
-
-## Stage 7 — Pain episodes, root causes, RAG placeholder, alternatives
-
-### Deliverables
-
-- pain-episode aggregator;
-- element attribution;
-- root-cause diagnosis;
-- `UXKnowledgeProvider`;
-- null provider;
-- fixture provider;
-- alternative generator;
+- element name/role;
+- number of users affected;
+- state impact;
+- retry/backtrack/abandon counts;
+- Eyeson diagnosis;
+- alternatives;
 - grounding status.
 
-### Required tests
-
-**Pain aggregation**
-
-```text
-PASS: four contiguous frustration events around same goal can aggregate into one pain episode.
-PASS: unrelated later issue remains separate.
-```
-
-**Attribution**
-
-```text
-PASS: repeated click on known fixture button includes the clicked element as candidate.
-PASS: changed error element can be attributed as feedback/cause.
-PASS: contribution values are normalized/valid.
-```
-
-**RAG placeholder**
-
-```text
-PASS: Null provider returns [] and status=not_configured.
-PASS: report still completes with RAG disabled.
-```
-
-**Grounded fixture provider**
-
-```text
-PASS: known form-error query returns fixture knowledge source.
-PASS: grounding includes stable source ID.
-PASS: model cannot mark result grounded when references=[].
-```
-
-**Alternatives**
-
-```text
-PASS: every alternative references at least one pain_point_id.
-PASS: alternative includes rationale, effort, confidence and expected impact.
-PASS: alternative generation can run from a stored pain-point artifact without rerunning JourneyTest.
-```
-
-### Exit criterion
-
-A fixture journey yields an inspectable chain:
-
-```text
-behavioral pain
-→ element
-→ diagnosis
-→ optional knowledge
-→ alternative
-```
-
 ---
 
-## Stage 8 — Enriched report and output UI
+## 23. UX knowledge grounding / RAG placeholder
 
-### Deliverables
+Create the abstraction in v1 even if retrieval is disabled.
 
-- product-level AnalysisRunEnvelope;
-- report aggregation service;
-- enriched Markdown/HTML;
-- Gradio report modes;
-- synchronized video/timeline;
-- pain maps;
-- solution selection.
-
-### Required tests
-
-**Report**
-
-```text
-PASS: raw JourneyTest report remains accessible.
-PASS: enriched report includes persona.
-PASS: enriched report includes journey outcome.
-PASS: enriched report includes state trajectory.
-PASS: enriched report includes pain points.
-PASS: each major pain point includes evidence.
-PASS: alternatives appear under their pain point.
-PASS: grounding status is visible.
+```ts
+interface UXKnowledgeProvider {
+  search(query: UXKnowledgeQuery): Promise<UXKnowledgeResult[]>;
+}
 ```
 
-**Mode switching**
-
-Automated UI test:
-
-```text
-1. select user X
-2. select step 12
-3. switch User Journey → UX Feedback
-4. PASS: user X remains selected
-5. PASS: step 12 remains selected
-6. switch Root Causes → Solutions
-7. PASS: linked pain point remains selected where applicable
+```ts
+interface UXKnowledgeQuery {
+  painPoint: UXPainPoint;
+  frameworks?: string[];
+  elementType?: string;
+  problemCategories?: string[];
+  personaFactors?: string[];
+}
 ```
 
-**Visualization**
-
-```text
-PASS: frustration overlay can be selected independently from confusion overlay.
-PASS: selecting a pain element shows its behavioral impact.
-PASS: video can seek to a linked evidence timestamp.
+```ts
+interface UXKnowledgeResult {
+  id: string;
+  source: string;
+  title: string;
+  framework:
+    | "wcag"
+    | "nielsen"
+    | "govuk"
+    | "material"
+    | "internal"
+    | "research"
+    | "other";
+  principle?: string;
+  content: string;
+  sourceUrl?: string;
+  relevance: number;
+}
 ```
 
-### Exit criterion
+### 23.1 Default implementation
 
-A non-developer can explain what happened, why it hurt, where it hurt, and what alternatives were proposed from the UI alone.
-
----
-
-## Stage 9 — Custom job packages and Gradio API
-
-### Deliverables
-
-- predefined packages;
-- custom DAG schema;
-- DAG validation;
-- fan-out/fan-in;
-- resume;
-- replay stage;
-- explicit Gradio `api_name`s.
-
-### Required tests
-
-**DAG validation**
-
-```text
-PASS: valid custom pipeline accepted.
-PASS: cycle rejected.
-PASS: unknown job type rejected.
-PASS: incompatible artifact mapping rejected.
+```ts
+class NullUXKnowledgeProvider implements UXKnowledgeProvider {
+  async search() { return []; }
+}
 ```
 
-**Fan-out**
-
-```text
-PASS: one persona batch of 3 creates 3 behavior jobs.
-PASS: 3 behavior jobs can create 3 Journey jobs.
-PASS: final report waits for required dependencies.
-```
-
-**Replay**
-
-```text
-PASS: rerun Eyeson from existing screen artifacts without rerunning persona or journey.
-PASS: rerun report from existing artifacts.
-```
-
-**Gradio API**
-
-Using `gradio_client`:
-
-```text
-PASS: /generate_persona_batch callable.
-PASS: /run_journey_only callable.
-PASS: /run_combined_test callable.
-PASS: /run_custom_pipeline callable.
-PASS: returned pipeline_run_id can be polled through FastAPI.
-```
-
-### Exit criterion
-
-External code can treat Gradio as a convenience API while all canonical state remains in FastAPI.
-
----
-
-## Stage 10 — Cohort testing, hardening, and production readiness
-
-### Deliverables
-
-- multi-user concurrency;
-- iteration support;
-- aggregate root-cause analysis;
-- queue limits;
-- timeouts;
-- auth;
-- artifact retention;
-- Langfuse adapter;
-- GitHub exporter;
-- load tests.
-
-### Required tests
-
-**Cohort**
-
-Run:
-
-```text
-10 personas × 2 iterations
-```
-
-Required:
-
-```text
-PASS: 20 journey runs have unique run IDs.
-PASS: no browser state leakage between isolated runs where isolation requested.
-PASS: aggregate report counts all successful/failed/abandoned runs correctly.
-PASS: pain-point aggregation preserves original source users.
-```
-
-**Resilience**
-
-```text
-PASS: kill a worker mid-job; attempt is marked interrupted/failed and can retry.
-PASS: restart API; pipeline state survives.
-PASS: failed Eyeson job does not destroy JourneyTest artifacts.
-PASS: RAG outage results in grounding=failed, not full pipeline failure unless grounding was configured as required.
-```
-
-**Load**
-
-Define an initial target, e.g.:
-
-```text
-5 simultaneous Journey runs
-20 concurrent Eyeson screenshot jobs
-```
-
-and require no lost job events/artifacts.
-
-**Security**
-
-```text
-PASS: unauthenticated protected production endpoint rejected.
-PASS: path traversal artifact request rejected.
-PASS: raw secrets are redacted from text artifacts.
-```
-
-### Exit criterion
-
-The system is suitable for controlled multi-user deployments and repeatable UX experiments.
-
----
-
-# 30. Required automated test suites
-
-## Python
-
-Use:
-
-- `pytest`
-- `pytest-asyncio`
-- `httpx` test client
-- Pydantic validation
-- coverage
-
-Required directories:
-
-```text
-tests/unit
-tests/contract
-tests/integration
-tests/e2e
-```
-
-## TypeScript
-
-Use:
-
-- JourneyTest's compatible test runner (Vitest);
-- TypeScript typecheck;
-- fixture browser tests.
-
-## UI
-
-Use Playwright against mounted Gradio.
-
-Do not rely only on unit-testing Gradio callback functions.
-
-## Contract tests
-
-For every stage:
-
-```text
-producer output schema
-=
-consumer accepted input schema
-```
-
-must be tested.
-
----
-
-# 31. CI gates
-
-Every pull request MUST pass:
-
-```text
-Python lint/typecheck
-Python unit tests
-Python contract tests
-TypeScript typecheck
-TypeScript unit tests
-OpenAPI generation
-OpenAPI/TS client drift check
-Docker builds
-Gradio tab smoke test
-fixture e2e quick test
-```
-
-Nightly/extended:
-
-```text
-TinyTroupe real-model smoke
-DSPy evaluation
-JourneyTest browser suite
-Eyeson visual suite
-10×2 cohort test
-RAG fixture retrieval
-report screenshot regression
-```
-
----
-
-# 32. Versioning
-
-Every service exposes:
-
-```text
-GET /version
-```
-
-Example:
+Report:
 
 ```json
 {
-  "service": "journey-worker",
-  "version": "0.3.0",
-  "git_sha": "...",
-  "dependencies": {
-    "journeytest-core": "0.1.2",
-    "agent-browser": "..."
+  "grounding": {
+    "status": "not_configured",
+    "references": []
   }
 }
 ```
 
-Artifacts MUST record producer version.
+### 23.2 Future implementations
 
----
+- `VectorUXKnowledgeProvider`;
+- `HybridUXKnowledgeProvider`;
+- `InternalResearchProvider`;
+- organization design-system connector.
 
-# 33. Recommended local Docker Compose services
+### 23.3 RAG design principle
 
-```text
-api
-gradio
-persona-worker
-semantic-worker
-journey-worker
-eyeson-worker
-knowledge-worker
-report-worker
-postgres
-redis
-```
+Retrieval supports diagnosis; it does not decide the diagnosis from scratch.
 
-Optional:
+Correct order:
 
 ```text
-minio
-langfuse/exporter
+observed struggle
+  -> diagnosis
+  -> retrieve relevant knowledge
+  -> refine/support recommendation
 ```
 
-Do not install all runtimes into one container.
+Avoid retrieval-first heuristic hunting.
 
 ---
 
-# 34. Migration from current `aux_backup`
+## 24. Alternative solution generation
 
-## Step A
-
-Freeze current UI tab behavior with Playwright smoke tests.
-
-## Step B
-
-Extract FastAPI app from the bottom of `app.py` into `apps/api/main.py`.
-
-## Step C
-
-Move each Gradio tab into a separate module.
-
-## Step D
-
-Create an `OrchestratorClient` used by all callbacks.
-
-## Step E
-
-Replace direct GitHub branch/session operations in the primary workflow with FastAPI sessions/jobs.
-
-## Step F
-
-Keep GitHub export as an explicit optional job.
-
-## Step G
-
-Replace runtime TinyTroupe cloning/patching with pinned package dependency.
-
-## Step H
-
-Move JourneyTest into its Node 24 worker container.
-
-## Step I
-
-Import Eyeson engine and remove its separate browser capture from combined runs.
-
----
-
-# 35. Data lineage example
-
-A developer MUST be able to inspect this chain:
+Add:
 
 ```text
-Session ses_1
-│
-├── Job job_1 persona.generate.batch
-│     └── Artifact art_persona_1
-│
-├── Job job_2 behavior.compile
-│     input: art_persona_1
-│     └── Artifact art_behavior_1
-│
-├── Job job_3 agent-runtime.prepare
-│     input: art_behavior_1
-│     └── Artifact art_runtime_1
-│
-├── Job job_4 journey.run
-│     input: art_runtime_1
-│     ├── art_run_json
-│     ├── art_video
-│     ├── art_screen_001
-│     ├── art_screen_002
-│     └── art_behavior_events
-│
-├── Job job_5 eyeson.screen.analyze
-│     input: art_screen_001
-│     └── art_eyeson_001
-│
-├── Job job_6 eyeson.screen.analyze
-│     input: art_screen_002
-│     └── art_eyeson_002
-│
-├── Job job_7 pain.resolve
-│     inputs: journey + behavior + Eyeson
-│     └── art_pain_points
-│
-├── Job job_8 knowledge.search
-│     input: art_pain_points
-│     └── art_knowledge
-│
-├── Job job_9 alternatives.generate
-│     inputs: pain + knowledge
-│     └── art_alternatives
-│
-└── Job job_10 report.build
-      inputs: all above
-      ├── report.md
-      └── report.html
+backend/services/alternativeGenerator.js
+backend/services/alternativeRenderer.js
 ```
 
-No hidden in-memory dependency is permitted for this chain.
+### 24.1 `UXAlternative`
+
+```ts
+interface UXAlternative {
+  id: string;
+  title: string;
+
+  strategy:
+    | "copy"
+    | "feedback"
+    | "layout"
+    | "interaction"
+    | "visual"
+    | "workflow"
+    | "accessibility";
+
+  proposedChange: string;
+  rationale: string;
+  addressesPainPointIds: string[];
+
+  expectedImpact: {
+    frustration: "lower" | "neutral";
+    confusion: "lower" | "neutral";
+    taskSuccess: "higher" | "neutral";
+  };
+
+  effort: "low" | "medium" | "high";
+  confidence: number;
+
+  grounding: UXKnowledgeResult[];
+
+  visualAlternative?: {
+    originalScreenshotRef: string;
+    generatedArtifactRef?: string;
+    targetElementIds: string[];
+    provider: string;
+  };
+}
+```
+
+### 24.2 Generate multiple strategies
+
+Do not return only "make it clearer".
+
+Example for unclear processing state:
+
+- persistent button processing state;
+- contextual progress feedback;
+- immediate transition with background processing.
+
+### 24.3 Visual alternatives
+
+When `generateVisualSolutions = true`, use a provider abstraction:
+
+```ts
+interface VisualSolutionProvider {
+  render(input: VisualSolutionInput): Promise<VisualSolutionArtifact>;
+}
+```
+
+Recommended MVP provider:
+
+1. generate localized HTML/CSS alternative or component patch;
+2. render in isolated sandbox;
+3. capture screenshot;
+4. display next to original.
+
+This uses Eyeson's code-generation strengths and keeps the result inspectable.
+
+Optional roadmap providers:
+
+- image-model mockup;
+- Figma export;
+- AI-UX-derived prototype renderer.
+
+Never silently imply a generated alternative was validated by real users.
 
 ---
 
-# 36. Example developer acceptance scenario
+## 25. Experiment orchestration
 
-Fixture persona:
+Eyeson backend owns experiment-level concurrency.
 
 ```text
-high persistence
-low patience
-high anger reactivity
-moderate digital confidence
+Experiment
+  -> N synthetic users
+      -> M iterations/user
+          -> JourneyTest run
+              -> final enriched run
+  -> cohort aggregation
 ```
 
-Fixture page:
+### 25.1 Concurrency limits
 
-`/ambiguous-save`
+Configure:
 
-Expected test narrative:
+- max simultaneous browsers;
+- max simultaneous persona-runtime calls;
+- max simultaneous deep visual analyses.
 
-1. Synthetic user clicks Save.
-2. Page gives weak/incomplete feedback.
-3. Waiting tolerance is exceeded.
-4. Frustration increases.
-5. Coping policy selects retry.
-6. JourneyTest records repeated action.
-7. Eyeson receives the exact screenshot.
-8. Eyeson attributes pain to Save/feedback region.
-9. Pain resolver creates a high-confidence issue.
-10. Null knowledge provider marks recommendation ungrounded/not-configured.
-11. Alternative generator proposes persistent save-state feedback.
-12. Report renders:
-    - observed events;
-    - behavioral state delta;
-    - implicated element;
-    - diagnosis;
-    - alternative;
-    - grounding status.
-13. UI switches between Journey and UX Feedback while preserving the same step.
+Use conservative defaults to avoid browser and model overload.
 
-This scenario MUST be part of the end-to-end CI suite by Stage 8.
+### 25.2 Randomness
+
+Separate:
+
+- persona seed;
+- behavior seed;
+- JourneyTest agent/model temperature;
+- physical simulation RNG;
+- alternative generation temperature.
+
+The UI's `Heat/randomness` control may map to a documented preset across these values, but raw values must be persisted.
 
 ---
 
-# 37. Roadmap after core implementation
+## 26. Application API
 
-## RAG
+Suggested Eyeson backend API.
 
-- ingest curated UX corpora;
-- source/version tracking;
-- hybrid semantic + keyword retrieval;
-- internal knowledge collections;
-- evidence citation UI.
+### Experiments
 
-## Human calibration
+`POST /api/experiments`
 
-- import real usability sessions;
-- compare synthetic vs human:
-  - task completion;
-  - action sequences;
-  - time;
-  - errors;
-  - retries;
-  - abandonment;
-  - frustration ratings;
-- optimize DSPy modules against labeled data;
-- calibrate native state-model coefficients.
+Create configuration.
 
-## Alternative validation
+`GET /api/experiments/:experimentId`
+
+Get configuration and state.
+
+`POST /api/experiments/:experimentId/start`
+
+Start run set.
+
+`POST /api/experiments/:experimentId/cancel`
+
+Cancel outstanding runs.
+
+### Runs
+
+`GET /api/runs/:runId`
+
+Return machine-readable enriched run.
+
+`GET /api/runs/:runId/events`
+
+Server-Sent Events stream for live UI.
+
+`GET /api/runs/:runId/report`
+
+Report metadata.
+
+`GET /api/runs/:runId/artifacts/:artifactId`
+
+Serve authorized artifact.
+
+### Analysis
+
+`POST /api/runs/:runId/reanalyze`
+
+Re-run Eyeson analysis without repeating browser journey.
+
+`POST /api/pain-points/:painPointId/alternatives`
+
+Regenerate or add alternative solutions.
+
+`POST /api/pain-points/:painPointId/ground`
+
+Run knowledge grounding once a provider exists.
+
+---
+
+## 27. Live event stream
+
+Use Server-Sent Events first; WebSocket is not required for v1.
+
+Important event types:
 
 ```text
-pain point
-→ proposed alternative
-→ render/prototype
-→ rerun same personas/seeds
-→ compare
+run.started
+persona.created
+journey.step.started
+action.executed
+evidence.created
+experience.created
+behavior.state.changed
+coping.selected
+eyeson.analysis.started
+eyeson.analysis.completed
+pain_point.created
+alternative.created
+run.completed
 ```
 
-## Design integrations
+Every event includes:
 
-- Figma;
-- Onlook;
-- code-generation agents;
-- automated preview deployments.
-
----
-
-# 38. Definition of done for the first useful product
-
-The first useful product is complete when a user can:
-
-1. open the Gradio Analysis Orchestrator;
-2. enter URL + task + scenario;
-3. request N TinyTroupe personas;
-4. inspect generated personas;
-5. run a combined pipeline;
-6. visually follow JourneyTest;
-7. see state changes and coping decisions;
-8. switch to UX Feedback on the same timestamp;
-9. see Eyeson-highlighted pain elements;
-10. see a root-cause explanation;
-11. see structured alternative solutions;
-12. see grounding status even when RAG is not configured;
-13. export a developer handoff;
-14. invoke each major step individually through FastAPI;
-15. invoke predefined/custom job packages through the Gradio API;
-16. replay Eyeson/report generation without rerunning the browser journey.
+- `runId`;
+- `userId`;
+- `iterationId`;
+- `stepId` where applicable;
+- sequence number;
+- timestamp.
 
 ---
 
-# 39. Reference repositories and current implementation facts
+## 28. Frontend information architecture
 
-- Product/UI base: https://github.com/JsonLord/aux_backup
-- Eyeson: https://github.com/JsonLord/eyeson
-- JourneyTest: https://github.com/Jules-Astier/journeytest-core
-- TinyTroupe upstream: https://github.com/microsoft/TinyTroupe
-- Existing TinyTroupe fork used by `aux_backup`: https://github.com/JsonLord/TinyTroupe
-- AI-UX reference only: https://github.com/JsonLord/AI-UX
+### 28.1 Screen 1 — Configure experiment
 
-Current-state facts relevant to migration:
+Sections:
 
-- `aux_backup` is Python/Gradio/FastAPI and currently keeps most UI/business logic in one large `app.py`.
-- `aux_backup` currently uses Python 3.12 and installs Node 22 in its Docker image.
-- JourneyTest currently declares Node >=24 and is a TypeScript package.
-- JourneyTest already produces raw run evidence including JSON, Markdown/dashboard, video, screenshots, snapshots, UI-change evidence, and timeline events.
-- Eyeson currently uses Node/Express with Puppeteer, Sharp, Gemini, SQLite, and Jest.
-- TinyTroupe is a Python package and supports Python >=3.10.
-- Existing `aux_backup` tabs already cover most desired top-level product areas; the main change is to make them API-driven and evidence-synchronized rather than branch-polling/business-logic-heavy.
+1. Target website and task.
+2. Scenario/context.
+3. Synthetic users.
+4. Functional abilities.
+5. Behavior model.
+6. Analysis settings.
+7. Execution limits.
 
----
+Primary action: **Run UX simulation**.
 
-# 40. Final architectural rule
+### 28.2 Screen 2 — Live run
 
-The platform MUST preserve this separation:
+Display:
+
+- user/persona card;
+- run/iteration progress;
+- current browser/video evidence;
+- current action;
+- current state meters;
+- current coping policy;
+- recent timeline;
+- Eyeson analysis status.
+
+Do not expose hidden model chain-of-thought. Expose explicit structured rationale fields only.
+
+### 28.3 Screen 3 — Report
+
+Primary mode switch:
 
 ```text
-TinyTroupe
-    WHO is the user?
-
-DSPy semantic compiler
-    How should this persona be translated into structured behavioral priors?
-
-Native behavior runtime
-    How do those priors mechanically change state, timing, mistakes, coping and limitations?
-
-JourneyTest
-    What did the user do, and what actually happened in the browser?
-
-Eyeson
-    Where did the interface cause pain, and what visible/interaction mechanism explains it?
-
-UX Knowledge Grounder
-    What credible knowledge supports that diagnosis?
-
-Alternative Generator
-    What could be changed?
-
-Report/UI
-    How can a human inspect the complete causal chain?
+[ User Journey ] [ UX Feedback ]
 ```
 
-The canonical causal chain exposed by the product is:
+Preserve in URL/query state:
+
+- run;
+- user;
+- iteration;
+- step;
+- timestamp;
+- mode.
+
+Suggested form:
 
 ```text
-PERSONA
-→ BEHAVIOR PROFILE
-→ USER STATE
-→ OBSERVATION
-→ ACTION
-→ UI RESPONSE
-→ EXPERIENCE EVENT
-→ STATE CHANGE
-→ COPING DECISION
-→ PAIN POINT
-→ ELEMENT ATTRIBUTION
-→ UX DIAGNOSIS
-→ KNOWLEDGE GROUNDING
-→ ALTERNATIVE
-→ REPORT
+/run/:runId?mode=journey&user=:userId&step=:stepId
+/run/:runId?mode=ux&user=:userId&step=:stepId
 ```
 
-Every arrow MUST be inspectable through a job record, API response, artifact reference, or event.
+### 28.4 User Journey mode
+
+Primary questions:
+
+- Did this user complete the task?
+- What actions did they take?
+- What did they perceive?
+- Where did frustration/confusion rise?
+- What coping mechanism was selected?
+- How much effort did success require?
+
+Display:
+
+- synchronized video;
+- state timeline;
+- action timeline;
+- persona and ability profile;
+- original/perceived screenshot toggle;
+- selected coping probabilities;
+- completion criteria.
+
+### 28.5 UX Feedback mode
+
+Primary questions:
+
+- Where did the interface cause pain?
+- Which elements contributed?
+- What UX mechanism explains it?
+- How many users were affected?
+- What alternatives exist?
+- What knowledge supports them?
+
+Display:
+
+- screenshot with pain overlays;
+- root-cause card;
+- observed vs inferred evidence;
+- cohort impact;
+- solution alternatives;
+- grounding references/status.
+
+### 28.6 Aggregate root-cause view
+
+The output system also needs a cohort mode independent of the two per-step interpretations.
+
+Suggested control:
+
+```text
+View: [ Individual user ] [ Aggregate root causes ] [ Isolated issue ]
+```
+
+Aggregate by normalized pain-point signature:
+
+- screen/route;
+- element role/identifier;
+- diagnosis category;
+- behavioral mechanism.
+
+Show:
+
+- affected users;
+- affected iterations;
+- average state impact;
+- abandonment count;
+- persona dimensions correlated with impact;
+- ranked alternatives.
+
+---
+
+## 29. Report data model
+
+JourneyTest's existing `RunResult` remains the base result.
+
+Add optional:
+
+```ts
+interface UXRunAnalysis {
+  behaviorSummary: BehavioralSummary;
+  emotionalTrajectory: UserStatePoint[];
+  painPoints: UXPainPoint[];
+  eyeson: EyesonRunSummary;
+  alternatives: UXAlternative[];
+  grounding: GroundingSummary;
+}
+```
+
+The final `run.json` becomes:
+
+```text
+RunResult
+  + existing JourneyTest verdict/artifacts/timeline
+  + uxAnalysis
+```
+
+Do not replace the existing verdict.
+
+Semantic distinction:
+
+- **Journey verdict:** did the task pass/fail/block?
+- **UX analysis:** what experience occurred and what should change?
+
+---
+
+## 30. Final report structure
+
+`report.md` and `dashboard.html` should contain:
+
+### 1. Executive summary
+
+- task outcome;
+- experience quality;
+- strongest pain point;
+- strongest recommendation;
+- completion/abandonment.
+
+### 2. Synthetic user
+
+- persona;
+- behavior profile;
+- abilities;
+- scenario/context;
+- generation/version metadata.
+
+### 3. Journey outcome
+
+- duration;
+- actions;
+- errors;
+- retries;
+- backtracks;
+- effort;
+- task result.
+
+### 4. Experience trajectory
+
+Charts/timeline for:
+
+- frustration;
+- confusion;
+- trust;
+- fatigue;
+- effort.
+
+### 5. Critical pain points
+
+For each:
+
+- screenshot;
+- highlighted element(s);
+- video timestamp;
+- observed evidence;
+- behavioral effect;
+- diagnosis;
+- persona interaction;
+- grounding status/references;
+- alternatives.
+
+### 6. Eyeson UX review
+
+- hierarchy;
+- feedback;
+- interaction;
+- copy;
+- accessibility;
+- responsive/layout findings.
+
+### 7. Alternative solutions
+
+Rank by:
+
+- expected impact;
+- implementation effort;
+- confidence;
+- personas affected.
+
+### 8. UX knowledge basis
+
+Show provider status and retrieved sources if configured.
+
+### 9. Full evidence
+
+- event timeline;
+- screenshots;
+- perceived screenshots;
+- DOM/a11y snapshots;
+- UI changes;
+- network/console where collected;
+- video.
+
+---
+
+## 31. Report evidence language
+
+Every recommendation must distinguish:
+
+### Observed
+
+Facts from browser and behavior engine.
+
+### Inferred
+
+Model diagnosis with confidence.
+
+### Grounded
+
+Retrieved UX guidance/research.
+
+### Proposed
+
+Alternative design recommendation.
+
+This separation must be visible in the UI and serialized in `run.json`.
+
+---
+
+## 32. Artifact layout
+
+Suggested per-run filesystem layout:
+
+```text
+runs/<runId>/
+  run.json
+  report.md
+  dashboard.html
+  video.webm
+
+  persona/
+    persona.json
+    behavior-profile.json
+    abilities.json
+
+  events/
+    events.ndjson
+    behavior-events.ndjson
+
+  screenshots/
+    0001.png
+    0002.png
+
+  perceived-screenshots/
+    0001.png
+    0002.png
+
+  snapshots/
+    0001.txt
+    0002.txt
+
+  element-maps/
+    0001.json
+
+  ui-changes/
+    0001.json
+
+  eyeson/
+    step-0001.json
+    step-0002.json
+    pain-points.json
+
+  alternatives/
+    <painPointId>/
+      alternative-1.json
+      alternative-1.png
+
+  grounding/
+    <painPointId>.json
+```
+
+Every artifact must have an index entry in `run.json`; paths alone are not sufficient.
+
+---
+
+## 33. Eyeson analysis scheduling
+
+### 33.1 Screen budget
+
+`Number of screens` means maximum distinct screen states selected for deep Eyeson analysis, not necessarily maximum browser actions.
+
+Selection priority:
+
+1. frustration spikes;
+2. explicit errors;
+3. abandonment point;
+4. major route/screen changes;
+5. user-selected bookmarks;
+6. representative normal states.
+
+JourneyTest may still capture more screenshots for evidence.
+
+### 33.2 Analysis queue
+
+Define:
+
+```ts
+interface AnalysisQueue {
+  enqueue(job: EyesonAnalysisJob): Promise<void>;
+  flush(runId: string): Promise<void>;
+}
+```
+
+MVP: in-memory queue with concurrency limit.
+
+Production option: BullMQ/Redis adapter.
+
+At report finalization, either:
+
+- wait for required analysis jobs; or
+- mark report `analysisStatus = partial` and update once complete.
+
+For a deterministic CLI/report artifact, prefer waiting for the selected screen budget to finish before final report generation.
+
+---
+
+## 34. Alternative retest roadmap
+
+The data model should support a later closed loop:
+
+```text
+Original UI
+ -> personas run
+ -> pain point
+ -> Eyeson alternative
+ -> alternative prototype
+ -> rerun same personas and seeds
+ -> compare behavior
+```
+
+Store alternative lineage:
+
+```ts
+interface AlternativeExperimentLink {
+  sourceRunId: string;
+  painPointId: string;
+  alternativeId: string;
+  validationRunIds: string[];
+}
+```
+
+Do not claim expected impact is validated until an actual rerun or real-user study supports it.
+
+---
+
+## 35. Observability and Langfuse
+
+Langfuse is optional but recommended for semantic-model tracing.
+
+Trace explicit structured steps:
+
+- persona compilation;
+- event appraisal;
+- visual judgment;
+- diagnosis;
+- alternative generation;
+- RAG retrieval.
+
+Log:
+
+- inputs;
+- outputs;
+- model/version;
+- latency;
+- cost where available;
+- confidence;
+- run/user/step correlation IDs.
+
+Do not depend on hidden chain-of-thought. Use explicit fields such as:
+
+- `observation`;
+- `decision_rationale`;
+- `diagnosis.mechanism`;
+- `copingDecision`;
+- `confidence`.
+
+---
+
+## 36. Security and browser safety
+
+The system executes against live websites. Required safeguards:
+
+- allowlist/denylist origins;
+- restrict navigation to configured target origins by default;
+- block local/private network ranges unless explicitly enabled;
+- prevent arbitrary file downloads by default;
+- prevent destructive actions where detectable;
+- require explicit configuration for purchases, submissions or irreversible operations;
+- sanitize webpage content before passing to LLMs;
+- treat webpage text as untrusted data;
+- never allow page content to overwrite system rules;
+- redact secrets from artifacts/logs;
+- isolate browser sessions per run;
+- configurable cookie/auth storage policy.
+
+---
+
+## 37. Privacy
+
+Synthetic persona data should not require real PII.
+
+If authenticated test accounts are used:
+
+- never serialize passwords into run artifacts;
+- store credentials through secrets/config provider;
+- mask sensitive form values in reports;
+- support artifact retention policies;
+- support local-only runs.
+
+---
+
+## 38. Reproducibility
+
+Persist:
+
+- experiment config hash;
+- JourneyTest commit/version;
+- Eyeson commit/version;
+- TinyTroupe commit/version;
+- DSPy version;
+- LLM provider/model/version where available;
+- persona seed;
+- behavior seed;
+- physical-simulation seed;
+- temperature/config;
+- state reducer version;
+- coping policy version;
+- UX classifier version;
+- RAG provider/index version.
+
+### 38.1 Deterministic replay mode
+
+Provide an advanced option:
+
+`Replay from evidence without browser`
+
+This re-runs:
+
+- state reducer;
+- Eyeson diagnosis;
+- report rendering;
+
+against stored evidence without revisiting the website.
+
+---
+
+## 39. Testing strategy
+
+### 39.1 JourneyTest behavior unit tests
+
+Test pure functions:
+
+- state reducer;
+- wait tolerance;
+- repeated failure escalation;
+- anger recovery;
+- coping score calculation;
+- seeded sampling;
+- abandonment thresholds;
+- working-memory filtering;
+- physical pointer noise.
+
+### 39.2 Contract tests
+
+Validate JSON contracts between:
+
+- Eyeson backend and JourneyTest;
+- JourneyTest and persona runtime;
+- evidence coordinator and Eyeson analysis;
+- report serializer and frontend.
+
+Use JSON Schema/Zod/Pydantic generated from shared definitions where practical.
+
+### 39.3 Browser integration fixtures
+
+Create deterministic local fixture websites for:
+
+- delayed button response;
+- explicit error;
+- ambiguous error;
+- small click target;
+- color-only status;
+- repeated validation failure;
+- disappearing toast;
+- slow loading with progress;
+- slow loading without progress;
+- successful recovery;
+- abandonment path.
+
+### 39.4 Visual regression
+
+Snapshot-test:
+
+- pain overlays;
+- original/perceived mode;
+- report mode switch;
+- alternatives view.
+
+### 39.5 DSPy evaluation
+
+Create labeled datasets for:
+
+- persona -> behavior mapping;
+- event classification;
+- element pain attribution;
+- UX classification;
+- alternative quality.
+
+Later optimize DSPy programs against real human-study examples.
+
+---
+
+## 40. Calibration roadmap
+
+Do not treat initial coefficients as human-truth estimates.
+
+Collect real-study measures:
+
+- completion;
+- time;
+- action sequence;
+- misclicks;
+- retries;
+- backtracks;
+- help usage;
+- abandonment;
+- self-reported frustration;
+- observed confusion;
+- discovered UX issues.
+
+Compare synthetic and real cohorts.
+
+Potential optimization metric:
+
+```text
+0.30 action-sequence agreement
+0.20 completion agreement
+0.20 UX issue agreement
+0.15 abandonment agreement
+0.15 frustration calibration
+```
+
+Exact weights require research validation.
+
+---
+
+## 41. Current-code migration plan
+
+### Phase 0 — dependency baselines
+
+- Fork/pin JourneyTest-core.
+- Pin Eyeson main commit.
+- Add TinyTroupe and DSPy lockfile.
+- Add `persona-runtime` Docker service.
+- Add shared run ID and artifact IDs across services.
+
+**Acceptance:** existing JourneyTest and Eyeson tests still pass independently.
+
+### Phase 1 — one JourneyTest run inside Eyeson
+
+Implement Eyeson backend adapter that calls JourneyTest library API.
+
+Output:
+
+- live run events;
+- `video.webm`;
+- screenshots;
+- existing JourneyTest report.
+
+**Acceptance:** a URL/task can be started from Eyeson UI and visually replayed.
+
+### Phase 2 — TinyTroupe persona generation
+
+- generate persona in Python;
+- serialize to Eyeson;
+- attach to JourneyTest profile;
+- display persona in live/report UI.
+
+**Acceptance:** multiple generated users produce persisted distinct profiles.
+
+### Phase 3 — BehaviorController MVP
+
+Implement:
+
+- patience;
+- persistence;
+- frustration;
+- trust;
+- repeat failure;
+- wait tolerance;
+- retry;
+- reread;
+- abandon.
+
+**Acceptance:** fixture app produces seed-reproducible different coping behavior for different profiles.
+
+### Phase 4 — DSPy persona compiler
+
+Convert TinyPerson to structured BehaviorProfile.
+
+**Acceptance:** compiled profile validates against schema and is stored once per user.
+
+### Phase 5 — evidence bus and screenshot streaming to Eyeson
+
+Every selected screenshot is queued for Eyeson analysis with its exact element map and behavior transition.
+
+**Acceptance:** Eyeson findings appear on the same step/timestamp as JourneyTest evidence.
+
+### Phase 6 — pain-point resolver
+
+Implement:
+
+- pain episodes;
+- element attribution;
+- behavioral impact;
+- screenshot overlays.
+
+**Acceptance:** fixture errors highlight the correct element(s) with traceable evidence.
+
+### Phase 7 — two-mode report UI
+
+Implement:
+
+- User Journey mode;
+- UX Feedback mode;
+- mode-switch preserving timestamp/step;
+- original/perceived screenshot toggle.
+
+**Acceptance:** switching modes never changes selected run/user/step.
+
+### Phase 8 — alternative generation
+
+- structured alternatives;
+- impact/effort/confidence;
+- optional visual render provider.
+
+**Acceptance:** every major pain point has zero or more alternatives tied explicitly to that pain point; no generic unattached recommendations.
+
+### Phase 9 — RAG placeholder
+
+Ship `UXKnowledgeProvider`, `NullUXKnowledgeProvider`, grounding schema and UI state.
+
+**Acceptance:** report cleanly shows `not_configured` without errors.
+
+### Phase 10 — physical/perceptual profiles
+
+Implement incrementally:
+
+- color vision transform;
+- contrast/acuity transform;
+- reading speed;
+- working-memory filtering;
+- motor pointer simulation.
+
+**Acceptance:** original and perceived artifacts are both preserved and effects are reproducible by seed/profile.
+
+### Phase 11 — cohort aggregation
+
+- user/iteration aggregation;
+- root-cause clustering;
+- persona susceptibility analysis;
+- suite dashboard extensions.
+
+**Acceptance:** users can move between individual, aggregate root-cause and isolated-issue views.
+
+### Phase 12 — knowledge grounding implementation
+
+Populate the provider with curated UX sources and/or internal research.
+
+**Acceptance:** recommendations show source identity and clearly distinguish observed/inferred/grounded/proposed claims.
+
+---
+
+## 42. Recommended Eyeson file additions
+
+Under `ux-analyst-ai/backend/`:
+
+```text
+integrations/
+  journeytestAdapter.js
+  personaRuntimeClient.js
+
+services/
+  experimentOrchestrator.js
+  evidenceCoordinator.js
+  eyesonEvidenceAnalyzer.js
+  painEpisodeAggregator.js
+  painPointResolver.js
+  alternativeGenerator.js
+  alternativeRenderer.js
+  reportEnricher.js
+
+knowledge/
+  UXKnowledgeProvider.js
+  NullUXKnowledgeProvider.js
+
+queues/
+  AnalysisQueue.js
+  InMemoryAnalysisQueue.js
+
+models/ or core/
+  experimentSchemas.js
+  evidenceSchemas.js
+  uxAnalysisSchemas.js
+
+routes/
+  experiments.js
+  runs.js
+  painPoints.js
+```
+
+The exact folder names may be adapted to Eyeson's existing conventions, but responsibilities should remain separated.
+
+---
+
+## 43. Recommended frontend components
+
+Under Eyeson's existing frontend:
+
+```text
+ExperimentBuilder/
+  TargetTaskSection
+  PersonaSection
+  AbilitySection
+  BehaviorSection
+  AnalysisSection
+  ExecutionSection
+
+RunLiveView/
+  PersonaCard
+  BrowserReplay
+  StateMeters
+  CopingCard
+  LiveTimeline
+  AnalysisStatus
+
+RunReport/
+  ModeSwitcher
+  EvidenceViewer
+  JourneyTimeline
+  StateTimeline
+  PainOverlay
+  PainPointPanel
+  RootCausePanel
+  AlternativePanel
+  KnowledgePanel
+  CohortSummary
+```
+
+### 43.1 EvidenceViewer modes
+
+Journey mode overlays:
+
+- original;
+- persona perceived;
+- interaction targets.
+
+UX mode overlays:
+
+- frustration;
+- confusion;
+- repeated action;
+- missed elements;
+- accessibility;
+- Eyeson findings.
+
+---
+
+## 44. Shared schema package
+
+Strongly recommended: create one versioned schema package in the Eyeson host repo.
+
+```text
+ux-analyst-ai/shared-schema/
+```
+
+Source of truth can be JSON Schema or TypeScript/Zod with generated Pydantic equivalents.
+
+Core shared objects:
+
+- `ExperimentConfig`;
+- `SyntheticUserProfile`;
+- `BehaviorProfile`;
+- `FunctionalAbilitySpec`;
+- `UserState`;
+- `ExperienceEvent`;
+- `CopingDecision`;
+- `JourneyStepEvidence`;
+- `UXPainPoint`;
+- `UXDiagnosis`;
+- `UXAlternative`;
+- `UXKnowledgeResult`;
+- `UXRunAnalysis`.
+
+Schema version must be present in all cross-process payloads.
+
+---
+
+## 45. Failure handling
+
+### Persona runtime unavailable
+
+- fail persona generation cleanly before starting browser; or
+- use configured fallback manual profile.
+
+### DSPy appraisal unavailable
+
+- use native classifier result with lower confidence;
+- mark semantic appraisal `unavailable`.
+
+### Eyeson deep analysis fails
+
+- journey continues;
+- report marks affected step analysis as failed;
+- JourneyTest evidence remains usable.
+
+### RAG unavailable
+
+- alternatives can still be generated from diagnosis;
+- grounding status remains `not_configured` or `failed`.
+
+### Visual solution provider unavailable
+
+- keep textual/structured alternative;
+- do not fail the report.
+
+---
+
+## 46. Performance requirements
+
+Suggested first targets:
+
+- state/coping computation: < 20 ms per event excluding LLM calls;
+- no deep Eyeson critique in the critical action path;
+- persona compiler: one call/user;
+- deep analysis limited by screen budget;
+- dashboard usable with 500+ timeline events through virtualization or incremental rendering;
+- artifacts streamed/written rather than held entirely in memory.
+
+---
+
+## 47. Product semantics and wording
+
+Do not market simulated outcomes as equivalent to human study results.
+
+Use wording such as:
+
+- "synthetic-user simulation";
+- "simulated frustration signal";
+- "model-estimated impact";
+- "likely UX mechanism";
+- "grounded recommendation" only when a knowledge source is actually attached.
+
+Avoid:
+
+- "users will be 31% less frustrated" unless backed by empirical validation;
+- "elderly users cannot...";
+- medical claims from demographic profile fields.
+
+---
+
+## 48. Definition of a complete v1
+
+The application is considered functionally complete when a user can:
+
+1. Open Eyeson frontend.
+2. Enter a URL and task.
+3. Configure synthetic users/iterations and scenario.
+4. Start the experiment.
+5. Have TinyTroupe generate personas.
+6. Have DSPy compile behavior profiles.
+7. Watch JourneyTest execute at least one live journey.
+8. See dynamic state and coping decisions update.
+9. Replay the generated video.
+10. Inspect original screenshots and persona-perceived screenshots where configured.
+11. Have the same screenshots automatically analyzed by Eyeson.
+12. See pain points tied to one or more interface elements.
+13. Switch between `User Journey` and `UX Feedback` without losing selected timestamp/step.
+14. View a structured UX diagnosis containing observed evidence, behavioral impact and inference confidence.
+15. View alternative solutions tied to the diagnosed pain point.
+16. See the RAG grounding area, even if it says `not configured`.
+17. Export/open `run.json`, `report.md`, `dashboard.html`, screenshots and video.
+18. Run multiple users/iterations and inspect aggregate root causes.
+
+---
+
+## 49. Primary architectural decisions
+
+### Decision A — Eyeson is the host app
+
+**Chosen because:** it already contains backend, frontend, CLI and deployment structure.
+
+### Decision B — JourneyTest is the only live browser owner
+
+**Chosen because:** it already has the strongest closed-loop browser/evidence design and avoids state drift between separate browsers.
+
+### Decision C — TinyTroupe defines identity, not browser mechanics
+
+**Chosen because:** persona consistency is its strength; deterministic physical/behavioral simulation is better implemented in explicit code.
+
+### Decision D — DSPy is used selectively
+
+**Chosen because:** semantic transformations benefit from typed LLM programs and later optimization, while state/timers/physical effects require deterministic code.
+
+### Decision E — behavior state is authoritative in TypeScript/JourneyTest
+
+**Chosen because:** action policy and browser effects must remain reproducible and available even if the Python semantic service is unavailable.
+
+### Decision F — Eyeson consumes JourneyTest evidence
+
+**Chosen because:** the UX critique must discuss the exact state the user actually experienced.
+
+### Decision G — RAG is a provider interface in v1
+
+**Chosen because:** report and diagnosis schemas should not need redesign when knowledge grounding is added later.
+
+### Decision H — AI-UX is not in the critical runtime path
+
+**Chosen because:** its precomputed prototype simulation is conceptually different from live closed-loop user testing. Reuse only rendering/prototyping ideas where valuable.
+
+---
+
+## 50. Key end-to-end sequence
+
+```text
+1. User configures experiment in Eyeson.
+
+2. Eyeson orchestrator creates synthetic-user requests.
+
+3. Persona runtime:
+   TinyTroupe -> PersonaSpec
+   DSPy -> BehaviorProfile
+   explicit config -> FunctionalAbilitySpec
+
+4. Eyeson starts JourneyTest run with:
+   task
+   profile
+   behavior
+   abilities
+   seed
+
+5. JourneyTest opens the website.
+
+6. JourneyTest captures semantic + visual evidence.
+
+7. If needed:
+   screenshot -> perception transform -> DSPy persona visual judgment.
+
+8. JourneyTest agent selects intention/action.
+
+9. BehaviorController modifies execution if necessary:
+   hesitation
+   reading delay
+   pointer noise
+   etc.
+
+10. Browser executes action.
+
+11. JourneyTest observes UI changes.
+
+12. ExperienceClassifier creates event.
+    If ambiguous -> DSPy appraisal.
+
+13. StateReducer updates:
+    frustration
+    confusion
+    trust
+    effort
+    fatigue
+
+14. CopingPolicy produces probability distribution and selects coping intent.
+
+15. EvidenceCoordinator saves step and emits live event.
+
+16. Screenshot + semantic evidence is sent to Eyeson deep analysis queue.
+
+17. Journey continues without waiting for deep analysis.
+
+18. Eyeson returns findings and element attribution.
+
+19. At run end:
+    JourneyTest creates verdict.
+    Eyeson aggregates pain episodes.
+    PainPointResolver creates UXPainPoints.
+    UXKnowledgeProvider optionally retrieves grounding.
+    AlternativeGenerator creates solutions.
+
+20. ReportEnricher adds UXRunAnalysis to RunResult.
+
+21. Render:
+    run.json
+    report.md
+    dashboard.html
+    video.webm
+
+22. Frontend displays synchronized modes:
+    User Journey <-> UX Feedback.
+```
+
+---
+
+## 51. Future roadmap
+
+### RAG/knowledge
+
+- curated WCAG/WAI corpus;
+- usability heuristics;
+- design-system guidance;
+- peer-reviewed UX/HCI literature;
+- internal design system;
+- previous usability studies;
+- support tickets;
+- analytics findings;
+- A/B test results.
+
+### Empirical calibration
+
+- real-user/synthetic-user paired studies;
+- DSPy optimization;
+- behavior coefficient fitting;
+- persona cohort calibration.
+
+### Design iteration
+
+- automatically retest generated alternatives;
+- compare original vs alternative behavior;
+- rank alternatives by simulated cohort impact.
+
+### Additional modes
+
+- accessibility audit;
+- cognitive walkthrough;
+- first-click testing;
+- responsive comparison;
+- design-version regression;
+- aggregate cohort segmentation.
+
+### AI-UX integration option
+
+Use AI-UX only if a future Figma/prototype rendering workflow becomes valuable. Keep it behind `VisualSolutionProvider` or `PrototypeExportProvider`.
+
+---
+
+## 52. Implementation priority summary
+
+If engineering starts immediately, build in this order:
+
+1. Eyeson -> JourneyTest library integration.
+2. Shared run/evidence IDs.
+3. TinyTroupe persona runtime.
+4. BehaviorProfile + BehaviorController MVP.
+5. Live state/coping events.
+6. Screenshot/evidence streaming to Eyeson.
+7. Pain-point aggregation and element attribution.
+8. Two-mode report UI.
+9. Alternative generation.
+10. RAG provider placeholder.
+11. Physical/perceptual simulation.
+12. Cohort/root-cause aggregation.
+13. Actual RAG grounding.
+14. Empirical calibration and alternative retesting.
+
+This order delivers a useful application early while preserving the architecture needed for the full research vision.
