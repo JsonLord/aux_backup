@@ -1,0 +1,40 @@
+name: UX Analysis
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+
+jobs:
+  ux-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v3
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v3
+        with:
+          node-version: '18'
+
+      - name: Install UX Analyzer
+        run: |
+          cd ux-analyst-ai/cli
+          npm install
+          npm link
+
+      - name: Run UX Analysis
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+        run: |
+          ux-analyze https://www.uni-assist.de/bewerben/bewerbung-planen/vpd/ \
+            --format json \
+            --output ./ux-reports \
+            --quick \
+            --accessibility
+
+      - name: Upload UX Reports
+        uses: actions/upload-artifact@v3
+        with:
+          name: ux-analysis-reports
+          path: ./ux-reports/

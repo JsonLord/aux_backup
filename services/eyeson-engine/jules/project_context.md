@@ -1,0 +1,20 @@
+# Project Context
+
+## Project Description
+Deploy the eyeson application from GitHub to Hugging Face Spaces with custom LLM integration. The project involves migrating the eyeson application to a Gradio-based deployment on Hugging Face under the space harvesthealth/tinytroupe-alpha. The core enhancement is integrating an OpenAI-compatible LLM endpoint hosted at the Helmholtz Blablador API (https://api.helmholtz-blablador.fz-juelich.de/v1) with intelligent task routing based on model aliases. This integration will enable the application to leverage specialized language models for different task types: alias-large for complex planning tasks requiring deep reasoning, alias-fast for quick utility operations and simple queries, and alias-code for coding-related tasks and code generation. The deployment maintains security through Hugging Face Space Secrets management for the BLABLADOR_API_KEY authentication token. Future use cases include expanding the task routing system to support additional model aliases, integrating with other Helmholtz AI services, and potentially adding multi-modal capabilities. The architecture supports seamless integration with other projects through its modular LLM client design and OpenAI-compatible API format.
+
+## Tasks and Tests
+
+
+## GitHub Repos
+
+
+## Functionality Expectations
+
+
+## API Endpoints
+
+
+## HF Deployment Data
+Profile: harvesthealth
+Space: tinytroupe-alpha

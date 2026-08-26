@@ -1,0 +1,169 @@
+{
+  "server": {
+    "port": 3000,
+    "host": "localhost",
+    "environment": "development",
+    "maxRequestSize": "10mb",
+    "corsEnabled": true,
+    "rateLimitEnabled": false,
+    "rateLimitWindowMs": 900000,
+    "rateLimitMaxRequests": 100
+  },
+  "database": {
+    "type": "sqlite",
+    "path": "./data/analysis.db",
+    "maxConnections": 10,
+    "acquireTimeoutMs": 30000,
+    "createTimeoutMs": 30000,
+    "destroyTimeoutMs": 5000,
+    "idleTimeoutMs": 30000,
+    "reapIntervalMs": 1000
+  },
+  "ai": {
+    "gemini": {
+      "model": "gemini-1.5-flash",
+      "maxRetries": 3,
+      "baseDelay": 2000,
+      "timeoutMs": 45000,
+      "maxConcurrentRequests": 5
+    }
+  },
+  "analysis": {
+    "maxConcurrentAnalyses": 3,
+    "timeoutMs": 300000,
+    "maxStuckTimeMs": 600000,
+    "cleanupIntervalMs": 120000,
+    "defaultViewports": ["desktop", "tablet", "mobile"],
+    "enableAccessibility": false,
+    "enableVisualAnalysis": true,
+    "enableAICritique": true
+  },
+  "screenshots": {
+    "storagePath": "./data/screenshots",
+    "maxFileSize": 10485760,
+    "retentionDays": 30,
+    "timeoutMs": 15000,
+    "waitForMs": 1000,
+    "viewports": {
+      "desktop": {
+        "width": 1920,
+        "height": 1080
+      },
+      "tablet": {
+        "width": 768,
+        "height": 1024
+      },
+      "mobile": {
+        "width": 375,
+        "height": 667
+      }
+    }
+  },
+  "browser": {
+    "poolSize": 3,
+    "maxIdleTimeMs": 300000,
+    "maxLifetimeMs": 1800000,
+    "launchArgs": [
+      "--no-sandbox",
+      "--disable-setuid-sandbox",
+      "--disable-dev-shm-usage",
+      "--disable-gpu",
+      "--disable-web-security",
+      "--single-process"
+    ],
+    "headless": true,
+    "enableLogging": false
+  },
+  "visualAnalysis": {
+    "enableColorAnalysis": true,
+    "enableLayoutAnalysis": true,
+    "enableTypographyAnalysis": true,
+    "enableSpacingAnalysis": true,
+    "enableHierarchyAnalysis": true,
+    "maxImageSize": 5242880,
+    "processingTimeoutMs": 30000,
+    "colorThresholds": {
+      "lowContrast": 3.0,
+      "normalContrast": 4.5,
+      "highContrast": 7.0
+    },
+    "layoutThresholds": {
+      "minWhitespace": 0.15,
+      "maxContentDensity": 0.7,
+      "minTouchTargetSize": 44
+    }
+  },
+  "logging": {
+    "level": "info",
+    "enableConsole": true,
+    "enableFile": false,
+    "filePath": "./logs/app.log",
+    "maxFileSize": "10MB",
+    "maxFiles": 5,
+    "enableStructured": true,
+    "enableCorrelationId": true
+  },
+  "health": {
+    "enabled": true,
+    "endpoint": "/health",
+    "intervalMs": 30000,
+    "timeoutMs": 5000,
+    "checks": {
+      "database": true,
+      "ai": true,
+      "storage": true,
+      "memory": true,
+      "browser": true
+    }
+  },
+  "security": {
+    "helmet": {
+      "enabled": true,
+      "contentSecurityPolicy": false,
+      "crossOriginEmbedderPolicy": false
+    },
+    "cors": {
+      "enabled": true,
+      "origin": true,
+      "credentials": false
+    },
+    "rateLimit": {
+      "enabled": false,
+      "windowMs": 900000,
+      "max": 100,
+      "standardHeaders": true,
+      "legacyHeaders": false
+    }
+  },
+  "features": {
+    "accessibilityAnalysis": false,
+    "visualDesignAnalysis": true,
+    "aiCritique": true,
+    "advancedReporting": false,
+    "queueSystem": false,
+    "caching": false,
+    "metrics": false,
+    "websockets": false
+  },
+  "queue": {
+    "enabled": false,
+    "redis": {
+      "host": "localhost",
+      "port": 6379,
+      "password": "",
+      "db": 0,
+      "keyPrefix": "ux-analyst:",
+      "maxRetriesPerJob": 3
+    },
+    "jobs": {
+      "analysis": {
+        "priority": 0,
+        "attempts": 3,
+        "backoff": {
+          "type": "exponential",
+          "delay": 2000
+        }
+      }
+    }
+  }
+}

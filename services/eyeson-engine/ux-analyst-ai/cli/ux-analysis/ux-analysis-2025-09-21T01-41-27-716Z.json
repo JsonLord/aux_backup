@@ -1,0 +1,1050 @@
+{
+  "id": "db85ba32-5a1e-428b-999e-494f5f3ab91e",
+  "url": "https://example.com",
+  "status": "completed",
+  "createdAt": "2025-09-21 01:40:33",
+  "completedAt": "2025-09-21 01:41:26",
+  "screenshots": [
+    {
+      "id": "e9c39a8d-6c51-40d1-b60f-c9047a7d1fba",
+      "analysis_id": "db85ba32-5a1e-428b-999e-494f5f3ab91e",
+      "viewport": "desktop",
+      "file_path": "data\\screenshots\\e9c39a8d-6c51-40d1-b60f-c9047a7d1fba-desktop.png",
+      "width": 1920,
+      "height": 1080,
+      "file_size": 23775
+    },
+    {
+      "id": "b082a300-15f8-42cb-99c0-e9a5bb9632e9",
+      "analysis_id": "db85ba32-5a1e-428b-999e-494f5f3ab91e",
+      "viewport": "tablet",
+      "file_path": "data\\screenshots\\b082a300-15f8-42cb-99c0-e9a5bb9632e9-tablet.png",
+      "width": 768,
+      "height": 1024,
+      "file_size": 18400
+    },
+    {
+      "id": "0767f839-c240-41cb-9150-ad97f69a7fed",
+      "analysis_id": "db85ba32-5a1e-428b-999e-494f5f3ab91e",
+      "viewport": "mobile",
+      "file_path": "data\\screenshots\\0767f839-c240-41cb-9150-ad97f69a7fed-mobile.png",
+      "width": 375,
+      "height": 667,
+      "file_size": 14271
+    }
+  ],
+  "results": {
+    "visual_design": {
+      "byViewport": {
+        "desktop": {
+          "viewport": "desktop",
+          "dimensions": {
+            "width": 1920,
+            "height": 1080
+          },
+          "colorAnalysis": {
+            "dominantColor": {
+              "r": 232,
+              "g": 232,
+              "b": 248
+            },
+            "colorPalette": [
+              {
+                "color": {
+                  "r": 224,
+                  "g": 224,
+                  "b": 224
+                },
+                "frequency": 3284,
+                "hex": "#e0e0e0"
+              },
+              {
+                "color": {
+                  "r": 192,
+                  "g": 192,
+                  "b": 192
+                },
+                "frequency": 28,
+                "hex": "#c0c0c0"
+              },
+              {
+                "color": {
+                  "r": 160,
+                  "g": 160,
+                  "b": 160
+                },
+                "frequency": 6,
+                "hex": "#a0a0a0"
+              },
+              {
+                "color": {
+                  "r": 96,
+                  "g": 96,
+                  "b": 96
+                },
+                "frequency": 5,
+                "hex": "#606060"
+              },
+              {
+                "color": {
+                  "r": 128,
+                  "g": 128,
+                  "b": 128
+                },
+                "frequency": 3,
+                "hex": "#808080"
+              }
+            ],
+            "contrastRatios": {
+              "average": 7.46078431372549,
+              "minimum": 5.222549019607843,
+              "maximum": 9.699019607843137,
+              "assessment": "high"
+            },
+            "colorHarmony": "poor",
+            "accessibility": "excellent"
+          },
+          "layoutAnalysis": {
+            "whitespaceRatio": 1,
+            "contentDensity": 0,
+            "symmetry": 1,
+            "balance": 1,
+            "gridAlignment": 0,
+            "assessment": "excellent"
+          },
+          "typographyAnalysis": {
+            "textRegions": 0,
+            "estimatedFontSizes": [],
+            "readabilityScore": 0,
+            "hierarchy": "poor"
+          },
+          "spacingAnalysis": {
+            "verticalSpacing": 0,
+            "horizontalSpacing": 0,
+            "consistency": 0,
+            "balance": null
+          },
+          "visualHierarchy": {
+            "clarity": 0,
+            "contrast": 0,
+            "progression": 0.75,
+            "focusPoints": 0
+          },
+          "issues": [
+            {
+              "category": "Typography",
+              "severity": "High",
+              "description": "Poor text readability",
+              "recommendation": "Increase font size, improve line spacing, or enhance text contrast",
+              "location": "Text elements"
+            },
+            {
+              "category": "Typography",
+              "severity": "Medium",
+              "description": "Weak typographic hierarchy",
+              "recommendation": "Create clearer distinction between heading levels and body text",
+              "location": "Text elements"
+            },
+            {
+              "category": "Spacing",
+              "severity": "Medium",
+              "description": "Inconsistent spacing",
+              "recommendation": "Establish and maintain consistent spacing patterns throughout the design",
+              "location": "Global"
+            },
+            {
+              "category": "Visual Hierarchy",
+              "severity": "High",
+              "description": "Unclear visual hierarchy",
+              "recommendation": "Strengthen visual hierarchy through size, color, and positioning",
+              "location": "Global"
+            }
+          ],
+          "score": null
+        },
+        "tablet": {
+          "viewport": "tablet",
+          "dimensions": {
+            "width": 768,
+            "height": 1024
+          },
+          "colorAnalysis": {
+            "dominantColor": {
+              "r": 232,
+              "g": 232,
+              "b": 248
+            },
+            "colorPalette": [
+              {
+                "color": {
+                  "r": 224,
+                  "g": 224,
+                  "b": 224
+                },
+                "frequency": 3231,
+                "hex": "#e0e0e0"
+              },
+              {
+                "color": {
+                  "r": 192,
+                  "g": 192,
+                  "b": 192
+                },
+                "frequency": 47,
+                "hex": "#c0c0c0"
+              },
+              {
+                "color": {
+                  "r": 160,
+                  "g": 160,
+                  "b": 160
+                },
+                "frequency": 18,
+                "hex": "#a0a0a0"
+              },
+              {
+                "color": {
+                  "r": 128,
+                  "g": 128,
+                  "b": 128
+                },
+                "frequency": 8,
+                "hex": "#808080"
+              },
+              {
+                "color": {
+                  "r": 96,
+                  "g": 96,
+                  "b": 96
+                },
+                "frequency": 6,
+                "hex": "#606060"
+              }
+            ],
+            "contrastRatios": {
+              "average": 7.46078431372549,
+              "minimum": 5.222549019607843,
+              "maximum": 9.699019607843137,
+              "assessment": "high"
+            },
+            "colorHarmony": "poor",
+            "accessibility": "excellent"
+          },
+          "layoutAnalysis": {
+            "whitespaceRatio": 1,
+            "contentDensity": 0,
+            "symmetry": 1,
+            "balance": 1,
+            "gridAlignment": 0,
+            "assessment": "excellent"
+          },
+          "typographyAnalysis": {
+            "textRegions": 2,
+            "estimatedFontSizes": [
+              {
+                "estimatedSize": 665,
+                "region": {
+                  "minX": 0,
+                  "maxX": 886.8100134752649,
+                  "minY": 0,
+                  "maxY": 886,
+                  "width": 886.8100134752649,
+                  "height": 886
+                },
+                "category": "heading"
+              },
+              {
+                "estimatedSize": 665,
+                "region": {
+                  "minX": 0.999999999720103,
+                  "maxX": 94.00000000114778,
+                  "minY": 0,
+                  "maxY": 886,
+                  "width": 93.00000000142768,
+                  "height": 886
+                },
+                "category": "heading"
+              }
+            ],
+            "readabilityScore": 0.6,
+            "hierarchy": "poor"
+          },
+          "spacingAnalysis": {
+            "verticalSpacing": 0,
+            "horizontalSpacing": 0,
+            "consistency": 0,
+            "balance": null
+          },
+          "visualHierarchy": {
+            "clarity": 0,
+            "contrast": 0,
+            "progression": 0,
+            "focusPoints": 0
+          },
+          "issues": [
+            {
+              "category": "Typography",
+              "severity": "Medium",
+              "description": "Weak typographic hierarchy",
+              "recommendation": "Create clearer distinction between heading levels and body text",
+              "location": "Text elements"
+            },
+            {
+              "category": "Spacing",
+              "severity": "Medium",
+              "description": "Inconsistent spacing",
+              "recommendation": "Establish and maintain consistent spacing patterns throughout the design",
+              "location": "Global"
+            },
+            {
+              "category": "Visual Hierarchy",
+              "severity": "High",
+              "description": "Unclear visual hierarchy",
+              "recommendation": "Strengthen visual hierarchy through size, color, and positioning",
+              "location": "Global"
+            }
+          ],
+          "score": null
+        },
+        "mobile": {
+          "viewport": "mobile",
+          "dimensions": {
+            "width": 375,
+            "height": 667
+          },
+          "colorAnalysis": {
+            "dominantColor": {
+              "r": 232,
+              "g": 232,
+              "b": 248
+            },
+            "colorPalette": [
+              {
+                "color": {
+                  "r": 224,
+                  "g": 224,
+                  "b": 224
+                },
+                "frequency": 3129,
+                "hex": "#e0e0e0"
+              },
+              {
+                "color": {
+                  "r": 192,
+                  "g": 192,
+                  "b": 192
+                },
+                "frequency": 57,
+                "hex": "#c0c0c0"
+              },
+              {
+                "color": {
+                  "r": 160,
+                  "g": 160,
+                  "b": 160
+                },
+                "frequency": 53,
+                "hex": "#a0a0a0"
+              },
+              {
+                "color": {
+                  "r": 192,
+                  "g": 192,
+                  "b": 224
+                },
+                "frequency": 17,
+                "hex": "#c0c0e0"
+              },
+              {
+                "color": {
+                  "r": 128,
+                  "g": 128,
+                  "b": 128
+                },
+                "frequency": 13,
+                "hex": "#808080"
+              }
+            ],
+            "contrastRatios": {
+              "average": 7.46078431372549,
+              "minimum": 5.222549019607843,
+              "maximum": 9.699019607843137,
+              "assessment": "high"
+            },
+            "colorHarmony": "excellent",
+            "accessibility": "excellent"
+          },
+          "layoutAnalysis": {
+            "whitespaceRatio": 1,
+            "contentDensity": 0,
+            "symmetry": 1,
+            "balance": 1,
+            "gridAlignment": 0,
+            "assessment": "excellent"
+          },
+          "typographyAnalysis": {
+            "textRegions": 2,
+            "estimatedFontSizes": [
+              {
+                "estimatedSize": 375,
+                "region": {
+                  "minX": 0,
+                  "maxX": 500.12498437890497,
+                  "minY": 0,
+                  "maxY": 500,
+                  "width": 500.12498437890497,
+                  "height": 500
+                },
+                "category": "heading"
+              },
+              {
+                "estimatedSize": 374,
+                "region": {
+                  "minX": 1.1368683772161603e-13,
+                  "maxX": 500.12498437890486,
+                  "minY": 0,
+                  "maxY": 499,
+                  "width": 500.12498437890474,
+                  "height": 499
+                },
+                "category": "heading"
+              }
+            ],
+            "readabilityScore": 0.6,
+            "hierarchy": "fair"
+          },
+          "spacingAnalysis": {
+            "verticalSpacing": 0,
+            "horizontalSpacing": 0,
+            "consistency": 0,
+            "balance": null
+          },
+          "visualHierarchy": {
+            "clarity": 0,
+            "contrast": 0,
+            "progression": 0,
+            "focusPoints": 0
+          },
+          "issues": [
+            {
+              "category": "Spacing",
+              "severity": "Medium",
+              "description": "Inconsistent spacing",
+              "recommendation": "Establish and maintain consistent spacing patterns throughout the design",
+              "location": "Global"
+            },
+            {
+              "category": "Visual Hierarchy",
+              "severity": "High",
+              "description": "Unclear visual hierarchy",
+              "recommendation": "Strengthen visual hierarchy through size, color, and positioning",
+              "location": "Global"
+            }
+          ],
+          "score": null
+        }
+      },
+      "combined": {
+        "overallScore": 0,
+        "totalIssues": 9,
+        "criticalIssues": 4,
+        "topIssues": [
+          {
+            "category": "Visual Hierarchy",
+            "severity": "High",
+            "description": "Unclear visual hierarchy",
+            "recommendation": "Strengthen visual hierarchy through size, color, and positioning",
+            "affectedViewports": [
+              "Global"
+            ],
+            "frequency": 3
+          },
+          {
+            "category": "Typography",
+            "severity": "High",
+            "description": "Poor text readability",
+            "recommendation": "Increase font size, improve line spacing, or enhance text contrast",
+            "affectedViewports": [
+              "Text elements"
+            ],
+            "frequency": 1
+          },
+          {
+            "category": "Spacing",
+            "severity": "Medium",
+            "description": "Inconsistent spacing",
+            "recommendation": "Establish and maintain consistent spacing patterns throughout the design",
+            "affectedViewports": [
+              "Global"
+            ],
+            "frequency": 3
+          },
+          {
+            "category": "Typography",
+            "severity": "Medium",
+            "description": "Weak typographic hierarchy",
+            "recommendation": "Create clearer distinction between heading levels and body text",
+            "affectedViewports": [
+              "Text elements"
+            ],
+            "frequency": 2
+          }
+        ],
+        "responsiveConsistency": 1
+      },
+      "summary": {
+        "grade": "Critical",
+        "score": 0,
+        "viewportsAnalyzed": 3,
+        "totalViewports": 3,
+        "totalIssues": 9,
+        "criticalIssues": 4,
+        "responsiveConsistency": 1,
+        "mainStrengths": [
+          "Excellent color accessibility",
+          "Well-structured layout"
+        ],
+        "mainWeaknesses": [
+          "Unclear visual hierarchy",
+          "Poor text readability",
+          "Inconsistent spacing"
+        ]
+      },
+      "generatedAt": "2025-09-21T01:41:06.046Z"
+    },
+    "ux_critique": {
+      "raw_response": "```json\n{\n  \"overall_assessment\": {\n    \"score\": 40,\n    \"summary\": \"The website is functional but severely lacks content and visual appeal.  The design is minimalist to a fault, bordering on sterile.  Significant improvements are needed in content, visual hierarchy, and overall user experience.\",\n    \"strengths\": [\n      \"Responsive design adapts well across different viewports.\",\n      \"No apparent accessibility issues (based on provided data).\"\n    ],\n    \"weaknesses\": [\n      \"Minimalist design is too simplistic and lacks personality or brand identity.\",\n      \"Insufficient content provides no value or clear purpose for the user.\",\n      \"Poor visual hierarchy and lack of clear call to action.\",\n      \"No engagement elements.\"\n    ]\n  },\n  \"visual_design\": {\n    \"score\": 30,\n    \"feedback\": \"The visual design is incredibly basic and lacks any visual hierarchy or personality.  The use of a single, light grey card on a white background is uninspired and fails to guide the user's eye.  The text is legible but lacks visual interest and fails to establish a clear visual hierarchy. The card itself appears somewhat arbitrary, its existence not justified by the content within.\",\n    \"issues\": [\n      {\n        \"category\": \"Visual Hierarchy\",\n        \"severity\": \"High\",\n        \"description\": \"The lack of visual hierarchy makes it difficult for users to understand the importance of different content elements.  Everything appears equally weighted.\",\n        \"recommendation\": \"Use size, color, contrast, and whitespace to create a clear visual hierarchy.  Prioritize important information (e.g., the 'More Information' link). Consider using images or illustrations to break up the text and add visual interest.\"\n      },\n      {\n        \"category\": \"Whitespace\",\n        \"severity\": \"Medium\",\n        \"description\": \"While not overly cluttered, the amount of whitespace around the card feels inconsistent and does not guide the user's eye.\",\n        \"recommendation\": \"Optimize whitespace to balance content density and breathing room.  Consider increasing the top and bottom margins of the card and potentially using slightly more spacing between the lines of text.\"\n      },\n      {\n        \"category\": \"Color Palette\",\n        \"severity\": \"Medium\",\n        \"description\": \"The color palette is extremely limited, resulting in a bland and unengaging design. \",\n        \"recommendation\": \"Introduce a brand color palette that aligns with the website's purpose and identity to add visual interest and branding cues.\"\n      },\n      {\n        \"category\": \"Typography\",\n        \"severity\": \"Low\",\n        \"description\": \"Typography is simple but could use some refinement.\",\n        \"recommendation\": \"Experiment with different font weights, styles, and sizes to make the text more engaging and improve readability. Consider the use of different headings and subheadings to structure the content.\"\n      }\n    ]\n  },\n  \"usability\": {\n    \"score\": 20,\n    \"feedback\": \"The website’s usability is extremely poor due to a lack of content and a nonexistent user journey. There is no clear call to action, and the single link is rather vague, offering very little value to the user. It’s unclear what the website's purpose is.\",\n    \"issues\": [\n      {\n        \"category\": \"Call to Action\",\n        \"severity\": \"High\",\n        \"description\": \"There is no compelling call to action. The 'More Information' link is vague and doesn't entice users to click.\",\n        \"recommendation\": \"Introduce a clear and concise call to action based on the website's actual goal. Make it prominent and visually appealing.\"\n      },\n      {\n        \"category\": \"Content Strategy\",\n        \"severity\": \"High\",\n        \"description\": \"The website currently lacks substantial and valuable content. Its purpose is unclear to the user.\",\n        \"recommendation\": \"Develop a detailed content strategy that clearly defines the website's purpose, target audience, and key messages. This content should provide value to the user and guide them towards the website's goal.\"\n      },\n      {\n        \"category\": \"Navigation\",\n        \"severity\": \"Low\",\n        \"description\": \"Currently there is no navigational structure which is understandable given the lack of content.  Once content is added, proper navigational design will be needed.\",\n        \"recommendation\": \"Implement a clear and intuitive navigation system, especially if the content grows beyond a simple informational card. Navigation elements should be consistently presented across different devices.\"\n      }\n    ]\n  },\n  \"accessibility\": {\n    \"score\": 100,\n    \"feedback\": \"Based on the provided data, there are no reported accessibility issues.  However, a thorough manual accessibility audit is still recommended once content is populated.\",\n    \"issues\": []\n  },\n  \"mobile_responsiveness\": {\n    \"score\": 100,\n    \"feedback\": \"The website adapts well to different screen sizes. The layout remains consistent and readable across desktop, tablet, and mobile viewports.\",\n    \"issues\": []\n  },\n  \"performance\": {\n    \"score\": 80,\n    \"feedback\": \"Based on the screenshots, the website appears to load quickly and efficiently.  However, additional performance testing should be conducted to verify this.\",\n    \"issues\": []\n  },\n  \"recommendations\": [\n    {\n      \"priority\": \"High\",\n      \"category\": \"Content Strategy\",\n      \"title\": \"Develop Compelling Content\",\n      \"description\": \"Create engaging and informative content that clearly communicates the website's purpose and value proposition. This should include relevant visuals to improve the overall user experience.\",\n      \"impact\": \"Significantly improve user engagement and clarity.\",\n      \"effort\": \"High\"\n    },\n    {\n      \"priority\": \"High\",\n      \"category\": \"Visual Design\",\n      \"title\": \"Enhance Visual Hierarchy and Branding\",\n      \"description\": \"Develop a stronger visual identity by incorporating brand colors, typography, and imagery. Use visual elements to guide the user through the website and highlight key information.\",\n      \"impact\": \"Increase engagement, and improve clarity and user experience.\",\n      \"effort\": \"Medium\"\n    },\n    {\n      \"priority\": \"Medium\",\n      \"category\": \"Usability\",\n      \"title\": \"Implement Clear Call to Action\",\n      \"description\": \"Craft a clear, concise, and visually appealing call to action that encourages users to take the desired next step.\",\n      \"impact\": \"Improve user conversion rates.\",\n      \"effort\": \"Low\"\n    }\n  ],\n  \"ai_design_assessment\": {\n    \"likely_ai_generated\": true,\n    \"confidence\": 90,\n    \"detected_patterns\": [\n      \"Generic, template-like appearance.\",\n      \"Overly perfect, sterile design lacking human character or brand personality.\",\n      \"Mechanical spacing and element placement.\",\n      \"Inconsistent visual hierarchy or unclear content flow.\",\n      \"Homogeneous, 'safe' color palettes lacking personality.\"\n    ],\n    \"recommendations\": [\n      \"Incorporate authentic imagery and illustrations that reflect the website's brand and content.\",\n      \"Use hand-drawn elements or subtle imperfections to give the design a more human and less robotic feel.\",\n      \"Inject personality into the copywriting, avoiding generic business jargon.\",\n      \"Introduce asymmetry and varying visual weights to enhance visual appeal and improve readability.\",\n      \"Explore more diverse color palettes.\"\n    ],\n    \"human_elements_missing\": [\n      \"Authentic photography or illustrations\",\n      \"Personal stories or testimonials\",\n      \"Information about the team behind the website\",\n      \"Unique visual style reflecting the brand identity\"\n    ]\n  }\n}\n```\n",
+      "structured_critique": {
+        "overall_assessment": {
+          "score": 40,
+          "summary": "The website is functional but severely lacks content and visual appeal.  The design is minimalist to a fault, bordering on sterile.  Significant improvements are needed in content, visual hierarchy, and overall user experience.",
+          "strengths": [
+            "Responsive design adapts well across different viewports.",
+            "No apparent accessibility issues (based on provided data)."
+          ],
+          "weaknesses": [
+            "Minimalist design is too simplistic and lacks personality or brand identity.",
+            "Insufficient content provides no value or clear purpose for the user.",
+            "Poor visual hierarchy and lack of clear call to action.",
+            "No engagement elements."
+          ]
+        },
+        "visual_design": {
+          "score": 30,
+          "feedback": "The visual design is incredibly basic and lacks any visual hierarchy or personality.  The use of a single, light grey card on a white background is uninspired and fails to guide the user's eye.  The text is legible but lacks visual interest and fails to establish a clear visual hierarchy. The card itself appears somewhat arbitrary, its existence not justified by the content within.",
+          "issues": [
+            {
+              "category": "Visual Hierarchy",
+              "severity": "High",
+              "description": "The lack of visual hierarchy makes it difficult for users to understand the importance of different content elements.  Everything appears equally weighted.",
+              "recommendation": "Use size, color, contrast, and whitespace to create a clear visual hierarchy.  Prioritize important information (e.g., the 'More Information' link). Consider using images or illustrations to break up the text and add visual interest."
+            },
+            {
+              "category": "Whitespace",
+              "severity": "Medium",
+              "description": "While not overly cluttered, the amount of whitespace around the card feels inconsistent and does not guide the user's eye.",
+              "recommendation": "Optimize whitespace to balance content density and breathing room.  Consider increasing the top and bottom margins of the card and potentially using slightly more spacing between the lines of text."
+            },
+            {
+              "category": "Color Palette",
+              "severity": "Medium",
+              "description": "The color palette is extremely limited, resulting in a bland and unengaging design. ",
+              "recommendation": "Introduce a brand color palette that aligns with the website's purpose and identity to add visual interest and branding cues."
+            },
+            {
+              "category": "Typography",
+              "severity": "Low",
+              "description": "Typography is simple but could use some refinement.",
+              "recommendation": "Experiment with different font weights, styles, and sizes to make the text more engaging and improve readability. Consider the use of different headings and subheadings to structure the content."
+            }
+          ]
+        },
+        "usability": {
+          "score": 20,
+          "feedback": "The website’s usability is extremely poor due to a lack of content and a nonexistent user journey. There is no clear call to action, and the single link is rather vague, offering very little value to the user. It’s unclear what the website's purpose is.",
+          "issues": [
+            {
+              "category": "Call to Action",
+              "severity": "High",
+              "description": "There is no compelling call to action. The 'More Information' link is vague and doesn't entice users to click.",
+              "recommendation": "Introduce a clear and concise call to action based on the website's actual goal. Make it prominent and visually appealing."
+            },
+            {
+              "category": "Content Strategy",
+              "severity": "High",
+              "description": "The website currently lacks substantial and valuable content. Its purpose is unclear to the user.",
+              "recommendation": "Develop a detailed content strategy that clearly defines the website's purpose, target audience, and key messages. This content should provide value to the user and guide them towards the website's goal."
+            },
+            {
+              "category": "Navigation",
+              "severity": "Low",
+              "description": "Currently there is no navigational structure which is understandable given the lack of content.  Once content is added, proper navigational design will be needed.",
+              "recommendation": "Implement a clear and intuitive navigation system, especially if the content grows beyond a simple informational card. Navigation elements should be consistently presented across different devices."
+            }
+          ]
+        },
+        "accessibility": {
+          "score": 100,
+          "feedback": "Based on the provided data, there are no reported accessibility issues.  However, a thorough manual accessibility audit is still recommended once content is populated.",
+          "issues": []
+        },
+        "mobile_responsiveness": {
+          "score": 100,
+          "feedback": "The website adapts well to different screen sizes. The layout remains consistent and readable across desktop, tablet, and mobile viewports.",
+          "issues": []
+        },
+        "performance": {
+          "score": 80,
+          "feedback": "Based on the screenshots, the website appears to load quickly and efficiently.  However, additional performance testing should be conducted to verify this.",
+          "issues": []
+        },
+        "recommendations": [
+          {
+            "priority": "High",
+            "category": "Content Strategy",
+            "title": "Develop Compelling Content",
+            "description": "Create engaging and informative content that clearly communicates the website's purpose and value proposition. This should include relevant visuals to improve the overall user experience.",
+            "impact": "Significantly improve user engagement and clarity.",
+            "effort": "High"
+          },
+          {
+            "priority": "High",
+            "category": "Visual Design",
+            "title": "Enhance Visual Hierarchy and Branding",
+            "description": "Develop a stronger visual identity by incorporating brand colors, typography, and imagery. Use visual elements to guide the user through the website and highlight key information.",
+            "impact": "Increase engagement, and improve clarity and user experience.",
+            "effort": "Medium"
+          },
+          {
+            "priority": "Medium",
+            "category": "Usability",
+            "title": "Implement Clear Call to Action",
+            "description": "Craft a clear, concise, and visually appealing call to action that encourages users to take the desired next step.",
+            "impact": "Improve user conversion rates.",
+            "effort": "Low"
+          }
+        ],
+        "ai_design_assessment": {
+          "likely_ai_generated": true,
+          "confidence": 90,
+          "detected_patterns": [
+            "Generic, template-like appearance.",
+            "Overly perfect, sterile design lacking human character or brand personality.",
+            "Mechanical spacing and element placement.",
+            "Inconsistent visual hierarchy or unclear content flow.",
+            "Homogeneous, 'safe' color palettes lacking personality."
+          ],
+          "recommendations": [
+            "Incorporate authentic imagery and illustrations that reflect the website's brand and content.",
+            "Use hand-drawn elements or subtle imperfections to give the design a more human and less robotic feel.",
+            "Inject personality into the copywriting, avoiding generic business jargon.",
+            "Introduce asymmetry and varying visual weights to enhance visual appeal and improve readability.",
+            "Explore more diverse color palettes."
+          ],
+          "human_elements_missing": [
+            "Authentic photography or illustrations",
+            "Personal stories or testimonials",
+            "Information about the team behind the website",
+            "Unique visual style reflecting the brand identity"
+          ]
+        }
+      },
+      "generated_at": "2025-09-21T01:41:18.772Z",
+      "model_used": "gemini-1.5-flash"
+    },
+    "final_report": {
+      "type": "comprehensive",
+      "url": "https://example.com",
+      "summary": {
+        "overallGrade": "Unknown",
+        "accessibilityScore": 0,
+        "uxScore": 40,
+        "totalIssues": 0,
+        "priorityLevel": "Medium"
+      },
+      "screenshots": [
+        "desktop",
+        "tablet",
+        "mobile"
+      ],
+      "accessibility": null,
+      "visualDesign": {
+        "overallScore": 0,
+        "totalIssues": 9,
+        "criticalIssues": 4,
+        "responsiveConsistency": 1,
+        "topIssues": [
+          {
+            "category": "Visual Hierarchy",
+            "severity": "High",
+            "description": "Unclear visual hierarchy",
+            "recommendation": "Strengthen visual hierarchy through size, color, and positioning",
+            "affectedViewports": [
+              "Global"
+            ],
+            "frequency": 3
+          },
+          {
+            "category": "Typography",
+            "severity": "High",
+            "description": "Poor text readability",
+            "recommendation": "Increase font size, improve line spacing, or enhance text contrast",
+            "affectedViewports": [
+              "Text elements"
+            ],
+            "frequency": 1
+          },
+          {
+            "category": "Spacing",
+            "severity": "Medium",
+            "description": "Inconsistent spacing",
+            "recommendation": "Establish and maintain consistent spacing patterns throughout the design",
+            "affectedViewports": [
+              "Global"
+            ],
+            "frequency": 3
+          }
+        ],
+        "mainStrengths": [
+          "Excellent color accessibility",
+          "Well-structured layout"
+        ],
+        "mainWeaknesses": [
+          "Unclear visual hierarchy",
+          "Poor text readability",
+          "Inconsistent spacing"
+        ]
+      },
+      "ux": {
+        "overallScore": 40,
+        "topRecommendations": [
+          {
+            "priority": "High",
+            "category": "Content Strategy",
+            "title": "Develop Compelling Content",
+            "description": "Create engaging and informative content that clearly communicates the website's purpose and value proposition. This should include relevant visuals to improve the overall user experience.",
+            "impact": "Significantly improve user engagement and clarity.",
+            "effort": "High"
+          },
+          {
+            "priority": "High",
+            "category": "Visual Design",
+            "title": "Enhance Visual Hierarchy and Branding",
+            "description": "Develop a stronger visual identity by incorporating brand colors, typography, and imagery. Use visual elements to guide the user through the website and highlight key information.",
+            "impact": "Increase engagement, and improve clarity and user experience.",
+            "effort": "Medium"
+          },
+          {
+            "priority": "Medium",
+            "category": "Usability",
+            "title": "Implement Clear Call to Action",
+            "description": "Craft a clear, concise, and visually appealing call to action that encourages users to take the desired next step.",
+            "impact": "Improve user conversion rates.",
+            "effort": "Low"
+          }
+        ],
+        "keyStrengths": [
+          "Responsive design adapts well across different viewports.",
+          "No apparent accessibility issues (based on provided data)."
+        ],
+        "keyWeaknesses": [
+          "Minimalist design is too simplistic and lacks personality or brand identity.",
+          "Insufficient content provides no value or clear purpose for the user.",
+          "Poor visual hierarchy and lack of clear call to action.",
+          "No engagement elements."
+        ]
+      },
+      "generatedAt": "2025-09-21T01:41:18.784Z"
+    },
+    "implementation_code": {
+      "html": [],
+      "css": [],
+      "javascript": [],
+      "instructions": [
+        {
+          "recommendation": "Code Implementation",
+          "steps": "Follow the provided code implementation.",
+          "notes": "Test thoroughly before deploying to production."
+        },
+        {
+          "recommendation": "Code Implementation",
+          "steps": "Follow the provided code implementation.",
+          "notes": "Test thoroughly before deploying to production."
+        },
+        {
+          "recommendation": "Code Implementation",
+          "steps": "Follow the provided code implementation.",
+          "notes": "Test thoroughly before deploying to production."
+        }
+      ],
+      "summary": "Implementation code for 3 UX improvements"
+    }
+  },
+  "uxCritique": {
+    "raw_response": "```json\n{\n  \"overall_assessment\": {\n    \"score\": 40,\n    \"summary\": \"The website is functional but severely lacks content and visual appeal.  The design is minimalist to a fault, bordering on sterile.  Significant improvements are needed in content, visual hierarchy, and overall user experience.\",\n    \"strengths\": [\n      \"Responsive design adapts well across different viewports.\",\n      \"No apparent accessibility issues (based on provided data).\"\n    ],\n    \"weaknesses\": [\n      \"Minimalist design is too simplistic and lacks personality or brand identity.\",\n      \"Insufficient content provides no value or clear purpose for the user.\",\n      \"Poor visual hierarchy and lack of clear call to action.\",\n      \"No engagement elements.\"\n    ]\n  },\n  \"visual_design\": {\n    \"score\": 30,\n    \"feedback\": \"The visual design is incredibly basic and lacks any visual hierarchy or personality.  The use of a single, light grey card on a white background is uninspired and fails to guide the user's eye.  The text is legible but lacks visual interest and fails to establish a clear visual hierarchy. The card itself appears somewhat arbitrary, its existence not justified by the content within.\",\n    \"issues\": [\n      {\n        \"category\": \"Visual Hierarchy\",\n        \"severity\": \"High\",\n        \"description\": \"The lack of visual hierarchy makes it difficult for users to understand the importance of different content elements.  Everything appears equally weighted.\",\n        \"recommendation\": \"Use size, color, contrast, and whitespace to create a clear visual hierarchy.  Prioritize important information (e.g., the 'More Information' link). Consider using images or illustrations to break up the text and add visual interest.\"\n      },\n      {\n        \"category\": \"Whitespace\",\n        \"severity\": \"Medium\",\n        \"description\": \"While not overly cluttered, the amount of whitespace around the card feels inconsistent and does not guide the user's eye.\",\n        \"recommendation\": \"Optimize whitespace to balance content density and breathing room.  Consider increasing the top and bottom margins of the card and potentially using slightly more spacing between the lines of text.\"\n      },\n      {\n        \"category\": \"Color Palette\",\n        \"severity\": \"Medium\",\n        \"description\": \"The color palette is extremely limited, resulting in a bland and unengaging design. \",\n        \"recommendation\": \"Introduce a brand color palette that aligns with the website's purpose and identity to add visual interest and branding cues.\"\n      },\n      {\n        \"category\": \"Typography\",\n        \"severity\": \"Low\",\n        \"description\": \"Typography is simple but could use some refinement.\",\n        \"recommendation\": \"Experiment with different font weights, styles, and sizes to make the text more engaging and improve readability. Consider the use of different headings and subheadings to structure the content.\"\n      }\n    ]\n  },\n  \"usability\": {\n    \"score\": 20,\n    \"feedback\": \"The website’s usability is extremely poor due to a lack of content and a nonexistent user journey. There is no clear call to action, and the single link is rather vague, offering very little value to the user. It’s unclear what the website's purpose is.\",\n    \"issues\": [\n      {\n        \"category\": \"Call to Action\",\n        \"severity\": \"High\",\n        \"description\": \"There is no compelling call to action. The 'More Information' link is vague and doesn't entice users to click.\",\n        \"recommendation\": \"Introduce a clear and concise call to action based on the website's actual goal. Make it prominent and visually appealing.\"\n      },\n      {\n        \"category\": \"Content Strategy\",\n        \"severity\": \"High\",\n        \"description\": \"The website currently lacks substantial and valuable content. Its purpose is unclear to the user.\",\n        \"recommendation\": \"Develop a detailed content strategy that clearly defines the website's purpose, target audience, and key messages. This content should provide value to the user and guide them towards the website's goal.\"\n      },\n      {\n        \"category\": \"Navigation\",\n        \"severity\": \"Low\",\n        \"description\": \"Currently there is no navigational structure which is understandable given the lack of content.  Once content is added, proper navigational design will be needed.\",\n        \"recommendation\": \"Implement a clear and intuitive navigation system, especially if the content grows beyond a simple informational card. Navigation elements should be consistently presented across different devices.\"\n      }\n    ]\n  },\n  \"accessibility\": {\n    \"score\": 100,\n    \"feedback\": \"Based on the provided data, there are no reported accessibility issues.  However, a thorough manual accessibility audit is still recommended once content is populated.\",\n    \"issues\": []\n  },\n  \"mobile_responsiveness\": {\n    \"score\": 100,\n    \"feedback\": \"The website adapts well to different screen sizes. The layout remains consistent and readable across desktop, tablet, and mobile viewports.\",\n    \"issues\": []\n  },\n  \"performance\": {\n    \"score\": 80,\n    \"feedback\": \"Based on the screenshots, the website appears to load quickly and efficiently.  However, additional performance testing should be conducted to verify this.\",\n    \"issues\": []\n  },\n  \"recommendations\": [\n    {\n      \"priority\": \"High\",\n      \"category\": \"Content Strategy\",\n      \"title\": \"Develop Compelling Content\",\n      \"description\": \"Create engaging and informative content that clearly communicates the website's purpose and value proposition. This should include relevant visuals to improve the overall user experience.\",\n      \"impact\": \"Significantly improve user engagement and clarity.\",\n      \"effort\": \"High\"\n    },\n    {\n      \"priority\": \"High\",\n      \"category\": \"Visual Design\",\n      \"title\": \"Enhance Visual Hierarchy and Branding\",\n      \"description\": \"Develop a stronger visual identity by incorporating brand colors, typography, and imagery. Use visual elements to guide the user through the website and highlight key information.\",\n      \"impact\": \"Increase engagement, and improve clarity and user experience.\",\n      \"effort\": \"Medium\"\n    },\n    {\n      \"priority\": \"Medium\",\n      \"category\": \"Usability\",\n      \"title\": \"Implement Clear Call to Action\",\n      \"description\": \"Craft a clear, concise, and visually appealing call to action that encourages users to take the desired next step.\",\n      \"impact\": \"Improve user conversion rates.\",\n      \"effort\": \"Low\"\n    }\n  ],\n  \"ai_design_assessment\": {\n    \"likely_ai_generated\": true,\n    \"confidence\": 90,\n    \"detected_patterns\": [\n      \"Generic, template-like appearance.\",\n      \"Overly perfect, sterile design lacking human character or brand personality.\",\n      \"Mechanical spacing and element placement.\",\n      \"Inconsistent visual hierarchy or unclear content flow.\",\n      \"Homogeneous, 'safe' color palettes lacking personality.\"\n    ],\n    \"recommendations\": [\n      \"Incorporate authentic imagery and illustrations that reflect the website's brand and content.\",\n      \"Use hand-drawn elements or subtle imperfections to give the design a more human and less robotic feel.\",\n      \"Inject personality into the copywriting, avoiding generic business jargon.\",\n      \"Introduce asymmetry and varying visual weights to enhance visual appeal and improve readability.\",\n      \"Explore more diverse color palettes.\"\n    ],\n    \"human_elements_missing\": [\n      \"Authentic photography or illustrations\",\n      \"Personal stories or testimonials\",\n      \"Information about the team behind the website\",\n      \"Unique visual style reflecting the brand identity\"\n    ]\n  }\n}\n```\n",
+    "structured_critique": {
+      "overall_assessment": {
+        "score": 40,
+        "summary": "The website is functional but severely lacks content and visual appeal.  The design is minimalist to a fault, bordering on sterile.  Significant improvements are needed in content, visual hierarchy, and overall user experience.",
+        "strengths": [
+          "Responsive design adapts well across different viewports.",
+          "No apparent accessibility issues (based on provided data)."
+        ],
+        "weaknesses": [
+          "Minimalist design is too simplistic and lacks personality or brand identity.",
+          "Insufficient content provides no value or clear purpose for the user.",
+          "Poor visual hierarchy and lack of clear call to action.",
+          "No engagement elements."
+        ]
+      },
+      "visual_design": {
+        "score": 30,
+        "feedback": "The visual design is incredibly basic and lacks any visual hierarchy or personality.  The use of a single, light grey card on a white background is uninspired and fails to guide the user's eye.  The text is legible but lacks visual interest and fails to establish a clear visual hierarchy. The card itself appears somewhat arbitrary, its existence not justified by the content within.",
+        "issues": [
+          {
+            "category": "Visual Hierarchy",
+            "severity": "High",
+            "description": "The lack of visual hierarchy makes it difficult for users to understand the importance of different content elements.  Everything appears equally weighted.",
+            "recommendation": "Use size, color, contrast, and whitespace to create a clear visual hierarchy.  Prioritize important information (e.g., the 'More Information' link). Consider using images or illustrations to break up the text and add visual interest."
+          },
+          {
+            "category": "Whitespace",
+            "severity": "Medium",
+            "description": "While not overly cluttered, the amount of whitespace around the card feels inconsistent and does not guide the user's eye.",
+            "recommendation": "Optimize whitespace to balance content density and breathing room.  Consider increasing the top and bottom margins of the card and potentially using slightly more spacing between the lines of text."
+          },
+          {
+            "category": "Color Palette",
+            "severity": "Medium",
+            "description": "The color palette is extremely limited, resulting in a bland and unengaging design. ",
+            "recommendation": "Introduce a brand color palette that aligns with the website's purpose and identity to add visual interest and branding cues."
+          },
+          {
+            "category": "Typography",
+            "severity": "Low",
+            "description": "Typography is simple but could use some refinement.",
+            "recommendation": "Experiment with different font weights, styles, and sizes to make the text more engaging and improve readability. Consider the use of different headings and subheadings to structure the content."
+          }
+        ]
+      },
+      "usability": {
+        "score": 20,
+        "feedback": "The website’s usability is extremely poor due to a lack of content and a nonexistent user journey. There is no clear call to action, and the single link is rather vague, offering very little value to the user. It’s unclear what the website's purpose is.",
+        "issues": [
+          {
+            "category": "Call to Action",
+            "severity": "High",
+            "description": "There is no compelling call to action. The 'More Information' link is vague and doesn't entice users to click.",
+            "recommendation": "Introduce a clear and concise call to action based on the website's actual goal. Make it prominent and visually appealing."
+          },
+          {
+            "category": "Content Strategy",
+            "severity": "High",
+            "description": "The website currently lacks substantial and valuable content. Its purpose is unclear to the user.",
+            "recommendation": "Develop a detailed content strategy that clearly defines the website's purpose, target audience, and key messages. This content should provide value to the user and guide them towards the website's goal."
+          },
+          {
+            "category": "Navigation",
+            "severity": "Low",
+            "description": "Currently there is no navigational structure which is understandable given the lack of content.  Once content is added, proper navigational design will be needed.",
+            "recommendation": "Implement a clear and intuitive navigation system, especially if the content grows beyond a simple informational card. Navigation elements should be consistently presented across different devices."
+          }
+        ]
+      },
+      "accessibility": {
+        "score": 100,
+        "feedback": "Based on the provided data, there are no reported accessibility issues.  However, a thorough manual accessibility audit is still recommended once content is populated.",
+        "issues": []
+      },
+      "mobile_responsiveness": {
+        "score": 100,
+        "feedback": "The website adapts well to different screen sizes. The layout remains consistent and readable across desktop, tablet, and mobile viewports.",
+        "issues": []
+      },
+      "performance": {
+        "score": 80,
+        "feedback": "Based on the screenshots, the website appears to load quickly and efficiently.  However, additional performance testing should be conducted to verify this.",
+        "issues": []
+      },
+      "recommendations": [
+        {
+          "priority": "High",
+          "category": "Content Strategy",
+          "title": "Develop Compelling Content",
+          "description": "Create engaging and informative content that clearly communicates the website's purpose and value proposition. This should include relevant visuals to improve the overall user experience.",
+          "impact": "Significantly improve user engagement and clarity.",
+          "effort": "High"
+        },
+        {
+          "priority": "High",
+          "category": "Visual Design",
+          "title": "Enhance Visual Hierarchy and Branding",
+          "description": "Develop a stronger visual identity by incorporating brand colors, typography, and imagery. Use visual elements to guide the user through the website and highlight key information.",
+          "impact": "Increase engagement, and improve clarity and user experience.",
+          "effort": "Medium"
+        },
+        {
+          "priority": "Medium",
+          "category": "Usability",
+          "title": "Implement Clear Call to Action",
+          "description": "Craft a clear, concise, and visually appealing call to action that encourages users to take the desired next step.",
+          "impact": "Improve user conversion rates.",
+          "effort": "Low"
+        }
+      ],
+      "ai_design_assessment": {
+        "likely_ai_generated": true,
+        "confidence": 90,
+        "detected_patterns": [
+          "Generic, template-like appearance.",
+          "Overly perfect, sterile design lacking human character or brand personality.",
+          "Mechanical spacing and element placement.",
+          "Inconsistent visual hierarchy or unclear content flow.",
+          "Homogeneous, 'safe' color palettes lacking personality."
+        ],
+        "recommendations": [
+          "Incorporate authentic imagery and illustrations that reflect the website's brand and content.",
+          "Use hand-drawn elements or subtle imperfections to give the design a more human and less robotic feel.",
+          "Inject personality into the copywriting, avoiding generic business jargon.",
+          "Introduce asymmetry and varying visual weights to enhance visual appeal and improve readability.",
+          "Explore more diverse color palettes."
+        ],
+        "human_elements_missing": [
+          "Authentic photography or illustrations",
+          "Personal stories or testimonials",
+          "Information about the team behind the website",
+          "Unique visual style reflecting the brand identity"
+        ]
+      }
+    },
+    "generated_at": "2025-09-21T01:41:18.772Z",
+    "model_used": "gemini-1.5-flash"
+  },
+  "report": {
+    "type": "comprehensive",
+    "url": "https://example.com",
+    "summary": {
+      "overallGrade": "Unknown",
+      "accessibilityScore": 0,
+      "uxScore": 40,
+      "totalIssues": 0,
+      "priorityLevel": "Medium"
+    },
+    "screenshots": [
+      "desktop",
+      "tablet",
+      "mobile"
+    ],
+    "accessibility": null,
+    "visualDesign": {
+      "overallScore": 0,
+      "totalIssues": 9,
+      "criticalIssues": 4,
+      "responsiveConsistency": 1,
+      "topIssues": [
+        {
+          "category": "Visual Hierarchy",
+          "severity": "High",
+          "description": "Unclear visual hierarchy",
+          "recommendation": "Strengthen visual hierarchy through size, color, and positioning",
+          "affectedViewports": [
+            "Global"
+          ],
+          "frequency": 3
+        },
+        {
+          "category": "Typography",
+          "severity": "High",
+          "description": "Poor text readability",
+          "recommendation": "Increase font size, improve line spacing, or enhance text contrast",
+          "affectedViewports": [
+            "Text elements"
+          ],
+          "frequency": 1
+        },
+        {
+          "category": "Spacing",
+          "severity": "Medium",
+          "description": "Inconsistent spacing",
+          "recommendation": "Establish and maintain consistent spacing patterns throughout the design",
+          "affectedViewports": [
+            "Global"
+          ],
+          "frequency": 3
+        }
+      ],
+      "mainStrengths": [
+        "Excellent color accessibility",
+        "Well-structured layout"
+      ],
+      "mainWeaknesses": [
+        "Unclear visual hierarchy",
+        "Poor text readability",
+        "Inconsistent spacing"
+      ]
+    },
+    "ux": {
+      "overallScore": 40,
+      "topRecommendations": [
+        {
+          "priority": "High",
+          "category": "Content Strategy",
+          "title": "Develop Compelling Content",
+          "description": "Create engaging and informative content that clearly communicates the website's purpose and value proposition. This should include relevant visuals to improve the overall user experience.",
+          "impact": "Significantly improve user engagement and clarity.",
+          "effort": "High"
+        },
+        {
+          "priority": "High",
+          "category": "Visual Design",
+          "title": "Enhance Visual Hierarchy and Branding",
+          "description": "Develop a stronger visual identity by incorporating brand colors, typography, and imagery. Use visual elements to guide the user through the website and highlight key information.",
+          "impact": "Increase engagement, and improve clarity and user experience.",
+          "effort": "Medium"
+        },
+        {
+          "priority": "Medium",
+          "category": "Usability",
+          "title": "Implement Clear Call to Action",
+          "description": "Craft a clear, concise, and visually appealing call to action that encourages users to take the desired next step.",
+          "impact": "Improve user conversion rates.",
+          "effort": "Low"
+        }
+      ],
+      "keyStrengths": [
+        "Responsive design adapts well across different viewports.",
+        "No apparent accessibility issues (based on provided data)."
+      ],
+      "keyWeaknesses": [
+        "Minimalist design is too simplistic and lacks personality or brand identity.",
+        "Insufficient content provides no value or clear purpose for the user.",
+        "Poor visual hierarchy and lack of clear call to action.",
+        "No engagement elements."
+      ]
+    },
+    "generatedAt": "2025-09-21T01:41:18.784Z"
+  },
+  "implementationCode": {
+    "html": [],
+    "css": [],
+    "javascript": [],
+    "instructions": [
+      {
+        "recommendation": "Code Implementation",
+        "steps": "Follow the provided code implementation.",
+        "notes": "Test thoroughly before deploying to production."
+      },
+      {
+        "recommendation": "Code Implementation",
+        "steps": "Follow the provided code implementation.",
+        "notes": "Test thoroughly before deploying to production."
+      },
+      {
+        "recommendation": "Code Implementation",
+        "steps": "Follow the provided code implementation.",
+        "notes": "Test thoroughly before deploying to production."
+      }
+    ],
+    "summary": "Implementation code for 3 UX improvements"
+  }
+}

@@ -1,0 +1,139 @@
+# GitHub Actions - UX Analysis in CI/CD
+name: UX Analysis
+
+on:
+  pull_request:
+    branches: [ main ]
+  push:
+    branches: [ main ]
+  schedule:
+    # Run weekly UX analysis
+    - cron: '0 0 * * 0'
+
+jobs:
+  ux-analysis:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v3
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v3
+      with:
+        node-version: '18'
+
+    - name: Install dependencies
+      run: npm ci
+
+    - name: Build application
+      run: npm run build
+
+    - name: Start application
+      run: |
+        npm start &
+        sleep 30  # Wait for app to start
+
+    - name: Run UX Analysis
+      env:
+        GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+      run: |
+        npx ux-analyst-cli http://localhost:3000 \
+          --format json \
+          --output ./ux-reports \
+          --code \
+          --accessibility \
+          --viewports desktop,mobile
+
+    - name: Generate UX Report Summary
+      run: |
+        echo "## UX Analysis Results" >> $GITHUB_STEP_SUMMARY
+        node -e "
+          const fs = require('fs');
+          const report = JSON.parse(fs.readFileSync('./ux-reports/ux-analysis-*.json', 'utf8'));
+          console.log(\`**UX Score:** \${report.report?.summary?.uxScore || 'N/A'}/100\`);
+          console.log(\`**Grade:** \${report.report?.summary?.overallGrade || 'N/A'}\`);
+          console.log(\`**Issues Found:** \${report.report?.summary?.totalIssues || 0}\`);
+          if (report.accessibility) {
+            console.log(\`**Accessibility Score:** \${report.accessibility.score}/100\`);
+          }
+        " >> $GITHUB_STEP_SUMMARY
+
+    - name: Upload UX Reports
+      uses: actions/upload-artifact@v3
+      if: always()
+      with:
+        name: ux-analysis-reports
+        path: ./ux-reports/
+        retention-days: 30
+
+    - name: Comment PR with UX Results
+      if: github.event_name == 'pull_request'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          const fs = require('fs');
+          const path = require('path');
+
+          // Find the latest report file
+          const reportFiles = fs.readdirSync('./ux-reports')
+            .filter(f => f.endsWith('.json'));
+
+          if (reportFiles.length === 0) {
+            console.log('No UX report found');
+            return;
+          }
+
+          const reportPath = path.join('./ux-reports', reportFiles[0]);
+          const report = JSON.parse(fs.readFileSync(reportPath, 'utf8'));
+
+          const summary = report.report?.summary || {};
+          const accessibility = report.accessibility || {};
+
+          const comment = \`## 🎨 UX Analysis Results
+
+**Overall Grade:** \${summary.overallGrade || 'N/A'}
+**UX Score:** \${summary.uxScore || 'N/A'}/100
+**Issues Found:** \${summary.totalIssues || 0}
+**Accessibility Score:** \${accessibility.score || 'N/A'}/100
+
+\${summary.overallGrade === 'Poor' ? '⚠️ **Action Required:** UX issues detected that may impact user experience.' : ''}
+\${accessibility.score < 80 ? '♿ **Accessibility Alert:** Consider improving accessibility compliance.' : ''}
+
+📊 [Download Full Report](\${process.env.GITHUB_SERVER_URL}/\${process.env.GITHUB_REPOSITORY}/actions/runs/\${process.env.GITHUB_RUN_ID})
+          \`;
+
+          github.rest.issues.createComment({
+            issue_number: context.issue.number,
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            body: comment
+          });
+
+  # Fail the build if UX score is below threshold
+  quality-gate:
+    needs: ux-analysis
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+    - name: Download UX Reports
+      uses: actions/download-artifact@v3
+      with:
+        name: ux-analysis-reports
+
+    - name: Check UX Quality Gate
+      run: |
+        report_file=$(ls ux-analysis-*.json | head -n1)
+        ux_score=$(node -e "
+          const report = JSON.parse(require('fs').readFileSync('$report_file', 'utf8'));
+          console.log(report.report?.summary?.uxScore || 0);
+        ")
+
+        echo "UX Score: $ux_score"
+
+        if [ "$ux_score" -lt 60 ]; then
+          echo "❌ UX Quality Gate Failed: Score $ux_score is below threshold (60)"
+          exit 1
+        else
+          echo "✅ UX Quality Gate Passed: Score $ux_score"
+        fi

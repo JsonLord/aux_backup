@@ -1,0 +1,12 @@
+# Get build logs (SSE)
+
+curl -N \
+     -H "Authorization: Bearer $HF_TOKEN" \
+     "https://huggingface.co/api/spaces/harvesthealth/xxg/logs/build"
+
+# Get container logs (SSE)
+
+curl -N \
+     -H "Authorization: Bearer $HF_TOKEN" \
+     "https://huggingface.co/api/spaces/harvesthealth/xxg/logs/run"
+

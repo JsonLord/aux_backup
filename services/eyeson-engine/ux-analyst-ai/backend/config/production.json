@@ -1,0 +1,66 @@
+{
+  "server": {
+    "environment": "production",
+    "corsEnabled": true,
+    "rateLimitEnabled": true,
+    "rateLimitWindowMs": 900000,
+    "rateLimitMaxRequests": 50
+  },
+  "database": {
+    "maxConnections": 20,
+    "acquireTimeoutMs": 60000,
+    "idleTimeoutMs": 600000
+  },
+  "analysis": {
+    "maxConcurrentAnalyses": 5,
+    "timeoutMs": 600000,
+    "maxStuckTimeMs": 900000,
+    "cleanupIntervalMs": 60000
+  },
+  "browser": {
+    "poolSize": 5,
+    "maxIdleTimeMs": 600000,
+    "maxLifetimeMs": 3600000,
+    "enableLogging": false
+  },
+  "visualAnalysis": {
+    "processingTimeoutMs": 60000
+  },
+  "logging": {
+    "level": "warn",
+    "enableConsole": true,
+    "enableFile": true,
+    "filePath": "/var/log/ux-analyst/app.log",
+    "enableStructured": true,
+    "enableCorrelationId": true
+  },
+  "health": {
+    "intervalMs": 30000,
+    "timeoutMs": 10000
+  },
+  "security": {
+    "helmet": {
+      "enabled": true,
+      "contentSecurityPolicy": true,
+      "crossOriginEmbedderPolicy": true
+    },
+    "cors": {
+      "enabled": true,
+      "origin": false,
+      "credentials": false
+    },
+    "rateLimit": {
+      "enabled": true,
+      "windowMs": 900000,
+      "max": 50,
+      "standardHeaders": true,
+      "legacyHeaders": false
+    }
+  },
+  "features": {
+    "queueSystem": true,
+    "caching": true,
+    "metrics": true,
+    "websockets": true
+  }
+}

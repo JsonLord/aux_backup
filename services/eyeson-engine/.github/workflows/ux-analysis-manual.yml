@@ -1,0 +1,44 @@
+name: UX Analysis (Manual)
+
+on:
+  workflow_dispatch:
+    inputs:
+      website:
+        description: Website URL to analyze
+        required: true
+        default: https://www.uni-assist.de/bewerben/bewerbung-planen/vpd/
+        type: string
+
+jobs:
+  ux-analysis:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '18'
+
+      - name: Install UX Analyzer
+        run: |
+          cd ux-analyst-ai/cli
+          npm install
+          npm link
+
+      - name: Run UX Analysis
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          TARGET_WEBSITE: ${{ inputs.website }}
+        run: |
+          ux-analyze "$TARGET_WEBSITE" \
+            --format json \
+            --output ./ux-reports \
+            --quick \
+            --accessibility
+
+      - name: Upload UX Reports
+        uses: actions/upload-artifact@v4
+        with:
+          name: ux-analysis-reports
+          path: ./ux-reports/

@@ -1,0 +1,28 @@
+{
+  "name": "my-web-app",
+  "version": "1.0.0",
+  "scripts": {
+    "start": "npm run dev",
+    "dev": "next dev",
+    "build": "next build",
+    "test": "jest",
+
+    "ux:check": "ux-analyze http://localhost:3000 --quick",
+    "ux:full": "ux-analyze http://localhost:3000 --code --accessibility --format html",
+    "ux:mobile": "ux-analyze http://localhost:3000 --viewports mobile --quick",
+    "ux:staging": "ux-analyze https://staging.myapp.com --format json --output ./reports/staging",
+    "ux:prod": "ux-analyze https://myapp.com --format html --output ./reports/production",
+
+    "ux:interactive": "ux-analyze interactive",
+    "ux:config": "ux-analyze config",
+
+    "precommit": "npm run test && npm run ux:check",
+    "predeploy": "npm run build && npm run ux:staging",
+
+    "ux:report": "npm run ux:full && open ./ux-analysis/*.html",
+    "ux:ci": "ux-analyze $UX_TARGET_URL --format json --quick --output ./ux-reports"
+  },
+  "devDependencies": {
+    "ux-analyst-cli": "^1.0.0"
+  }
+}

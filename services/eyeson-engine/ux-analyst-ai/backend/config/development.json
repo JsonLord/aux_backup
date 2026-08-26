@@ -1,0 +1,38 @@
+{
+  "server": {
+    "environment": "development",
+    "rateLimitEnabled": false
+  },
+  "logging": {
+    "level": "debug",
+    "enableConsole": true,
+    "enableFile": true,
+    "enableStructured": false
+  },
+  "analysis": {
+    "maxConcurrentAnalyses": 2,
+    "timeoutMs": 180000
+  },
+  "browser": {
+    "poolSize": 2,
+    "enableLogging": true
+  },
+  "visualAnalysis": {
+    "processingTimeoutMs": 20000
+  },
+  "health": {
+    "intervalMs": 60000
+  },
+  "security": {
+    "helmet": {
+      "contentSecurityPolicy": false
+    },
+    "cors": {
+      "origin": ["http://localhost:5173", "http://localhost:3000"]
+    }
+  },
+  "features": {
+    "metrics": true,
+    "websockets": false
+  }
+}
