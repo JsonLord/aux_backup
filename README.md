@@ -26,6 +26,14 @@ docker compose up --build
 # journey worker: http://localhost:8080/healthz
 ```
 
+Compose now starts PostgreSQL, Redis, a Celery worker and beat scheduler, and a local
+S3-compatible object store before applying Alembic migrations and starting the API.
+After startup, validate the production path with:
+
+```bash
+PRODUCTION_API_URL=http://localhost:8000 pytest -q tests/integration/test_production_stack.py
+```
+
 The current Stage 0/1 slice runs Gradio analysis and responsive-prototype requests as
 real control-plane jobs. SQLite attempt/job state and filesystem report/prototype
 artifacts are persistent; live JourneyTest evidence, PostgreSQL, production workers,
@@ -39,3 +47,12 @@ the direct semantic baseline when credentials are configured, while CI uses the
 deterministic mock. DSPy is not activated until parity evaluation passes. The Journey
 worker pins core 0.1.2, owns behavior state, and is called by the control plane when
 `JOURNEY_WORKER_URL` is configured.
+
+Phase 2 persona profiles are persisted by the persona runtime in local SQLite
+(`PERSONA_DATABASE_PATH`) or production PostgreSQL (`PERSONA_DATABASE_URL`) and can be
+retrieved through `GET /v1/personas` or `GET /v1/personas/{persona_id}`.
+Persona operations are workspace-scoped. Starting a combined test snapshots each
+selected profile into an immutable `persona.profile` artifact; the job, Journey worker
+result, persisted report, and Live Monitoring all reference or render that exact
+snapshot. Validate the pinned TinyTroupe package path separately with
+`RUN_TINY_TROUPE_ACCEPTANCE=1 pytest -q tests/integration/test_tinytroupe_runtime.py`.

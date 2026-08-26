@@ -50,6 +50,26 @@ class ArtifactPin(BaseModel):
     pinned: bool
 
 
+class PresignedArtifactCreate(BaseModel):
+    session_id: str
+    kind: str
+    content_type: str
+    size: int = Field(gt=25 * 1024 * 1024, le=1024 * 1024 * 1024)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    retention_class: Literal["raw", "structured"] = "raw"
+    multipart: bool = False
+
+
+class MultipartPart(BaseModel):
+    ETag: str
+    PartNumber: int = Field(ge=1, le=10_000)
+
+
+class MultipartComplete(BaseModel):
+    upload_id: str | None = None
+    parts: list[MultipartPart] = Field(default_factory=list)
+
+
 class LegacyGitHubImport(BaseModel):
     repository: str
     branch: str

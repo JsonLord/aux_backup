@@ -16,4 +16,5 @@ test("run attaches the simulation profile and events", async () => {
   const result = await runJourney({ url: "https://example.com", tasks: ["Find support"], profile, runId: "run_fixture" });
   assert.equal(result.steps.length, 1);
   assert.equal(result.events[1].type, "experience.event.created");
+  assert.deepEqual(result.simulationProfile, profile);
 });

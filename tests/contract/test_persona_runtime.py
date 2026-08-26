@@ -2,6 +2,8 @@ from fastapi.testclient import TestClient
 
 from services.persona_service.main import app, profiles
 from services.persona_service.semantic import DirectLLMSemanticEngine, MockSemanticEngine
+from services.persona_service.store import PersonaStore
+from services.persona_service.generator import TinyTroupeGenerator
 
 
 def test_personas_are_distinct_complete_reproducible_and_editable():
@@ -21,6 +23,51 @@ def test_personas_are_distinct_complete_reproducible_and_editable():
     assert saved.status_code == 200
     assert saved.json()["source"] == "manual"
     assert saved.json()["behavior"]["patience"] == .91
+
+    fetched = api.get(f"/v1/personas/{first['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json() == saved.json()
+    assert [item["id"] for item in api.get("/v1/personas").json()] == [first["id"], second["id"]]
+
+
+def test_persona_store_survives_reopening(tmp_path):
+    database = tmp_path / "personas.db"
+    profile = {
+        "id": "persona_persisted",
+        "source": "manual",
+        "persona": {"name": "Ada"},
+        "abilities": {},
+        "behavior": {},
+        "generation": {"seed": 7},
+    }
+    first = PersonaStore(str(database))
+    first[profile["id"]] = profile
+    first.close()
+
+    reopened = PersonaStore(str(database))
+    assert reopened[profile["id"]] == profile
+    reopened.close()
+
+
+def test_persona_endpoints_are_workspace_scoped():
+    profiles.clear()
+    api = TestClient(app)
+    alpha = {"X-Workspace-ID": "alpha", "X-User-ID": "user-a"}
+    beta = {"X-Workspace-ID": "beta", "X-User-ID": "user-b"}
+    generated = api.post("/v1/personas/generate", headers=alpha, json={"theme": "checkout", "customer_profile": "customers", "count": 1, "seed": 3}).json()[0]
+    assert api.get(f"/v1/personas/{generated['id']}", headers=alpha).status_code == 200
+    assert api.get(f"/v1/personas/{generated['id']}", headers=beta).status_code == 404
+    assert api.get("/v1/personas", headers=beta).json() == []
+    assert api.patch(f"/v1/personas/{generated['id']}", headers=beta, json={"persona": generated}).status_code == 404
+
+
+def test_tiny_person_serialization_uses_public_method():
+    class TinyPerson:
+        name = "Ada"
+        def to_dict(self): return {"goals": ["Complete checkout"]}
+        @property
+        def _persona(self): raise AssertionError("private persona state must not be read")
+    assert TinyTroupeGenerator._serialize_tiny_person(TinyPerson()) == {"name": "Ada", "goals": ["Complete checkout"]}
 
 
 def test_mock_semantic_engine_is_deterministic():

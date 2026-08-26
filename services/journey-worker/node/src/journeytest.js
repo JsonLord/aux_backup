@@ -13,12 +13,13 @@ function loadJourneyTest() {
 
 async function runWithJourneyTest(input) {
   const runJourney = loadJourneyTest();
-  return runJourney({
+  const result = await runJourney({
     journey: { url: input.url, tasks: input.tasks },
     profile: { ...input.profile, simulation: input.profile },
     runId: input.runId,
     artifactDirectory: input.artifactDirectory,
   });
+  return { ...result, profileId: input.profile.id, simulationProfile: input.profile };
 }
 
 module.exports = { loadJourneyTest, runWithJourneyTest };

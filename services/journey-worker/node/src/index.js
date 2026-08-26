@@ -36,7 +36,7 @@ async function runJourney(input) {
     return { stepId: `${runId}_step_${index + 1}`, task, outcome: "simulated", state, coping, evidence: [] };
   });
   events.push({ type: "journey.completed", runId, timestamp: new Date().toISOString() });
-  return { schemaVersion: "1.0", runId, verdict: "configured", url: input.url, profileId: input.profile.id, steps, events, limitations: ["PLACEHOLDER: journeytest-core browser capture is awaiting an approved pinned package."] };
+  return { schemaVersion: "1.0", runId, verdict: "configured", url: input.url, profileId: input.profile.id, simulationProfile: input.profile, steps, events, limitations: ["PLACEHOLDER: journeytest-core browser capture is awaiting an approved pinned package."] };
 }
 
 const server = http.createServer(async (request, response) => {

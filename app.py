@@ -511,7 +511,16 @@ def start_and_monitor_sessions(personas, tasks, url, session_id):
         return
     try:
         session = control_plane.create_session({"legacy_session_id": session_id})
-        job = control_plane.create_job({"session_id": session["session_id"], "type": "combined_test", "metadata": {"personas": personas, "tasks": tasks, "url": url}})
+        persona_artifacts = []
+        for profile in personas:
+            profile = dict(profile)
+            profile.setdefault("id", f"legacy_persona_{uuid.uuid4().hex}")
+            artifact = control_plane.create_artifact(
+                session["session_id"], "persona.profile", profile,
+                metadata={"schema_version": "1.0", "persona_id": profile["id"], "immutable_run_snapshot": True},
+            )
+            persona_artifacts.append(artifact["artifact_id"])
+        job = control_plane.create_job({"session_id": session["session_id"], "type": "combined_test", "input_artifacts": persona_artifacts, "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": url}})
         yield f"Analysis queued: {job['job_id']}", "", session["session_id"], job["job_id"]
         job = control_plane.wait_for_job(job["job_id"])
         if job["status"] != "succeeded":
@@ -1158,7 +1167,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             gr.Markdown("### View UX Reports & Solutions")
             with gr.Row(visible=False):
                 rv_repo_select = gr.Dropdown(label="Repository", choices=[REPO_NAME], value=REPO_NAME, interactive=False)
-                rv_branch_select = gr.Dropdown(label="Branch", choices=get_repo_branches(REPO_NAME))
+                rv_branch_select = gr.Dropdown(label="Imported legacy session", choices=[])
             
             with gr.Row():
                 session_id_rv = gr.Textbox(label="Session ID", placeholder="Enter Session ID to pull results...")
@@ -1195,23 +1204,21 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     solutions_checkboxes.change(fn=update_selected_solutions, inputs=[solutions_checkboxes, all_solutions_state], outputs=[selected_solutions_json_state])
 
             def rv_update_branches(repo_name, session_id=None):
-                if session_id:
-                    if not check_branch_exists(repo_name, session_id):
-                        return gr.update(), f"[ERROR] Branch '{session_id}' not found. Please wait 30 minutes if newly created."
-                
-                branches = get_repo_branches(repo_name)
-                latest = session_id if session_id and session_id in branches else (branches[0] if branches else "main")
-                log = f"[SYSTEM] Pulled latest branches from {repo_name}\n[SYSTEM] Target branch: {latest}\n[SYSTEM] Found {len(branches)} branches."
-                return gr.update(choices=branches, value=latest), log
+                branches = control_plane.discover_legacy(repo_name)
+                names = [item["name"] for item in branches]
+                latest = session_id if session_id in names else (names[0] if names else None)
+                return gr.update(choices=names, value=latest), f"[CONTROL PLANE] Discovered {len(names)} read-only legacy sessions. Import creates tenant-owned artifacts."
 
             def rv_update_reports(repo_name, branch_name):
-                reports = get_reports_in_branch(repo_name, branch_name, filter_type="report")
-                return gr.update(choices=reports, value=reports[0] if reports else None)
+                imported = control_plane.import_legacy(repo_name, branch_name)
+                artifacts = control_plane.list_artifacts(imported["session"]["session_id"])
+                choices = [(item["metadata"].get("legacy_path", item["artifact_id"]), item["artifact_id"]) for item in artifacts if item["kind"] == "legacy.report"]
+                return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
             rv_repo_select.change(fn=rv_update_branches, inputs=[rv_repo_select], outputs=[rv_branch_select, rv_terminal_log])
             def rv_load_wrapper(repo, branch, selected, manual):
-                path = manual if manual else selected
-                return get_report_content(repo, branch, path)
+                del repo, branch, manual
+                return control_plane.get_artifact_content(selected) if selected else "Select an imported report."
 
             rv_refresh_branches_btn.click(fn=rv_update_branches, inputs=[rv_repo_select, session_id_rv], outputs=[rv_branch_select, rv_terminal_log])
             rv_branch_select.change(fn=rv_update_reports, inputs=[rv_repo_select, rv_branch_select], outputs=[rv_report_select])
@@ -1350,9 +1357,19 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             global_feed = gr.Markdown(value="Waiting for new reports...")
             
             def monitor_and_log():
-                reports = monitor_repo_for_reports()
-                logs = "\n".join(github_logs[-20:])
-                return reports, logs
+                sessions = control_plane.list_sessions()
+                rows, logs, snapshots = [], [], []
+                for session in sessions[:20]:
+                    jobs = control_plane.list_jobs(session["session_id"])
+                    rows.extend(f"- `{job['job_id']}` — **{job['status']}** ({job['type']})" for job in jobs)
+                    for artifact in control_plane.list_artifacts(session["session_id"]):
+                        if artifact["kind"] == "persona.profile":
+                            profile = json.loads(control_plane.get_artifact_content(artifact["artifact_id"]))
+                            snapshots.append(f"### {profile.get('persona', {}).get('name', profile['id'])}\n```json\n{json.dumps(profile, indent=2)}\n```")
+                    logs.append(f"{session['session_id']}: {len(jobs)} persisted jobs")
+                feed = "## Jobs\n" + ("\n".join(rows) or "No persisted jobs yet.")
+                if snapshots: feed += "\n\n## Immutable persona snapshots\n" + "\n\n".join(snapshots)
+                return feed, "\n".join(logs)
 
             # Use a Timer to poll every 60 seconds
             timer = gr.Timer(value=60)
