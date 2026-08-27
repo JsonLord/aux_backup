@@ -47,6 +47,26 @@ def test_hf_access_token_is_verified_by_userinfo(monkeypatch):
     assert [item["id"] for item in result["workspaces"]] == ["hf:user:stable-user", "hf:org:stable-org"]
 
 
+def test_hf_personal_token_is_verified_for_personal_workspace_only(monkeypatch):
+    class OAuthResponse:
+        def raise_for_status(self):
+            raise __import__("requests").HTTPError("not an OAuth token")
+
+    class WhoamiResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"type": "user", "name": "ada", "fullname": "Ada", "orgs": [{"name": "untrusted-org"}]}
+
+    responses = iter([OAuthResponse(), WhoamiResponse()])
+    monkeypatch.setattr("apps.api.auth.requests.get", lambda *args, **kwargs: next(responses))
+    provider = IdentityProvider(mode="hf_token")
+
+    result = provider.resolve("Bearer hf-personal-token", "hf:user:ada", "forged")
+
+    assert result["owner_user_id"] == "ada"
+    assert result["workspaces"] == [{"id": "hf:user:ada", "name": "Ada", "type": "personal", "role": "owner"}]
+
+
 def test_async_identity_sets_rls_context_for_request_task():
     async def resolve():
         provider = IdentityProvider(mode="local")

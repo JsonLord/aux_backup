@@ -69,6 +69,14 @@ dependencies = [
 Blablador compatibility belongs in `services/persona_service`; never patch the
 installed upstream package at application startup.
 
+The Helmholtz client implementation on
+`JsonLord/TinyTroupe:fix-openai-auth-error` was reviewed at commit
+`cc9bd2e550d93ad867746c9dddffaf6ff13f6620`. That branch reports package version
+0.5.2, so it is not substituted for the reviewed 0.7.0 runtime. Its provider
+mapping is implemented at the persona-service adapter boundary instead:
+`helmholtz-blablador` is normalized to TinyTroupe 0.7's registered `openai`
+client, while `OPENAI_BASE_URL` points to the Helmholtz-compatible endpoint.
+
 ---
 
 ## AI-UX

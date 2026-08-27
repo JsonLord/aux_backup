@@ -19,6 +19,7 @@ class IdentityProvider:
         self.audience = os.getenv("HF_OIDC_AUDIENCE")
         self.jwks_url = os.getenv("HF_OIDC_JWKS_URL")
         self.userinfo_url = os.getenv("HF_OIDC_USERINFO_URL", "https://huggingface.co/oauth/userinfo")
+        self.whoami_url = os.getenv("HF_TOKEN_USERINFO_URL", "https://huggingface.co/api/whoami-v2")
         self.membership_store = membership_store
 
     @staticmethod
@@ -31,16 +32,30 @@ class IdentityProvider:
 
     def _hf_userinfo(self, authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "Hugging Face OAuth access token required")
+            raise HTTPException(401, "Hugging Face user access token required")
         try:
             response = requests.get(self.userinfo_url, headers={"Authorization": authorization}, timeout=15)
-            response.raise_for_status()
-            result = response.json()
-            if not result.get("sub"):
-                raise ValueError("userinfo response has no subject")
-            return result
+            try:
+                response.raise_for_status()
+                result = response.json()
+                if not result.get("sub"):
+                    raise ValueError("userinfo response has no subject")
+                return result
+            except requests.RequestException:
+                pass
+            # HF personal access tokens are intentionally not OAuth tokens, but are
+            # valid user credentials for versioned API clients. Restrict this
+            # fallback to the verified personal workspace; organization membership
+            # continues to require the richer OAuth claims above.
+            fallback = requests.get(self.whoami_url, headers={"Authorization": authorization}, timeout=15)
+            fallback.raise_for_status()
+            account = fallback.json()
+            if account.get("type") != "user" or not account.get("name"):
+                raise ValueError("whoami response has no user identity")
+            return {"sub": str(account["name"]), "preferred_username": account["name"],
+                    "name": account.get("fullname") or account["name"], "orgs": []}
         except (requests.RequestException, ValueError) as error:
-            raise HTTPException(401, "invalid Hugging Face OAuth access token") from error
+            raise HTTPException(401, "invalid Hugging Face user access token") from error
 
     def _claims(self, authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):

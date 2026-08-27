@@ -9,6 +9,7 @@ class PersonaGenerateRequest(BaseModel):
     count: int = Field(default=1, ge=1, le=50)
     scenario: str = ""
     seed: int = 1
+    allow_offline_fallback: bool = False
 
 
 class PersonaPatchRequest(BaseModel):

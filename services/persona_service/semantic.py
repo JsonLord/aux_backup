@@ -28,14 +28,16 @@ class MockSemanticEngine:
 
 
 class DirectLLMSemanticEngine:
-    name = "blablador-alias-huge"
+    name = "openai-compatible-direct"
 
-    def __init__(self, api_key=None, base_url=None, model="alias-huge"):
-        self.api_key = api_key or os.getenv("BLABLADOR_API_KEY")
-        self.base_url = (base_url or os.getenv("BLABLADOR_BASE_URL", "https://api.helmholtz-blablador.fz-juelich.de/v1")).rstrip("/")
-        self.model = model
+    def __init__(self, api_key=None, base_url=None, model=None):
+        self.api_key = api_key or os.getenv("BLABLADOR_API_KEY") or os.getenv("OPENAI_API_KEY")
+        self.base_url = (base_url or os.getenv("BLABLADOR_BASE_URL")
+                         or os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
+                         or "https://api.helmholtz-blablador.fz-juelich.de/v1").rstrip("/")
+        self.model = model or os.getenv("OPENAI_MODEL", "alias-huge")
         if not self.api_key:
-            raise ValueError("BLABLADOR_API_KEY is required for the direct semantic engine")
+            raise ValueError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
 
     def compile_behavior(self, persona, scenario, traits, seed):
         schema = {trait: "number from 0 to 1" for trait in traits}
@@ -50,7 +52,7 @@ class DirectLLMSemanticEngine:
 
 
 def semantic_engine() -> SemanticEngine:
-    selected = os.getenv("SEMANTIC_ENGINE", "direct" if os.getenv("BLABLADOR_API_KEY") else "mock")
+    selected = os.getenv("SEMANTIC_ENGINE", "direct" if (os.getenv("BLABLADOR_API_KEY") or os.getenv("OPENAI_API_KEY")) else "mock")
     if selected == "direct":
         return DirectLLMSemanticEngine()
     if selected == "mock":

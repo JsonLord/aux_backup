@@ -61,7 +61,16 @@ def test_combined_test_executes_and_exposes_result_and_attempt(tmp_path):
     assert response.status_code == 202
     job = api.get(f"/v1/jobs/{response.json()['job_id']}").json()
     assert job["status"] == "succeeded"
-    assert len(job["output_artifacts"]) == 1
+    assert len(job["output_artifacts"]) == 3
+    artifacts = api.get(f"/v1/sessions/{session_id}/artifacts").json()["items"]
+    assert {item["kind"] for item in artifacts} >= {"ux.report", "ux.presentation", "journey.log"}
+    assert all(item["metadata"].get("download_name") for item in artifacts if item["kind"] != "persona.profile")
+    presentation = next(item for item in artifacts if item["kind"] == "ux.presentation")
+    download = api.get(f"/v1/artifacts/{presentation['artifact_id']}/content")
+    assert download.status_code == 200
+    assert "attachment" in download.headers["content-disposition"]
+    assert download.headers["content-disposition"].endswith('.html"')
+    assert b"UX analysis" in download.content
     assert api.get(f"/v1/jobs/{job['job_id']}/result").json()["artifacts"][0]["kind"] == "ux.report"
     assert api.get(f"/v1/jobs/{job['job_id']}/attempts").json()["items"][0]["status"] == "succeeded"
 

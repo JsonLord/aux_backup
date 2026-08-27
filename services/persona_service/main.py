@@ -26,7 +26,8 @@ def health():
 @app.post("/v1/personas/generate", response_model=list[SyntheticUserProfile])
 def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
     require_write(auth)
-    generated = generator.generate(body.theme, body.customer_profile, body.count, body.scenario, body.seed)
+    generated = generator.generate(body.theme, body.customer_profile, body.count, body.scenario,
+                                   body.seed, allow_offline_fallback=body.allow_offline_fallback)
     for item in generated:
         profiles.save(item, auth["workspace_id"], auth["owner_user_id"])
     return generated

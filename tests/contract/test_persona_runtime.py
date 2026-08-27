@@ -1,3 +1,6 @@
+import configparser
+from pathlib import Path
+
 import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
@@ -8,6 +11,14 @@ from services.persona_service.models import BehaviorProfile
 from services.persona_service.semantic import DirectLLMSemanticEngine, MockSemanticEngine
 from services.persona_service.store import PersonaStore
 from services.persona_service.generator import TinyTroupeGenerator
+
+
+def test_root_tinytroupe_config_uses_registered_openai_client():
+    config = configparser.ConfigParser()
+    config.read(Path(__file__).parents[2] / "config.ini")
+
+    assert config["OpenAI"]["API_TYPE"] == "openai"
+    assert config["OpenAI"]["BASE_URL"] == "https://api.helmholtz-blablador.fz-juelich.de/v1"
 
 
 def test_personas_are_distinct_complete_reproducible_and_editable():
@@ -90,6 +101,47 @@ def test_direct_engine_normalizes_provider_response(monkeypatch):
     assert engine.compile_behavior({"name": "Ada"}, "checkout", ("patience",), 9) == {"patience": 1.0}
 
 
+def test_direct_engine_accepts_space_openai_compatible_variable_names(monkeypatch):
+    monkeypatch.delenv("BLABLADOR_API_KEY", raising=False)
+    monkeypatch.delenv("BLABLADOR_BASE_URL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_ENDPOINT", "https://provider.invalid/v1/")
+    monkeypatch.setenv("OPENAI_MODEL", "test-model")
+
+    engine = DirectLLMSemanticEngine()
+
+    assert engine.api_key == "fixture"
+    assert engine.base_url == "https://provider.invalid/v1"
+    assert engine.model == "test-model"
+
+
+def test_tinytroupe_maps_blablador_to_registered_openai_client(monkeypatch):
+    updates = {}
+
+    class Config:
+        def update_multiple(self, values): updates.update(values)
+
+    class Clients:
+        selected = None
+
+        @classmethod
+        def force_api_type(cls, value): cls.selected = value
+
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("OPENAI_BASE_URL", raising=False)
+    monkeypatch.setenv("BLABLADOR_API_KEY", "fixture-secret")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_ENDPOINT", "https://blablador.invalid/v1/")
+    monkeypatch.setenv("OPENAI_MODEL", "alias-large")
+
+    TinyTroupeGenerator._configure_openai_compatible(Config(), Clients)
+
+    assert updates == {"api_type": "openai", "base_url": "https://blablador.invalid/v1",
+                       "model": "alias-large", "reasoning_model": "alias-large"}
+    assert Clients.selected == "openai"
+    assert __import__("os").environ["OPENAI_API_KEY"] == "fixture-secret"
+    assert __import__("os").environ["OPENAI_BASE_URL"] == "https://blablador.invalid/v1"
+
+
 def test_compiled_profile_validates_exact_behavior_schema(monkeypatch):
     monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
     compiled = PersonaCompiler().compile({"name": "Ada"}, "checkout", 9)
@@ -101,6 +153,7 @@ def test_compiled_profile_validates_exact_behavior_schema(monkeypatch):
 
 
 def test_generation_compiles_and_persists_once(monkeypatch):
+    monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
     generator = TinyTroupeGenerator()
     calls = 0
     original = generator.compiler.compile_with_metadata

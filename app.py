@@ -10,23 +10,28 @@ import uuid
 import shutil
 from gradio_client import Client
 from datetime import datetime
-from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient
+from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
 
 import gradio as gr
-from fastapi import FastAPI
+from fastapi import FastAPI, Header, HTTPException, Response
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import FileResponse
 import uvicorn
-from github import Github, Auth
 import requests
 from openai import OpenAI
 import logging
 
 # Configuration from environment variables
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_TOKEN") or os.environ.get("GITHUB_API_KEY")
-BLABLADOR_API_KEY = os.environ.get("BLABLADOR_API_KEY")
-BLABLADOR_BASE_URL = "https://api.helmholtz-blablador.fz-juelich.de/v1"
+BLABLADOR_API_KEY = os.environ.get("BLABLADOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
+BLABLADOR_BASE_URL = (
+    os.environ.get("BLABLADOR_BASE_URL")
+    or os.environ.get("OPENAI_COMPATIBLE_ENDPOINT")
+    or os.environ.get("OPENAI_BASE_URL")
+    or "https://api.helmholtz-blablador.fz-juelich.de/v1"
+)
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "alias-huge")
 control_plane = ControlPlaneClient()
 persona_runtime = PersonaRuntimeClient()
 
@@ -38,8 +43,9 @@ def authenticated_clients(workspace_id, oauth_profile, oauth_token):
         PersonaRuntimeClient(workspace_id=identity.workspace_id, user_id=identity.user_id, authorization=identity.authorization),
     )
 
-# GitHub Client
-gh = Github(auth=Auth.Token(GITHUB_TOKEN)) if GITHUB_TOKEN else None
+# Historical GitHub helpers remain below only for read-only migration compatibility;
+# the application runtime and visible tabs use workspace-scoped control-plane storage.
+gh = None
 REPO_NAME = "JsonLord/tiny_web"
 POOL_REPO_NAME = "JsonLord/agent-notes"
 POOL_PATH = "PersonaPool"
@@ -309,7 +315,7 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
 
     try:
         response = client.chat.completions.create(
-            model="alias-huge",
+            model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}]
         )
         content = response.choices[0].message.content
@@ -372,7 +378,7 @@ def generate_persona_from_deeppersona(theme, customer_profile):
 
     try:
         response = client.chat.completions.create(
-            model="alias-huge",
+            model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
             response_format={"type": "json_object"}
         )
@@ -440,7 +446,7 @@ def generate_tasks(theme, customer_profile, url):
     Do not include any other text in your response.
     """
 
-    models_to_try = ["alias-huge", "alias-fast", "alias-large"]
+    models_to_try = [OPENAI_MODEL]
 
     for attempt in range(5):
         try:
@@ -452,7 +458,7 @@ def generate_tasks(theme, customer_profile, url):
                 response = call_llm_parallel(client, models_to_try, [{"role": "user", "content": prompt}], response_format={"type": "json_object"})
             else:
                 response = client.chat.completions.create(
-                    model="alias-huge",
+                    model=OPENAI_MODEL,
                     messages=[{"role": "user", "content": prompt}],
                     response_format={"type": "json_object"}
                 )
@@ -506,6 +512,7 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
     except Exception as e:
         yield f"Error during generation: {str(e)}", None, None, None
 
+
 def check_branch_exists(repo_full_name, branch_name):
     if not gh: return False
     try:
@@ -521,7 +528,8 @@ def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, o
         return
     try:
         session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-        session = session_client.create_session({"legacy_session_id": session_id})
+        session = session_client.create_session({"name": session_id or "UX analysis",
+                                                 "target_url": url, "source": "gradio"})
         persona_artifacts = []
         for profile in personas:
             profile = dict(profile)
@@ -878,7 +886,7 @@ You are an expert Frontend Developer. Your task is to implement the following "L
 """
     return prompt
 
-def generate_full_ui_call(repo, branch, session_id, selected_solutions_json, url, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+def generate_full_ui_call(session_id, selected_solutions_json, url, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
     if not session_id:
         return "Error: Job ID missing. Start an analysis first."
     try:
@@ -893,16 +901,20 @@ def generate_full_ui_call(repo, branch, session_id, selected_solutions_json, url
         add_log(f"Control-plane error: {exc}")
         return f"❌ Error: {exc}"
 
-def poll_for_generated_ui(repo_full_name, branch_name, session_id):
-    if not gh or not repo_full_name or not branch_name or not session_id:
-        return None
+def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+    if not session_id:
+        return "Start an analysis or adaptation job first."
     try:
-        repo = gh.get_repo(repo_full_name)
-        path = f"user_experience_reports/generated_ui_{session_id[:8]}.html"
-        file_content = repo.get_contents(path, ref=branch_name)
-        return f'<iframe src="{file_content.download_url}" width="100%" height="800px" frameborder="0"></iframe>'
-    except:
-        return "UI not generated yet. Please wait..."
+        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        job = session_client.get_job(session_id)
+        artifacts = session_client.list_artifacts(job["session_id"])
+        candidates = [item for item in artifacts if item["kind"] == "ui.prototype"]
+        if not candidates:
+            return "No generated UI artifact is stored for this session yet."
+        html = session_client.get_artifact_content(candidates[-1]["artifact_id"])
+        return f'<iframe srcdoc="{html.replace(chr(34), "&quot;")}" width="100%" height="800px" frameborder="0"></iframe>'
+    except Exception as error:
+        return f"Unable to load the saved UI artifact: {error}"
 
 def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
     print(f"DEBUG: blablador_chat_adaptation called with message='{message}', history='{history}', jules_uuid='{jules_uuid}'")
@@ -1073,7 +1085,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     cancel_tasks_btn.click(fn=cancel_tasks, inputs=[last_generated_tasks_state], outputs=[task_list_display, status_output])
 
             start_session_btn = gr.Button("Start Analysis Session", variant="primary")
-            session_id_orch = gr.Textbox(label="Session ID (GitHub Branch Name)", interactive=True, placeholder="Enter a GitHub branch name to start analysis on...")
+            session_id_orch = gr.Textbox(label="Session name", interactive=True, placeholder="Optional label for this workspace session...")
             session_id_sync_list.append(session_id_orch)
             report_output = gr.Markdown(label="Active Session Reports")
 
@@ -1101,208 +1113,102 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 save_persona_btn = gr.Button("Save manual profile", variant="primary")
             persona_studio_status = gr.Markdown()
 
-        with gr.Tab("Presentation Carousel"):
-            gr.Markdown("### View Presentation Slides")
-            with gr.Row(visible=False):
-                sl_repo_select = gr.Dropdown(label="Repository", choices=[REPO_NAME], value=REPO_NAME, interactive=False)
-                sl_branch_select = gr.Dropdown(label="Branch", choices=get_repo_branches(REPO_NAME))
-            
+        def workspace_session_choices(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+            sessions = session_client.list_sessions()
+            choices = []
+            for session in sessions:
+                metadata = session.get("metadata") or {}
+                label = metadata.get("name") or metadata.get("target_url") or session["session_id"]
+                choices.append((f"{label} · {session['session_id']}", session["session_id"]))
+            return gr.update(choices=choices, value=choices[0][1] if choices else None), f"Loaded {len(choices)} workspace sessions."
+
+        def workspace_artifact_choices(session_id, kinds, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            if not session_id:
+                return gr.update(choices=[], value=None)
+            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+            artifacts = [item for item in session_client.list_artifacts(session_id) if item["kind"] in kinds]
+            choices = [(item.get("metadata", {}).get("download_name") or f"{item['kind']} · {item['artifact_id']}", item["artifact_id"]) for item in artifacts]
+            return gr.update(choices=choices, value=choices[0][1] if choices else None)
+
+        def load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            if not session_id or not artifact_id:
+                return "Select a saved artifact.", None
+            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+            artifact = next(item for item in session_client.list_artifacts(session_id) if item["artifact_id"] == artifact_id)
+            return session_client.get_artifact_content(artifact_id), session_client.download_artifact(artifact)
+
+        def presentation_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            return workspace_artifact_choices(session_id, {"ux.presentation"}, workspace_id, oauth_profile, oauth_token)
+
+        def report_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            return workspace_artifact_choices(session_id, {"ux.report"}, workspace_id, oauth_profile, oauth_token)
+
+        def log_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            return workspace_artifact_choices(session_id, {"journey.log", "persona.profile"}, workspace_id, oauth_profile, oauth_token)
+
+        def evidence_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            return workspace_artifact_choices(session_id, {"browser.screenshot", "browser.snapshot", "browser.video", "ux.evidence", "ui.prototype"}, workspace_id, oauth_profile, oauth_token)
+
+        with gr.Tab("Presentations"):
+            gr.Markdown("### Saved workspace presentations\nPresentations are generated from completed jobs and stored in the selected user workspace.")
             with gr.Row():
-                session_id_carousel = gr.Textbox(label="Session ID", placeholder="Enter Session ID to pull results...")
-                session_id_sync_list.append(session_id_carousel)
-                sl_refresh_branches_btn = gr.Button("Pull latest results")
-            
-            sl_terminal_log = gr.Code(label="Connection Log", language="shell", value=f"[SYSTEM] Connected to {REPO_NAME}\n[SYSTEM] Ready to pull results.")
-
+                presentation_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                presentation_refresh = gr.Button("Refresh sessions")
+            presentation_status = gr.Markdown()
             with gr.Row():
-                sl_status_display = gr.Markdown("Click 'Pull latest results' to discover slides.")
-                sl_render_all_btn = gr.Button("Start Carousel", variant="primary")
-
-            with gr.Row(visible=False) as carousel_controls:
-                prev_deck_btn = gr.Button("< Previous Deck")
-                deck_counter = gr.Markdown("Deck 0 of 0")
-                next_deck_btn = gr.Button("Next Deck >")
-
-            slideshow_display = gr.HTML(label="Slideshow")
-
-            all_decks_state = gr.State([])
-            current_deck_idx = gr.State(0)
-
-            def sl_update_branches(repo_name, session_id=None):
-                if session_id:
-                    if not check_branch_exists(repo_name, session_id):
-                        return gr.update(), f"[ERROR] Branch '{session_id}' not found. Please wait 30 minutes if newly created."
-                
-                branches = get_repo_branches(repo_name)
-                latest = session_id if session_id and session_id in branches else (branches[0] if branches else "main")
-                log = f"[SYSTEM] Pulled latest branches from {repo_name}\n[SYSTEM] Target branch: {latest}\n[SYSTEM] Found {len(branches)} branches."
-                return gr.update(choices=branches, value=latest), log
-
-            def sl_auto_render(repo, branch):
-                reports = get_reports_in_branch(repo, branch, filter_type="slides")
-                default_val = None
-                # Prioritize the standard slides folder
-                if "user_experience_reports/slides" in reports:
-                    default_val = "user_experience_reports/slides"
-                elif reports:
-                    default_val = reports[0]
-
-                html = ""
-                carousel_visible = gr.update(visible=False)
-                status_text = "No slide decks discovered."
-                counter_text = ""
-                idx = 0
-
-                if default_val:
-                    html = render_slides(repo, branch, default_val)
-                    status_text = f"✅ Found and loaded slides folder: `{default_val}`"
-                    if len(reports) > 1:
-                        carousel_visible = gr.update(visible=True)
-                        counter_text = f"Deck 1 of {len(reports)}: {default_val}"
-
-                return status_text, reports, html, carousel_visible, idx, counter_text
-
-            sl_repo_select.change(fn=sl_update_branches, inputs=[sl_repo_select], outputs=[sl_branch_select, sl_terminal_log])
-
-            def start_carousel(repo, branch, decks):
-                if not decks:
-                    return "No slide decks found.", gr.update(visible=False), 0, "No decks."
-
-                # Render first deck
-                html = render_slides(repo, branch, decks[0])
-                counter_text = f"Deck 1 of {len(decks)}: {decks[0]}"
-                return html, gr.update(visible=True), 0, counter_text
-
-            def navigate_carousel(repo, branch, decks, current_idx, direction):
-                if not decks: return "", 0, "No decks."
-                new_idx = (current_idx + direction) % len(decks)
-                html = render_slides(repo, branch, decks[new_idx])
-                counter_text = f"Deck {new_idx + 1} of {len(decks)}: {decks[new_idx]}"
-                return html, new_idx, counter_text
-
-            sl_refresh_branches_btn.click(fn=sl_update_branches, inputs=[sl_repo_select, session_id_carousel], outputs=[sl_branch_select, sl_terminal_log])
-
-            sl_branch_select.change(
-                fn=sl_auto_render,
-                inputs=[sl_repo_select, sl_branch_select],
-                outputs=[sl_status_display, all_decks_state, slideshow_display, carousel_controls, current_deck_idx, deck_counter]
-            )
-
-            sl_render_all_btn.click(fn=start_carousel, inputs=[sl_repo_select, sl_branch_select, all_decks_state], outputs=[slideshow_display, carousel_controls, current_deck_idx, deck_counter])
-
-            # Use small helper components for navigation direction
-            prev_val = gr.Number(-1, visible=False)
-            next_val = gr.Number(1, visible=False)
-
-            prev_deck_btn.click(fn=navigate_carousel, inputs=[sl_repo_select, sl_branch_select, all_decks_state, current_deck_idx, prev_val], outputs=[slideshow_display, current_deck_idx, deck_counter])
-            next_deck_btn.click(fn=navigate_carousel, inputs=[sl_repo_select, sl_branch_select, all_decks_state, current_deck_idx, next_val], outputs=[slideshow_display, current_deck_idx, deck_counter])
+                presentation_artifact = gr.Dropdown(label="Presentation", choices=[], interactive=True)
+                presentation_load = gr.Button("Load presentation", variant="primary")
+                presentation_download = gr.DownloadButton("Download presentation")
+            presentation_view = gr.HTML(label="Presentation")
+            presentation_refresh.click(workspace_session_choices, [workspace_selector], [presentation_session, presentation_status], api_name="list_presentation_sessions")
+            presentation_session.change(presentation_choices, [presentation_session, workspace_selector], [presentation_artifact], api_name="list_session_presentations")
+            presentation_load.click(load_workspace_artifact, [presentation_session, presentation_artifact, workspace_selector], [presentation_view, presentation_download], api_name="load_session_presentation")
 
         with gr.Tab("Report Viewer"):
-            gr.Markdown("### View UX Reports & Solutions")
-            with gr.Row(visible=False):
-                rv_repo_select = gr.Dropdown(label="Repository", choices=[REPO_NAME], value=REPO_NAME, interactive=False)
-                rv_branch_select = gr.Dropdown(label="Imported legacy session", choices=[])
-            
+            gr.Markdown("### Saved UX reports\nReports are tenant-owned control-plane artifacts; no GitHub branch or token is used.")
             with gr.Row():
-                session_id_rv = gr.Textbox(label="Session ID", placeholder="Enter Session ID to pull results...")
-                session_id_sync_list.append(session_id_rv)
-                rv_refresh_branches_btn = gr.Button("Pull latest results")
-            
-            rv_terminal_log = gr.Code(label="Connection Log", language="shell", value=f"[SYSTEM] Connected to {REPO_NAME}\n[SYSTEM] Ready to pull results.")
-            
+                report_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                report_refresh = gr.Button("Refresh sessions")
+            report_status = gr.Markdown()
             with gr.Row():
-                rv_report_select = gr.Dropdown(label="Select Report", choices=[], allow_custom_value=True)
-                rv_load_report_btn = gr.Button("Load Report")
-            
-            rv_manual_path = gr.Textbox(label="Or enter manual path (e.g. docs/my_report.md)", placeholder="docs/my_report.md")
-
-            with gr.Tabs():
-                with gr.Tab("Report"):
-                    rv_report_viewer = gr.Markdown(label="Report Content")
-                with gr.Tab("Better UI Solutions"):
-                    gr.Markdown("Select the solutions you want to include in the full UI generation.")
-                    solutions_checkboxes = gr.CheckboxGroup(label="Identified UI Improvements", choices=[])
-                    refresh_solutions_btn = gr.Button("Scan for Solutions")
-                    
-                    def refresh_solutions_ui(repo, branch):
-                        sols = get_solutions_from_repo(repo, branch)
-                        choices = [s["name"] for s in sols]
-                        return gr.update(choices=choices), sols
-                    
-                    refresh_solutions_btn.click(fn=refresh_solutions_ui, inputs=[rv_repo_select, rv_branch_select], outputs=[solutions_checkboxes, all_solutions_state])
-                    
-                    def update_selected_solutions(selected_names, all_sols):
-                        selected = [s for s in all_sols if s["name"] in selected_names]
-                        return json.dumps(selected)
-                    
-                    solutions_checkboxes.change(fn=update_selected_solutions, inputs=[solutions_checkboxes, all_solutions_state], outputs=[selected_solutions_json_state])
-
-            def rv_update_branches(repo_name, session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                branches = session_client.discover_legacy(repo_name)
-                names = [item["name"] for item in branches]
-                latest = session_id if session_id in names else (names[0] if names else None)
-                return gr.update(choices=names, value=latest), f"[CONTROL PLANE] Discovered {len(names)} read-only legacy sessions. Import creates tenant-owned artifacts."
-
-            def rv_update_reports(repo_name, branch_name, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                imported = session_client.import_legacy(repo_name, branch_name)
-                artifacts = session_client.list_artifacts(imported["session"]["session_id"])
-                choices = [(item["metadata"].get("legacy_path", item["artifact_id"]), item["artifact_id"]) for item in artifacts if item["kind"] == "legacy.report"]
-                return gr.update(choices=choices, value=choices[0][1] if choices else None)
-
-            rv_repo_select.change(fn=rv_update_branches, inputs=[rv_repo_select, session_id_rv, workspace_selector], outputs=[rv_branch_select, rv_terminal_log])
-            def rv_load_wrapper(repo, branch, selected, manual, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
-                del repo, branch, manual
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                return session_client.get_artifact_content(selected) if selected else "Select an imported report."
-
-            rv_refresh_branches_btn.click(fn=rv_update_branches, inputs=[rv_repo_select, session_id_rv, workspace_selector], outputs=[rv_branch_select, rv_terminal_log])
-            rv_branch_select.change(fn=rv_update_reports, inputs=[rv_repo_select, rv_branch_select, workspace_selector], outputs=[rv_report_select])
-            rv_load_report_btn.click(fn=rv_load_wrapper, inputs=[rv_repo_select, rv_branch_select, rv_report_select, rv_manual_path, workspace_selector], outputs=[rv_report_viewer])
+                report_artifact = gr.Dropdown(label="Report", choices=[], interactive=True)
+                report_load = gr.Button("Load report", variant="primary")
+                report_download = gr.DownloadButton("Download report")
+            rv_report_viewer = gr.Code(label="Report content", language="json", lines=28)
+            report_refresh.click(workspace_session_choices, [workspace_selector], [report_session, report_status], api_name="list_report_sessions")
+            report_session.change(report_choices, [report_session, workspace_selector], [report_artifact], api_name="list_session_reports")
+            report_load.click(load_workspace_artifact, [report_session, report_artifact, workspace_selector], [rv_report_viewer, report_download], api_name="load_session_report")
 
         with gr.Tab("Persona Thought Logs"):
-            gr.Markdown("### Persona Internal Monologue & Analysis")
-            with gr.Row(visible=False):
-                tl_repo_select = gr.Dropdown(label="Repository", choices=[REPO_NAME], value=REPO_NAME, interactive=False)
-                tl_branch_select = gr.Dropdown(label="Branch", choices=get_repo_branches(REPO_NAME))
-            
+            gr.Markdown("### Persisted journey and persona logs")
             with gr.Row():
-                session_id_tl = gr.Textbox(label="Session ID", placeholder="Enter Session ID to pull results...")
-                session_id_sync_list.append(session_id_tl)
-                tl_refresh_btn = gr.Button("Pull latest results")
-            
-            tl_terminal_log = gr.Code(label="Connection Log", language="shell", value=f"[SYSTEM] Connected to {REPO_NAME}\n[SYSTEM] Ready to pull results.")
-            
+                log_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                log_refresh = gr.Button("Refresh sessions")
+            log_status = gr.Markdown()
             with gr.Row():
-                tl_log_select = gr.Dropdown(label="Select Thought Log", choices=[])
-                tl_load_btn = gr.Button("Load Log")
-            
-            tl_viewer = gr.Markdown(label="Thought Log Content")
+                log_artifact = gr.Dropdown(label="Journey log", choices=[], interactive=True)
+                log_load = gr.Button("Load log", variant="primary")
+                log_download = gr.DownloadButton("Download log")
+            log_viewer = gr.Code(label="Journey events and persona snapshots", language="json", lines=28)
+            log_refresh.click(workspace_session_choices, [workspace_selector], [log_session, log_status], api_name="list_log_sessions")
+            log_session.change(log_choices, [log_session, workspace_selector], [log_artifact], api_name="list_session_logs")
+            log_load.click(load_workspace_artifact, [log_session, log_artifact, workspace_selector], [log_viewer, log_download], api_name="load_session_log")
 
-            def tl_update_logs(repo, branch, session_id=None):
-                if session_id:
-                    if not check_branch_exists(repo, session_id):
-                        return gr.update(), f"[ERROR] Branch '{session_id}' not found. Please wait 30 minutes if newly created."
-                
-                branches = get_repo_branches(repo)
-                latest = session_id if session_id and session_id in branches else (branch if branch else (branches[0] if branches else "main"))
-                log = f"[SYSTEM] Pulled latest branches from {repo}\n[SYSTEM] Target branch: {latest}"
-                logs = get_thought_logs_from_repo(repo, latest)
-                return gr.update(choices=logs, value=logs[0] if logs else None), log
-            
-            tl_refresh_btn.click(fn=tl_update_logs, inputs=[tl_repo_select, tl_branch_select, session_id_tl], outputs=[tl_log_select, tl_terminal_log])
-            tl_load_btn.click(fn=get_report_content, inputs=[tl_repo_select, tl_branch_select, tl_log_select], outputs=[tl_viewer])
-
-        with gr.Tab("Average User Journey Heatmaps"):
-            gr.Markdown("### Heatmaps")
+        with gr.Tab("Evidence Artifacts"):
+            gr.Markdown("### Saved browser and UX evidence\nSelect any evidence artifact persisted for this workspace session.")
             with gr.Row():
-                session_id_hm = gr.Textbox(label="Session ID", placeholder="Enter Session ID...")
-                session_id_sync_list.append(session_id_hm)
-            refresh_heatmaps_btn = gr.Button("Refresh Heatmaps")
-            heatmap_gallery = gr.Gallery(label="User Interaction Heatmaps", columns=2)
-            
-            refresh_heatmaps_btn.click(fn=get_heatmaps_from_repo, inputs=[rv_repo_select, rv_branch_select], outputs=[heatmap_gallery])
+                evidence_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                evidence_refresh = gr.Button("Refresh sessions")
+            evidence_status = gr.Markdown()
+            with gr.Row():
+                evidence_artifact = gr.Dropdown(label="Evidence artifact", choices=[], interactive=True)
+                evidence_load = gr.Button("Load evidence", variant="primary")
+                evidence_download = gr.DownloadButton("Download evidence")
+            evidence_viewer = gr.Code(label="Evidence content", lines=24)
+            evidence_refresh.click(workspace_session_choices, [workspace_selector], [evidence_session, evidence_status], api_name="list_evidence_sessions")
+            evidence_session.change(evidence_choices, [evidence_session, workspace_selector], [evidence_artifact], api_name="list_session_evidence")
+            evidence_load.click(load_workspace_artifact, [evidence_session, evidence_artifact, workspace_selector], [evidence_viewer, evidence_download], api_name="load_session_evidence")
 
         with gr.Tab("Agents.txt"):
             gr.Markdown("### Coding Agent Prompt")
@@ -1316,7 +1222,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
         with gr.Tab("Full New UI"):
             with gr.Row():
-                session_id_ui = gr.Textbox(label="Session ID", placeholder="Enter Session ID (GitHub Branch Name)...")
+                session_id_ui = gr.Textbox(label="Session ID", placeholder="Enter Session name...")
                 session_id_sync_list.append(session_id_ui)
                 jules_uuid_ui = gr.Textbox(label="System UUID", placeholder="Automatically filled after analysis...")
             with gr.Row():
@@ -1332,64 +1238,34 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     ui_chat_msg = gr.Textbox(label="Request Modification", placeholder="e.g. Change primary color to emerald...")
                     ui_chat_send = gr.Button("Send Request")
 
-            generate_full_ui_btn.click(fn=generate_full_ui_call, inputs=[rv_repo_select, rv_branch_select, jules_uuid_ui, selected_solutions_json_state, url_input, workspace_selector], outputs=[full_ui_iframe])
-            refresh_ui_btn.click(fn=poll_for_generated_ui, inputs=[rv_repo_select, rv_branch_select, session_id_ui], outputs=[full_ui_iframe])
+            generate_full_ui_btn.click(fn=generate_full_ui_call, inputs=[jules_uuid_ui, selected_solutions_json_state, url_input, workspace_selector], outputs=[full_ui_iframe])
+            refresh_ui_btn.click(fn=poll_for_generated_ui, inputs=[jules_uuid_ui, workspace_selector], outputs=[full_ui_iframe])
             ui_chat_send.click(fn=blablador_chat_adaptation, inputs=[ui_chat_msg, ui_chatbot, jules_uuid_ui, workspace_selector], outputs=[ui_chatbot, ui_chat_msg])
 
 
         with gr.Tab("System"):
-            gr.Markdown("### System Diagnostics & Manual Connection")
-            with gr.Row():
-                session_id_sys = gr.Textbox(label="Session ID", placeholder="Enter Session ID...")
-                session_id_sync_list.append(session_id_sys)
-            with gr.Row():
-                sys_token_input = gr.Textbox(label="GitHub Token (Leave blank for default)", type="password")
-                sys_repo_input = gr.Textbox(label="Repository (e.g., JsonLord/tiny_web)", value=REPO_NAME, interactive=False)
-                sys_test_btn = gr.Button("Test Connection & Fetch Branches")
-            
-            sys_status = gr.Textbox(label="Connection Status", interactive=False)
-            sys_branch_output = gr.JSON(label="Connection Log")
+            gr.Markdown("### Workspace storage and service diagnostics")
+            local_system_refresh = gr.Button("Check local services and workspace storage", variant="primary")
+            local_system_status = gr.JSON(label="Diagnostics")
 
-            def system_test(token, repo_name):
-                global gh, GITHUB_TOKEN
-                try:
-                    if token:
-                        add_log(f"Testing connection with provided token...")
-                        test_gh = Github(auth=Auth.Token(token))
-                    elif gh:
-                        add_log(f"Testing connection with existing client...")
-                        test_gh = gh
-                    else:
-                        add_log("ERROR: No token provided and default client is missing.")
-                        return "Error: No GitHub client available. Please provide a token.", None
-                    
-                    user = test_gh.get_user().login
-                    add_log(f"Successfully authenticated as {user}")
-                    
-                    # Update global client if token was provided
-                    if token:
-                        gh = test_gh
-                        GITHUB_TOKEN = token
-                        add_log("Global GitHub client updated with new token.")
-                    
-                    status = f"Success: Connected as {user} to {repo_name}"
-                    
-                    # Use existing optimized logic
-                    branches = get_repo_branches(repo_name, github_client=test_gh)
-                    
-                    return status, {"status": "Connection established successfully", "user": user, "branches_count": len(branches)}
-                except Exception as e:
-                    add_log(f"System Test Error: {str(e)}")
-                    return f"Error: {str(e)}", {"status": "Connection failed", "error": str(e)}
+            def local_system_test(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+                session_client, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                return {
+                    "identity": session_client.me(),
+                    "sessions": len(session_client.list_sessions()),
+                    "personas": len(personas_client.list()),
+                    "storage": "workspace-scoped control-plane artifacts",
+                    "github_runtime_dependency": False,
+                }
 
-            sys_test_btn.click(fn=system_test, inputs=[sys_token_input, sys_repo_input], outputs=[sys_status, sys_branch_output])
+            local_system_refresh.click(local_system_test, [workspace_selector], [local_system_status], api_name="workspace_storage_diagnostics")
 
         with gr.Tab("Live Monitoring"):
-            gr.Markdown("### Live Monitoring of JsonLord/tiny_web for new UX reports")
+            gr.Markdown("### Live workspace jobs and artifacts")
             with gr.Row():
                 session_id_live = gr.Textbox(label="Session ID", placeholder="Enter Session ID...")
                 session_id_sync_list.append(session_id_live)
-            live_log = gr.Textbox(label="GitHub Connection Logs", lines=5, interactive=False)
+            live_log = gr.Textbox(label="Workspace activity log", lines=5, interactive=False)
             refresh_feed_btn = gr.Button("Refresh Feed Now")
             global_feed = gr.Markdown(value="Waiting for new reports...")
             
@@ -1417,7 +1293,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
         with gr.Tab("Alternative Styling"):
             gr.Markdown("### Design Automation & Iteration")
-            gr.Markdown("We are working with the team behind https://github.com/onlook-dev/onlook to automate fast design iterations based on the user test reports. Stay updated on changes to the Github Page by following it.")
+            gr.Markdown("Design alternatives are stored as workspace artifacts and can be downloaded or iterated without a source-control integration.")
             
             gr.Markdown("---")
             gr.Markdown("### 🚀 Recommendations for Customer-Facing Application")
@@ -1425,18 +1301,13 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             To transform this prototype into a production-ready customer application, we recommend the following enhancements:
             
             1. **Multi-Tenant Authentication**: Implement Clerk or NextAuth for secure user logins and project isolation, ensuring customers only see their own analysis branches.
-            2. **Real-Time Step Visualization**: Replace the static status logs with a real-time progress bar and a "Live View" tab showing Jules' browser interactions as they happen.
+            2. **Real-Time Step Visualization**: Extend the persisted event stream with a "Live View" tab showing JourneyTest browser interactions as they happen.
             3. **Figma/Design Integration**: Develop a plugin to export the "Identified UI Improvements" directly into Figma as annotated design layers.
             4. **Guided Onboarding Flow**: Add a "Wizard" mode for first-time users to help them define their Theme and Customer Profile through guided questions.
             5. **Result Comparison (A/B Testing)**: Add a feature to view the original landing page side-by-side with the Generated UI, including a "Scorecard" of UX metrics (Accessibility, Conversion, Clarity).
             6. **Automated Deployment Previews**: Integrate with Vercel/Netlify APIs to automatically deploy the 'Full New UI' to a shareable preview URL upon generation.
             """)
 
-            gr.Markdown("---")
-            gr.Markdown("### 🛠️ Manual Deployment")
-            manual_deploy_btn = gr.Button("Push App Changes to Hugging Face Space")
-            deploy_status = gr.Markdown()
-            manual_deploy_btn.click(fn=deploy_to_hf, outputs=[deploy_status])
 
     # Persona Preview Handler (moved to a safe place if not already there)
     # Actually it's inside the Tab block in previous edit.
@@ -1445,12 +1316,12 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     studio_outputs = [persona_view, persona_editor, *behavior_sliders.values(), color_vision, visual_acuity, contrast_sensitivity, pointer_precision, processing_speed, working_memory, reading_speed]
 
     def persona_choices(personas):
-        personas = personas or []
+        personas = normalize_personas(personas)
         choices = [(item.get("persona", {}).get("name", item.get("name", item.get("id", "Persona"))), str(index)) for index, item in enumerate(personas)]
         return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
     def load_persona(personas, index):
-        profile = (personas or [])[int(index or 0)]
+        profile = normalize_personas(personas)[int(index or 0)]
         behavior, abilities = profile.get("behavior", {}), profile.get("abilities", {})
         vision, motor = abilities.get("vision", {}), abilities.get("motor", {})
         cognition, reading = abilities.get("cognition", {}), abilities.get("reading", {})
@@ -1472,7 +1343,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         profile = json.loads(profile_json)
         _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         saved = personas_client.update(profile)
-        updated = list(personas or [])
+        updated = normalize_personas(personas)
         updated[int(index or 0)] = saved
         return saved, json.dumps(saved, indent=2), updated, f"Saved `{saved['id']}` as a manually edited profile."
 
@@ -1511,30 +1382,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             sid.change(fn=lambda x: x, inputs=[sid], outputs=[active_session_state])
 
 if __name__ == "__main__":
-    # Startup connectivity check
-    print("--- STARTUP GITHUB CONNECTIVITY CHECK ---")
-    token_source = "None"
-    if os.environ.get("GITHUB_TOKEN"):
-        token_source = "GITHUB_TOKEN"
-    elif os.environ.get("GITHUB_API_TOKEN"):
-        token_source = "GITHUB_API_TOKEN"
-    
-    print(f"Token Source: {token_source}")
-
-    if gh is None:
-        print(f"ERROR: No GitHub token found in GITHUB_TOKEN or GITHUB_API_TOKEN.")
-    else:
-        try:
-            user = gh.get_user().login
-            print(f"SUCCESS: Logged in to GitHub as: {user}")
-            
-            # Test branch fetching for REPO_NAME
-            print(f"Testing branch fetch for {REPO_NAME}...")
-            test_branches = get_repo_branches(REPO_NAME)
-            print(f"Test branch fetch successful. Found {len(test_branches)} branches.")
-        except Exception as startup_err:
-            print(f"ERROR: GitHub connectivity test failed: {startup_err}")
-    print("-----------------------------------------")
+    print("Starting workspace-scoped UX analysis application")
 
     # Wrap with FastAPI for health check and API endpoints
     fastapi_app = FastAPI()
@@ -1546,6 +1394,98 @@ if __name__ == "__main__":
     @fastapi_app.get("/api/info")
     def info():
         return {"app": "UX Analysis Orchestrator", "version": "1.0.0"}
+
+    def api_clients(authorization, workspace_id):
+        if not authorization or not authorization.startswith("Bearer "):
+            raise HTTPException(401, "Hugging Face bearer token required")
+        return (
+            ControlPlaneClient(workspace_id=workspace_id, authorization=authorization),
+            PersonaRuntimeClient(workspace_id=workspace_id, authorization=authorization),
+        )
+
+    @fastapi_app.get("/api/v1/sessions")
+    def api_sessions(authorization: str | None = Header(None),
+                     workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        session_client, _ = api_clients(authorization, workspace_id)
+        return {"items": session_client.list_sessions()}
+
+    @fastapi_app.get("/api/v1/sessions/{session_id}/artifacts")
+    def api_session_artifacts(session_id: str, authorization: str | None = Header(None),
+                              workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        session_client, _ = api_clients(authorization, workspace_id)
+        return {"items": session_client.list_artifacts(session_id)}
+
+    @fastapi_app.get("/api/v1/artifacts/{artifact_id}/download")
+    def api_artifact_download(artifact_id: str, authorization: str | None = Header(None),
+                              workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        session_client, _ = api_clients(authorization, workspace_id)
+        response = requests.get(f"{session_client.base_url}/v1/artifacts/{artifact_id}/content",
+                                headers=session_client.headers, timeout=120)
+        if response.status_code >= 400:
+            raise HTTPException(response.status_code, "artifact download failed")
+        disposition = response.headers.get("content-disposition", f'attachment; filename="{artifact_id}"')
+        return Response(response.content, media_type=response.headers.get("content-type"),
+                        headers={"content-disposition": disposition})
+
+    @fastapi_app.get("/api/v1/jobs/{job_id}")
+    def api_job(job_id: str, authorization: str | None = Header(None),
+                workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        session_client, _ = api_clients(authorization, workspace_id)
+        return session_client.get_job(job_id)
+
+    @fastapi_app.post("/api/v1/workflows/usability")
+    def api_usability_workflow(payload: dict, authorization: str | None = Header(None),
+                               workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        session_client, personas_client = api_clients(authorization, workspace_id)
+        personas = personas_client.generate(payload["theme"], payload["customer_profile"],
+                                            int(payload.get("persona_count", 5)),
+                                            scenario=payload.get("scenario") or f"Test {payload['url']}",
+                                            seed=int(payload.get("seed", 1)),
+                                            allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
+        session = session_client.create_session({"name": payload.get("name") or payload["theme"],
+                                                 "target_url": payload["url"], "source": "api"})
+        persona_artifacts = [session_client.create_artifact(
+            session["session_id"], "persona.profile", profile,
+            metadata={"schema_version": "1.0", "persona_id": profile["id"], "immutable_run_snapshot": True})
+            ["artifact_id"] for profile in personas]
+        tasks = payload.get("tasks") or [
+            "Understand the product and its primary value proposition",
+            "Find how to start using the product",
+            "Inspect examples or documentation",
+            "Identify pricing or usage constraints",
+            "Locate support or contact information",
+        ]
+        job = session_client.create_job({"session_id": session["session_id"], "type": "combined_test",
+            "input_artifacts": persona_artifacts,
+            "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": payload["url"]}})
+        completed = (session_client.wait_for_job(job["job_id"], timeout=int(payload.get("timeout", 900)))
+                     if payload.get("wait") else job)
+        return {"session": session, "personas": personas, "job": completed,
+                "artifacts": session_client.list_artifacts(session["session_id"])}
+
+    @fastapi_app.get("/api/readiness")
+    def readiness():
+        services = {}
+        for name, url in {
+            "controlPlane": f"{control_plane.base_url}/healthz",
+            "personaRuntime": f"{persona_runtime.base_url}/healthz",
+            "journeyWorker": f"{os.getenv('JOURNEY_WORKER_URL', 'http://127.0.0.1:8080').rstrip('/')}/healthz",
+            "eyesonWorker": f"{os.getenv('EYESON_WORKER_URL', 'http://127.0.0.1:8081').rstrip('/')}/healthz",
+        }.items():
+            try:
+                response = requests.get(url, timeout=5)
+                response.raise_for_status()
+                services[name] = response.json()
+            except requests.RequestException as error:
+                services[name] = {"status": "unavailable", "error": str(error)}
+        model_configured = bool(os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY"))
+        return {
+            "status": "ready" if all(item.get("status") in {"ok", "ready"} for item in services.values()) else "degraded",
+            "services": services,
+            "modelCredentialsConfigured": model_configured,
+            "liveExecutionReady": model_configured and services.get("personaRuntime", {}).get("tinytroupeAvailable", False)
+                and services.get("journeyWorker", {}).get("engine") == "journeytest",
+        }
 
     @fastapi_app.get("/api-docs")
     def api_docs():
@@ -1560,6 +1500,26 @@ if __name__ == "__main__":
                     "path": "/api/info",
                     "method": "GET",
                     "purpose": "App information"
+                },
+                {
+                    "path": "/api/readiness",
+                    "method": "GET",
+                    "purpose": "Aggregate control-plane, TinyTroupe, JourneyTest, and model readiness"
+                },
+                {
+                    "path": "/api/v1/workflows/usability",
+                    "method": "POST",
+                    "purpose": "Generate personas, run a saved usability job, and return workspace artifacts"
+                },
+                {
+                    "path": "/api/v1/sessions/{session_id}/artifacts",
+                    "method": "GET",
+                    "purpose": "List artifacts saved in the authenticated workspace session"
+                },
+                {
+                    "path": "/api/v1/artifacts/{artifact_id}/download",
+                    "method": "GET",
+                    "purpose": "Download an authenticated report, presentation, log, or evidence artifact"
                 },
                 {
                     "path": "/api-docs",

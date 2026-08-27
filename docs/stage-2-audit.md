@@ -38,6 +38,23 @@ distinct profiles.
 - `PLACEHOLDER`: run the committed `RUN_TINY_TROUPE_ACCEPTANCE=1` package test and
   record the supported serialization method and determinism result.
 
+## Helmholtz OpenAI-compatible configuration
+
+The Space's historical `config.ini` selected `API_TYPE=helmholtz-blablador`, but
+TinyTroupe 0.7 does not register that client name. The persona adapter now uses
+the public `config_manager` and `tinytroupe.clients.force_api_type` APIs to select
+the registered `openai` client, set the configured model, and route the OpenAI SDK
+through `OPENAI_BASE_URL`. This ports the relevant behavior reviewed from
+`JsonLord/TinyTroupe:fix-openai-auth-error` without downgrading the pinned runtime
+from 0.7.0 to the fork branch's declared 0.5.2.
+
+The deployed Space check on 2026-08-27 confirmed `api_type = openai`,
+`base_url = https://api.helmholtz-blablador.fz-juelich.de/v1`, and model
+`alias-large`. TinyTroupe then issued a request to that endpoint; the prior
+"API type helmholtz-blablador is not supported" failure did not recur. The
+provider returned HTTP 502 during this acceptance attempt, so distinct-persona
+package acceptance remains pending a healthy upstream response.
+
 ## Exit check
 
 The immutable snapshot, tenancy, worker attachment, and report requirements now have
