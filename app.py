@@ -561,7 +561,7 @@ def generate_tasks(theme, customer_profile, url):
 
     return [f"Task {i+1} for {theme} (Manual fallback)" for i in range(10)]
 
-def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     try:
         _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         current_profile = customer_profile
@@ -595,7 +595,7 @@ def check_branch_exists(repo_full_name, branch_name):
     except:
         return False
 
-def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not personas or not tasks:
         yield "Error: Personas or Tasks missing. Please generate them first.", "", "", ""
         return
@@ -959,7 +959,7 @@ You are an expert Frontend Developer. Your task is to implement the following "L
 """
     return prompt
 
-def generate_full_ui_call(session_id, selected_solutions_json, url, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+def generate_full_ui_call(session_id, selected_solutions_json, url, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not session_id:
         return "Error: Job ID missing. Start an analysis first."
     try:
@@ -974,7 +974,7 @@ def generate_full_ui_call(session_id, selected_solutions_json, url, workspace_id
         add_log(f"Control-plane error: {exc}")
         return f"❌ Error: {exc}"
 
-def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not session_id:
         return "Start an analysis or adaptation job first."
     try:
@@ -989,7 +989,7 @@ def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfi
     except Exception as error:
         return f"Unable to load the saved UI artifact: {error}"
 
-def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     print(f"DEBUG: blablador_chat_adaptation called with message='{message}', history='{history}', jules_uuid='{jules_uuid}'")
     if not jules_uuid:
         return history + [("System", "Error: Analysis job ID missing.")], ""
@@ -1066,7 +1066,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
     demo.load(fn=load_hf_workspaces, outputs=[workspace_selector, login_status])
 
-    def validate_workspace(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+    def validate_workspace(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
         if (not oauth_profile or not oauth_token) and not ADMIN_API_TOKEN:
             return "🔒 Sign in with Hugging Face and select a workspace to continue."
         try:
@@ -1196,7 +1196,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 save_persona_btn = gr.Button("Save manual profile", variant="primary")
             persona_studio_status = gr.Markdown()
 
-        def workspace_session_choices(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def workspace_session_choices(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
             sessions = session_client.list_sessions()
             choices = []
@@ -1206,7 +1206,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 choices.append((f"{label} · {session['session_id']}", session["session_id"]))
             return gr.update(choices=choices, value=choices[0][1] if choices else None), f"Loaded {len(choices)} workspace sessions."
 
-        def workspace_artifact_choices(session_id, kinds, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def workspace_artifact_choices(session_id, kinds, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             if not session_id:
                 return gr.update(choices=[], value=None)
             session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
@@ -1214,23 +1214,23 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             choices = [(item.get("metadata", {}).get("download_name") or f"{item['kind']} · {item['artifact_id']}", item["artifact_id"]) for item in artifacts]
             return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
-        def load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             if not session_id or not artifact_id:
                 return "Select a saved artifact.", None
             session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
             artifact = next(item for item in session_client.list_artifacts(session_id) if item["artifact_id"] == artifact_id)
             return session_client.get_artifact_content(artifact_id), session_client.download_artifact(artifact)
 
-        def presentation_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def presentation_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"ux.presentation"}, workspace_id, oauth_profile, oauth_token)
 
-        def report_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def report_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"ux.report"}, workspace_id, oauth_profile, oauth_token)
 
-        def log_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def log_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"journey.log", "persona.profile"}, workspace_id, oauth_profile, oauth_token)
 
-        def evidence_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+        def evidence_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"browser.screenshot", "browser.snapshot", "browser.video", "ux.evidence", "ui.prototype"}, workspace_id, oauth_profile, oauth_token)
 
         with gr.Tab("Presentations"):
@@ -1331,7 +1331,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             local_system_refresh = gr.Button("Check local services and workspace storage", variant="primary")
             local_system_status = gr.JSON(label="Diagnostics")
 
-            def local_system_test(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            def local_system_test(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
                 session_client, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
                 return {
                     "identity": session_client.me(),
@@ -1352,7 +1352,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             refresh_feed_btn = gr.Button("Refresh Feed Now")
             global_feed = gr.Markdown(value="Waiting for new reports...")
             
-            def monitor_and_log(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+            def monitor_and_log(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
                 session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
                 sessions = session_client.list_sessions()
                 rows, logs, snapshots = [], [], []
@@ -1422,7 +1422,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         abilities.setdefault("reading", {})["wordsPerMinute"] = int(reading)
         return profile, json.dumps(profile, indent=2), "Tweaks applied locally. Save to persist them."
 
-    def save_manual_persona(profile_json, personas, index, workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
+    def save_manual_persona(profile_json, personas, index, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
         profile = json.loads(profile_json)
         _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         saved = personas_client.update(profile)
