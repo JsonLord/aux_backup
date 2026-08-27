@@ -111,6 +111,54 @@ class TinyTroupeGenerator:
             overrides["max_completion_tokens"] = max_completion_tokens
         config_manager.update_multiple(overrides)
         clients.force_api_type("openai")
+        cls._patch_system_message_ordering()
+
+    @staticmethod
+    def _consolidate_leading_system_message(messages):
+        """Merge every system-role message into a single leading one.
+
+        TinyTroupe 0.7's ``LLMChat.call()`` (``tinytroupe/utils/llm.py``) appends a
+        JSON/typing-format instruction with ``role: "system"`` to the *end* of the
+        conversation immediately before almost every structured/typed call (the
+        ``@llm()``-decorated persona-attribute generators all go through this
+        path). The Helmholtz Blablador gateway's backend rejects any request whose
+        system message is not the first one with ``400 System message must be at
+        the beginning``, which TinyTroupe's own retry logic then treats as
+        non-retryable and silently turns into ``None`` for that field. Moving all
+        system-role content into one leading message preserves every instruction
+        verbatim while satisfying that ordering requirement.
+        """
+        if not messages:
+            return messages
+        system_parts = [message["content"] for message in messages if message.get("role") == "system"]
+        if not system_parts:
+            return messages
+        if len(system_parts) == 1 and messages[0].get("role") == "system":
+            return messages
+        rest = [message for message in messages if message.get("role") != "system"]
+        return [{"role": "system", "content": "\n\n".join(system_parts)}, *rest]
+
+    @classmethod
+    def _patch_system_message_ordering(cls):
+        """Wrap the registered OpenAI-compatible client so every outgoing request
+        satisfies Blablador's "system message must be at the beginning" rule,
+        without editing TinyTroupe's installed package files. Idempotent: safe to
+        call on every generation request."""
+        try:
+            openai_client_module = importlib.import_module("tinytroupe.clients.openai_client")
+        except ImportError:
+            return
+        client_class = getattr(openai_client_module, "OpenAIClient", None)
+        if client_class is None or getattr(client_class.send_message, "_aux_gateway_patch", False):
+            return
+        original_send_message = client_class.send_message
+
+        def patched_send_message(self, current_messages, *args, **kwargs):
+            current_messages = cls._consolidate_leading_system_message(current_messages)
+            return original_send_message(self, current_messages, *args, **kwargs)
+
+        patched_send_message._aux_gateway_patch = True
+        client_class.send_message = patched_send_message
 
     def _offline_profiles(self, theme, customer_profile, count, scenario, seed, model,
                           allow_compiler_fallback=False):
