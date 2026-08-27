@@ -1,13 +1,79 @@
 # AUX Synthetic UX Demo — Space status overview
 
-Date: 2026-08-27
+Date: 2026-08-27 (updated after live redeploys and admin-authenticated testing)
 Space: [`Leon4gr45/aux-synthetic-ux-demo`](https://huggingface.co/spaces/Leon4gr45/aux-synthetic-ux-demo)
 Deployment overlay: `spaces/aux-live` (single-container preview topology)
 
 This document records what currently works on the live Space, what does not, the
-fixes applied in this change, and which spec stages remain open. It is written from
-live probes of the running Space plus a code review; items that could not be verified
-live (they require the Space's private `BLABLADOR_API_KEY`) are labelled **unverified**.
+fixes applied in this change, and which spec stages remain open. The first pass was
+written from live read-only probes plus a code review. It was then updated after
+redeploying the Space four times and driving real, admin-authenticated batch persona
+generation against it end to end — see §0 for what that testing found.
+
+## 0. Update: live redeploy + batch persona generation testing
+
+The Space was redeployed with this branch, its `OPENAI_MODEL` secret was corrected,
+and a real (non-offline, non-mocked) TinyTroupe batch persona-generation run was
+driven against the live Space using the new admin credential. This surfaced and fixed
+three additional real defects beyond the original token-cap fix, in order:
+
+1. **`alias-huge` is not a valid Blablador model.** The Space's `OPENAI_MODEL` secret
+   and this repo's own default (set in the prior revision of this change) were both
+   `alias-huge`, which the gateway rejects with a live `404 Model 'alias-huge' not
+   found`. A web search of Blablador's documentation confirms the real aliases are
+   `alias-fast`, `alias-large`, `alias-code`, `alias-embeddings`, `alias-reasoning`.
+   Reverted the default to `alias-large` everywhere (`app.py`, the persona generator
+   and semantic engine, `config.ini`, `start-live.sh`) and corrected the Space secret
+   directly via the Hugging Face API.
+2. **TinyTroupe 0.7.0 sends a trailing system message, which Blablador rejects.**
+   Reading the pinned TinyTroupe source directly: `tinytroupe/utils/llm.py`'s
+   `LLMChat.call()` appends a JSON/typing-format instruction with `role: "system"` to
+   the *end* of the conversation immediately before nearly every structured/typed
+   call — the path every `@llm()`-decorated persona-attribute generator uses. The
+   Blablador gateway's backend rejects any request whose system message is not first
+   with `400 System message must be at the beginning`, and TinyTroupe's own retry
+   logic treats that as non-retryable, silently returning `None` for the field
+   instead of failing loudly. This affected essentially every generated persona
+   attribute. Fixed with a runtime patch (`services/persona_service/generator.py`,
+   `_patch_system_message_ordering`) that wraps `OpenAIClient.send_message` to
+   consolidate every system-role message into one leading message before the call is
+   sent — no TinyTroupe site-packages file is edited, consistent with the existing
+   "map settings through TinyTroupe's public config-manager APIs only" boundary.
+3. **Gradio's own OAuth gate blocked the admin bypass.** The admin-token feature
+   (§ below) worked at the `authenticated_clients()` level, but every relevant Gradio
+   callback declared `oauth_profile: gr.OAuthProfile` (not `| None`), and Gradio's own
+   `special_args` framework code rejects such calls before the function body ever
+   runs, independent of any in-function fallback. Verified against Gradio's own
+   source. Widened all 16 affected callback signatures to `gr.OAuthProfile | None,
+   gr.OAuthToken | None` so an anonymous/admin-token caller actually reaches the
+   function body.
+
+**Result after all three fixes:** the pipeline now demonstrably reaches Blablador
+correctly — genuine `200 OK` responses were observed (`Sampling dimensions computed
+successfully`, `Sampling plan computed successfully`), and the `400` cascade is gone
+(no further "System message must be at the beginning" errors appeared in any
+subsequent run). The **remaining blocker is Blablador's own gateway reliability**, not
+this codebase: across roughly 50 minutes of live testing (four redeploys, multiple
+generation attempts), effectively every model call after the fixes still failed with
+`502 Proxy Error / Error reading from remote server` from Blablador's own reverse
+proxy, exhausting TinyTroupe's retry budget (backoff up to 625s per attempt) without
+completing. No application-level error accompanied any of these — they are upstream
+502s. **No batch persona generation run reached completion during this session**; the
+connection and full instrumentation chain are proven correct, but observed evidence of
+a completed batch is still outstanding, pending Blablador's own availability. A
+Workspace-dropdown UX gap was also found (the browser dropdown starts empty and
+`load_hf_workspaces` doesn't add an admin-workspace choice when using the token
+bypass) — noted as a follow-up, not blocking.
+
+**Test reproduction**, once Blablador is stable, using the admin credential (works
+from any HTTP client, no HF login needed):
+
+```bash
+curl -X POST -H "Authorization: Admin $ADMIN_API_TOKEN" -H "Content-Type: application/json" \
+  -d '{"data": ["<theme>", "<customer profile>", 3, "TinyTroupe", null, "<target url>", null]}' \
+  https://leon4gr45-aux-synthetic-ux-demo.hf.space/gradio_api/call/handle_generate
+# then GET .../gradio_api/call/handle_generate/<event_id> (SSE) until "event: complete"
+```
 
 ## 1. Deployment topology (as running)
 
@@ -79,11 +145,13 @@ the persona-generate client timeout and surfaced as the `ReadTimeout` on port 80
 | 502 root cause | Cap completion budget: `MAX_COMPLETION_TOKENS=8192` (was default 128000) | `config.ini` |
 | 502 root cause | Env override `OPENAI_MAX_COMPLETION_TOKENS` pushed into TinyTroupe config manager | `services/persona_service/generator.py` |
 | 502 root cause | Cap all direct OpenAI-compatible chat calls (`max_tokens`) in the Gradio helpers | `app.py` |
-| Model default | Default model unified to `alias-huge` across app, generator, start script | `config.ini`, `app.py`, `services/persona_service/generator.py`, `spaces/aux-live/start-live.sh` |
+| Model default | Default model unified to `alias-large` (see §0 — `alias-huge` is invalid) | `config.ini`, `app.py`, `services/persona_service/generator.py`, `services/persona_service/semantic.py`, `services/persona_service/parity.py`, `spaces/aux-live/start-live.sh` |
 | Env normalize | `start-live.sh` exports `OPENAI_MODEL` default + `OPENAI_MAX_COMPLETION_TOKENS` | `spaces/aux-live/start-live.sh` |
 | 401 noise | `validate_workspace` no longer raises a traceback before login; returns a friendly message | `app.py` |
 | Example personas | `get_example_personas` / example loader now also find agents in the installed TinyTroupe wheel, and degrade gracefully instead of erroring | `app.py` |
 | **Admin access** | Operator break-glass: `Authorization: Admin <ADMIN_API_TOKEN>` authenticates as admin without HF OAuth (backend + Gradio + public API) | `apps/api/auth.py`, `app.py` |
+| **Admin access (Gradio gate)** | 16 Gradio callbacks widened to `gr.OAuthProfile \| None` so Gradio's own framework-level login gate doesn't block the admin fallback before it can run (see §0.3) | `app.py` |
+| **400 fix** | Runtime patch consolidates TinyTroupe's trailing system messages into one leading message so Blablador's gateway accepts the request (see §0.2) | `services/persona_service/generator.py` |
 
 ### Admin API-token access (new)
 
@@ -172,12 +240,23 @@ Cross-cutting open items:
 
 ## 8. Remaining actions to reach a live batch persona run
 
-1. **Redeploy** the Space with this change so the token cap and admin access take
-   effect.
-2. Confirm the Space `OPENAI_MODEL` secret is `alias-huge` (or unset it to use the new
-   default). The secret overrides the code default.
-3. Re-run persona generation and confirm the 502 is gone. If large aliases still time
-   out, lower `OPENAI_MAX_COMPLETION_TOKENS` further (e.g. 4096) or switch
-   `OPENAI_MODEL` to a faster alias for task generation.
-4. Poll a usability job to completion and require non-empty screenshot + snapshot
+Steps 1–3 are **done** as of this update (Space redeployed four times; `OPENAI_MODEL`
+secret corrected to `alias-large`; §0's three fixes applied and verified reachable).
+What is left:
+
+1. ~~Redeploy the Space with this change~~ — done, running commit `1295a32`.
+2. ~~Confirm/correct the Space `OPENAI_MODEL` secret~~ — done, set to `alias-large`.
+3. ~~Fix the 400/404 application-level errors~~ — done, verified no recurrence.
+4. **Retry once Blablador's gateway is stable.** Every remaining failure in ~50
+   minutes of live testing was `502 Proxy Error / Error reading from remote server`
+   from Blablador itself, not this application. Re-run the reproduction command in
+   §0 — if the pipeline still can't get a clean run through, consider: lowering
+   `OPENAI_MAX_COMPLETION_TOKENS` further (e.g. 4096) to shrink each request's
+   footprint, generating fewer personas per batch, or trying `alias-fast` for a
+   lighter-weight smoke test before returning to `alias-large`.
+5. Fix the Workspace-dropdown UX gap noted in §0: have `load_hf_workspaces` add an
+   `admin` choice when `ADMIN_API_TOKEN` is set and no HF profile is present, so an
+   admin using the actual browser UI (not just headless API calls) gets a usable
+   dropdown instead of an empty one.
+6. Poll a usability job to completion and require non-empty screenshot + snapshot
    artifacts before treating findings as observed.
