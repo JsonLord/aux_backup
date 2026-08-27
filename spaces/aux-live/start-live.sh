@@ -15,8 +15,11 @@ trap stop_services TERM INT EXIT
 # contracts. Explicit OPENAI_* Space settings take precedence over legacy
 # Blablador aliases without printing any secret value.
 export OPENAI_BASE_URL="${OPENAI_COMPATIBLE_ENDPOINT:-${OPENAI_BASE_URL:-https://api.helmholtz-blablador.fz-juelich.de/v1}}"
-export OPENAI_MODEL="${OPENAI_MODEL:-alias-huge}"
-export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-alias-huge}}"
+# "alias-huge" is not a valid Blablador alias (live gateway returns 404). The
+# documented aliases are alias-fast, alias-large, alias-code, alias-embeddings,
+# alias-reasoning; alias-large is the largest general-purpose model.
+export OPENAI_MODEL="${OPENAI_MODEL:-alias-large}"
+export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-alias-large}}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
 export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-${OPENAI_API_KEY:-}}"
 export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"

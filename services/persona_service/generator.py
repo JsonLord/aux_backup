@@ -69,7 +69,8 @@ class TinyTroupeGenerator:
         base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
                     or os.getenv("BLABLADOR_BASE_URL")
                     or "https://api.helmholtz-blablador.fz-juelich.de/v1").rstrip("/")
-        model = os.getenv("OPENAI_MODEL", "alias-huge")
+        # "alias-huge" 404s on Blablador; alias-large is the documented largest alias.
+        model = os.getenv("OPENAI_MODEL", "alias-large")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for TinyTroupe")
         os.environ["OPENAI_API_KEY"] = api_key

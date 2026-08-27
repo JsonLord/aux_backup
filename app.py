@@ -32,7 +32,11 @@ BLABLADOR_BASE_URL = (
     or os.environ.get("OPENAI_BASE_URL")
     or "https://api.helmholtz-blablador.fz-juelich.de/v1"
 )
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "alias-huge")
+# "alias-huge" is not a valid Blablador alias (confirmed via a live 404: "Model
+# 'alias-huge' not found"). The documented aliases are alias-fast, alias-large,
+# alias-code, alias-embeddings, alias-reasoning; alias-large is the largest/most
+# accurate general-purpose model, so it is the default here.
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "alias-large")
 # Operator break-glass credential. When ADMIN_API_TOKEN is configured (Hugging Face
 # Space secret), maintainers can use the app and API before Hugging Face OAuth login
 # by presenting `Authorization: Admin <token>`. Requests fall back to this identity
