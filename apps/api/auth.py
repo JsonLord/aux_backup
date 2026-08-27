@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Any
 
@@ -21,6 +22,27 @@ class IdentityProvider:
         self.userinfo_url = os.getenv("HF_OIDC_USERINFO_URL", "https://huggingface.co/oauth/userinfo")
         self.whoami_url = os.getenv("HF_TOKEN_USERINFO_URL", "https://huggingface.co/api/whoami-v2")
         self.membership_store = membership_store
+        # Operator break-glass credential. When ``ADMIN_API_TOKEN`` is configured
+        # (Hugging Face Space secret), a request presenting ``Authorization: Admin
+        # <token>`` is authenticated as an administrator without Hugging Face OAuth.
+        # This lets maintainers exercise the app and API before sign-in works.
+        self.admin_token = os.getenv("ADMIN_API_TOKEN") or None
+        self.admin_workspace = os.getenv("ADMIN_WORKSPACE_ID", "admin")
+
+    def _is_admin_authorization(self, authorization: str | None) -> bool:
+        if not self.admin_token or not authorization:
+            return False
+        scheme, _, token = authorization.partition(" ")
+        if scheme != "Admin" or not token:
+            return False
+        return hmac.compare_digest(token, self.admin_token)
+
+    def _admin_identity(self, workspace: str | None) -> dict[str, Any]:
+        requested = workspace or self.admin_workspace
+        user = {"id": "admin", "username": "admin", "name": "Administrator", "picture": None}
+        workspaces = [{"id": requested, "name": "Administrator", "type": "admin", "role": "admin"}]
+        return {"workspace_id": requested, "owner_user_id": "admin", "role": "admin",
+                "user": user, "workspaces": workspaces}
 
     @staticmethod
     def personal_workspace(subject: str) -> str:
@@ -88,6 +110,10 @@ class IdentityProvider:
         return result
 
     def resolve(self, authorization: str | None, workspace: str | None, local_user: str) -> dict[str, Any]:
+        # Administrator break-glass takes precedence in every mode so operators can
+        # reach the app and API before Hugging Face sign-in is available.
+        if self._is_admin_authorization(authorization):
+            return self._admin_identity(workspace)
         if self.mode == "local":
             selected = workspace or "local"
             return {"workspace_id": selected, "owner_user_id": local_user}

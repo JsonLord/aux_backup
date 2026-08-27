@@ -69,12 +69,28 @@ class TinyTroupeGenerator:
         base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
                     or os.getenv("BLABLADOR_BASE_URL")
                     or "https://api.helmholtz-blablador.fz-juelich.de/v1").rstrip("/")
-        model = os.getenv("OPENAI_MODEL", "alias-large")
+        model = os.getenv("OPENAI_MODEL", "alias-huge")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for TinyTroupe")
         os.environ["OPENAI_API_KEY"] = api_key
         os.environ["OPENAI_BASE_URL"] = base_url
         return base_url, model
+
+    @staticmethod
+    def _max_completion_tokens():
+        """Bound the completion budget so large aliases stay inside the Blablador
+        gateway read-timeout. TinyTroupe defaults this to 128000, which the
+        Helmholtz proxy cannot stream for the large models and answers with a
+        ``502 Proxy Error``. Returns ``None`` when the override is unparseable so
+        the config.ini ceiling applies instead."""
+        raw = os.getenv("OPENAI_MAX_COMPLETION_TOKENS")
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
 
     @classmethod
     def _configure_openai_compatible(cls, config_manager, clients):
@@ -87,8 +103,12 @@ class TinyTroupeGenerator:
         boundary without patching site-packages.
         """
         base_url, model = cls._openai_compatible_settings()
-        config_manager.update_multiple({"api_type": "openai", "base_url": base_url,
-                                        "model": model, "reasoning_model": model})
+        overrides = {"api_type": "openai", "base_url": base_url,
+                     "model": model, "reasoning_model": model}
+        max_completion_tokens = cls._max_completion_tokens()
+        if max_completion_tokens is not None:
+            overrides["max_completion_tokens"] = max_completion_tokens
+        config_manager.update_multiple(overrides)
         clients.force_api_type("openai")
 
     def _offline_profiles(self, theme, customer_profile, count, scenario, seed, model,

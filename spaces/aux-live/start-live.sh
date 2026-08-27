@@ -15,10 +15,15 @@ trap stop_services TERM INT EXIT
 # contracts. Explicit OPENAI_* Space settings take precedence over legacy
 # Blablador aliases without printing any secret value.
 export OPENAI_BASE_URL="${OPENAI_COMPATIBLE_ENDPOINT:-${OPENAI_BASE_URL:-https://api.helmholtz-blablador.fz-juelich.de/v1}}"
-export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-alias-large}}"
+export OPENAI_MODEL="${OPENAI_MODEL:-alias-huge}"
+export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-alias-huge}}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
 export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-${OPENAI_API_KEY:-}}"
 export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"
+# Bound the OpenAI-compatible completion budget. TinyTroupe 0.7 otherwise requests
+# 128000 completion tokens, which the Blablador gateway cannot stream for the large
+# aliases and rejects with "502 Proxy Error / Error reading from remote server".
+export OPENAI_MAX_COMPLETION_TOKENS="${OPENAI_MAX_COMPLETION_TOKENS:-8192}"
 export AGENT_BROWSER_COMMAND="${AGENT_BROWSER_COMMAND:-/home/user/app/spaces/aux-live/agent-browser-container.sh}"
 
 uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 & pids+=("$!")

@@ -2,6 +2,7 @@ import os
 import sys
 
 import subprocess
+import importlib.util
 import re
 import time
 import json
@@ -32,11 +33,41 @@ BLABLADOR_BASE_URL = (
     or "https://api.helmholtz-blablador.fz-juelich.de/v1"
 )
 OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "alias-huge")
+# Operator break-glass credential. When ADMIN_API_TOKEN is configured (Hugging Face
+# Space secret), maintainers can use the app and API before Hugging Face OAuth login
+# by presenting `Authorization: Admin <token>`. Requests fall back to this identity
+# only when no Hugging Face OAuth session is present.
+ADMIN_API_TOKEN = os.environ.get("ADMIN_API_TOKEN") or None
+ADMIN_WORKSPACE_ID = os.environ.get("ADMIN_WORKSPACE_ID", "admin")
+# Bound the OpenAI-compatible completion budget for the Gradio task/UI helpers.
+# Blablador's proxy returns "502 Proxy Error" when a large alias is asked to stream
+# the SDK default (thousands of tokens); an explicit ceiling keeps calls inside the
+# gateway read-timeout. Overridable via OPENAI_MAX_COMPLETION_TOKENS.
+try:
+    OPENAI_MAX_COMPLETION_TOKENS = int(os.environ.get("OPENAI_MAX_COMPLETION_TOKENS", "8192"))
+    if OPENAI_MAX_COMPLETION_TOKENS <= 0:
+        OPENAI_MAX_COMPLETION_TOKENS = None
+except (TypeError, ValueError):
+    OPENAI_MAX_COMPLETION_TOKENS = 8192
 control_plane = ControlPlaneClient()
 persona_runtime = PersonaRuntimeClient()
 
 
+def admin_clients(workspace_id):
+    """Build control-plane and persona clients authenticated with the admin token."""
+    workspace = workspace_id or ADMIN_WORKSPACE_ID
+    authorization = f"Admin {ADMIN_API_TOKEN}"
+    return (
+        ControlPlaneClient(workspace_id=workspace, user_id="admin", authorization=authorization),
+        PersonaRuntimeClient(workspace_id=workspace, user_id="admin", authorization=authorization),
+    )
+
+
 def authenticated_clients(workspace_id, oauth_profile, oauth_token):
+    # Fall back to the administrator credential only when Hugging Face OAuth is
+    # absent; a signed-in user always authenticates as themselves.
+    if (oauth_profile is None or oauth_token is None) and ADMIN_API_TOKEN:
+        return admin_clients(workspace_id)
     identity = request_identity(oauth_profile, oauth_token, workspace_id)
     return (
         ControlPlaneClient(workspace_id=identity.workspace_id, user_id=identity.user_id, authorization=identity.authorization),
@@ -83,6 +114,8 @@ def call_llm_parallel(client, model_names, messages, **kwargs):
     def make_call(model_name):
         try:
             print(f"Parallel call attempting: {model_name}")
+            if OPENAI_MAX_COMPLETION_TOKENS and "max_tokens" not in kwargs:
+                kwargs.setdefault("max_tokens", OPENAI_MAX_COMPLETION_TOKENS)
             return client.chat.completions.create(
                 model=model_name,
                 messages=messages,
@@ -199,16 +232,46 @@ def get_persona_pool():
         print(f"Error fetching persona pool: {e}")
         return []
 
-def get_example_personas():
-    example_path = "external/TinyTroupe/examples/agents/"
-    if not os.path.exists(example_path):
-        return []
+def _example_persona_dirs():
+    """Candidate directories that hold bundled TinyTroupe example agents.
+
+    The offline demo clones the repo to ``external/TinyTroupe``; the live Space
+    installs TinyTroupe as a wheel, so also probe the installed package's
+    ``examples/agents`` directory. Missing candidates are skipped silently.
+    """
+    candidates = [
+        "external/TinyTroupe/examples/agents/",
+        os.path.join(os.getcwd(), "external/TinyTroupe/examples/agents/"),
+    ]
     try:
-        files = [f for f in os.listdir(example_path) if f.endswith(".json") or f.endswith(".md")]
-        return sorted(files)
-    except Exception as e:
-        print(f"Error listing example personas: {e}")
-        return []
+        spec = importlib.util.find_spec("tinytroupe")
+        if spec and spec.origin:
+            package_root = os.path.dirname(os.path.dirname(spec.origin))
+            candidates.append(os.path.join(package_root, "examples", "agents") + os.sep)
+            candidates.append(os.path.join(os.path.dirname(spec.origin), "examples", "agents") + os.sep)
+    except (ImportError, ValueError):
+        pass
+    return [path for path in candidates if os.path.isdir(path)]
+
+
+def _resolve_example_persona(example_file):
+    """Return the absolute path of an example agent file, or None if absent."""
+    for directory in _example_persona_dirs():
+        candidate = os.path.join(directory, example_file)
+        if os.path.isfile(candidate):
+            return candidate
+    return None
+
+
+def get_example_personas():
+    for directory in _example_persona_dirs():
+        try:
+            files = [f for f in os.listdir(directory) if f.endswith(".json") or f.endswith(".md")]
+            if files:
+                return sorted(files)
+        except OSError as e:
+            print(f"Error listing example personas in {directory}: {e}")
+    return []
 
 def upload_persona_to_pool(persona_data):
     if not gh:
@@ -234,7 +297,10 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
     if force_method == "Example Persona" and example_file:
         add_log(f"Loading example persona from {example_file}...")
         try:
-            path = os.path.join("external/TinyTroupe/examples/agents/", example_file)
+            path = _resolve_example_persona(example_file)
+            if not path:
+                add_log(f"Example persona '{example_file}' is not bundled in this deployment.")
+                return []
             if example_file.endswith(".json"):
                 with open(path, "r") as f:
                     data = json.load(f)
@@ -316,7 +382,8 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
     try:
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}]
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=OPENAI_MAX_COMPLETION_TOKENS,
         )
         content = response.choices[0].message.content
         json_match = re.search(r"\{.*\}", content, re.DOTALL)
@@ -380,7 +447,8 @@ def generate_persona_from_deeppersona(theme, customer_profile):
         response = client.chat.completions.create(
             model=OPENAI_MODEL,
             messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"}
+            response_format={"type": "json_object"},
+            max_tokens=OPENAI_MAX_COMPLETION_TOKENS,
         )
         params = json.loads(response.choices[0].message.content)
         add_log(f"Profile breakdown complete for {params.get('name')}")
@@ -460,7 +528,8 @@ def generate_tasks(theme, customer_profile, url):
                 response = client.chat.completions.create(
                     model=OPENAI_MODEL,
                     messages=[{"role": "user", "content": prompt}],
-                    response_format={"type": "json_object"}
+                    response_format={"type": "json_object"},
+                    max_tokens=OPENAI_MAX_COMPLETION_TOKENS,
                 )
 
             if response and not isinstance(response, Exception):
@@ -994,8 +1063,18 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     demo.load(fn=load_hf_workspaces, outputs=[workspace_selector, login_status])
 
     def validate_workspace(workspace_id, oauth_profile: gr.OAuthProfile, oauth_token: gr.OAuthToken):
-        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-        identity = session_client.me()
+        if (not oauth_profile or not oauth_token) and not ADMIN_API_TOKEN:
+            return "🔒 Sign in with Hugging Face and select a workspace to continue."
+        try:
+            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+            identity = session_client.me()
+        except requests.HTTPError as error:
+            status = getattr(error.response, "status_code", None)
+            if status in (401, 403):
+                return "🔒 Sign in with Hugging Face to validate workspace access."
+            return f"⚠️ Workspace validation failed ({status or 'error'})."
+        except requests.RequestException as error:
+            return f"⚠️ Workspace validation is temporarily unavailable: {error}."
         selected = next(item for item in identity["workspaces"] if item["id"] == identity["selected_workspace_id"])
         return f"Signed in as **{identity['user'].get('username') or identity['user']['id']}** · workspace **{selected['name']}** · role `{selected['role']}`."
 
@@ -1041,7 +1120,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                                 
                                 summary += f"**Summary**: {bio}"
                                 return summary
-                            return "Error loading preview."
+                            return "_Example persona is not bundled in this deployment._"
                         
                         example_personas = get_example_personas()
                         initial_persona = example_personas[0] if example_personas else None
@@ -1396,8 +1475,11 @@ if __name__ == "__main__":
         return {"app": "UX Analysis Orchestrator", "version": "1.0.0"}
 
     def api_clients(authorization, workspace_id):
-        if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "Hugging Face bearer token required")
+        # Accept a Hugging Face bearer token or the operator break-glass credential
+        # (`Authorization: Admin <token>`). The control plane and persona runtime
+        # revalidate whichever credential is presented.
+        if not authorization or not (authorization.startswith("Bearer ") or authorization.startswith("Admin ")):
+            raise HTTPException(401, "Hugging Face bearer token or admin credential required")
         return (
             ControlPlaneClient(workspace_id=workspace_id, authorization=authorization),
             PersonaRuntimeClient(workspace_id=workspace_id, authorization=authorization),
