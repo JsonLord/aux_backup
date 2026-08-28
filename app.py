@@ -325,17 +325,10 @@ def upload_persona_to_pool(persona_data):
     except Exception as e:
         print(f"Error uploading persona to pool: {e}")
 
-def load_example_persona(example_file, persona_client=None):
-    """Load a bundled example persona (e.g. Friedrich_Wolf.agent.json) and compile a
-    real BehaviorProfile/AbilityProfile for it (through the same PersonaCompiler live
-    generation uses), instead of a bare {name, minibio, persona} dict -- journey
-    testing requires profile.behavior. This keeps example-persona testing free of
-    live TinyTroupe generation latency/cost: recommended default for backend/API
-    testing (see docs/aux-space-status-overview.md).
-
-    Returns the compiled SyntheticUserProfile dict (with "name"/"minibio" added for
-    UI display), or raises if the example file isn't bundled or fails to load.
-    """
+def _read_example_persona_file(example_file):
+    """Pure file read of a bundled example persona -- no network call. Returns
+    (name, minibio, raw_persona). Safe to call with no authenticated client (e.g.
+    at Gradio module-import time for the dropdown preview default)."""
     path = _resolve_example_persona(example_file)
     if not path:
         raise FileNotFoundError(f"Example persona '{example_file}' is not bundled in this deployment.")
@@ -356,6 +349,29 @@ def load_example_persona(example_file, persona_client=None):
         name = example_file.replace(".md", "").replace("_", " ")
         bio = BETTER_SUMMARIES.get(example_file) or content
         raw_persona = {"name": name, "background": content}
+    return name, bio, raw_persona
+
+
+def load_example_persona(example_file, persona_client=None, compile_behavior=True):
+    """Load a bundled example persona (e.g. Friedrich_Wolf.agent.json).
+
+    When compile_behavior is True (the default, needed for journey testing --
+    profile.behavior is required), compiles a real BehaviorProfile/AbilityProfile
+    for it through the same PersonaCompiler live generation uses, instead of a bare
+    {name, minibio, persona} dict. This keeps example-persona testing free of live
+    TinyTroupe generation latency/cost: recommended default for backend/API testing
+    (see docs/aux-space-status-overview.md).
+
+    When compile_behavior is False, returns the bare {name, minibio, persona} dict
+    with no network call -- for display-only previews (e.g. the dropdown preview,
+    which may run before an authenticated persona_client exists).
+
+    Returns the persona dict, or raises if the example file isn't bundled or fails
+    to load.
+    """
+    name, bio, raw_persona = _read_example_persona_file(example_file)
+    if not compile_behavior:
+        return {"name": name, "minibio": bio, "persona": raw_persona}
     compiled = (persona_client or persona_runtime).compile(
         raw_persona, scenario=f"Example persona preview: {name}", seed=1)
     compiled["name"] = name
@@ -363,11 +379,11 @@ def load_example_persona(example_file, persona_client=None):
     return compiled
 
 
-def select_or_create_personas(theme, customer_profile, num_personas, force_method=None, example_file=None, persona_client=None):
+def select_or_create_personas(theme, customer_profile, num_personas, force_method=None, example_file=None, persona_client=None, compile_behavior=True):
     if force_method == "Example Persona" and example_file:
         add_log(f"Loading example persona from {example_file}...")
         try:
-            compiled = load_example_persona(example_file, persona_client)
+            compiled = load_example_persona(example_file, persona_client, compile_behavior=compile_behavior)
             return [compiled] * int(num_personas)
         except Exception as e:
             add_log(f"Failed to load example persona: {e}")
@@ -609,8 +625,11 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
         _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         current_profile = customer_profile
         if method == "Example Persona" and example_file:
-            # Fetch example persona info to use as profile context for task generation
-            ex_personas = select_or_create_personas("", "", 1, "Example Persona", example_file)
+            # Fetch example persona info to use as profile context for task generation.
+            # Only .minibio is read below, so skip the compile network call here (it
+            # still happens once, authenticated, at line ~680 when the persona is
+            # actually used for journey testing).
+            ex_personas = select_or_create_personas("", "", 1, "Example Persona", example_file, compile_behavior=False)
             if ex_personas:
                 current_profile = ex_personas[0].get('minibio', customer_profile)
 
@@ -1206,7 +1225,12 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                         
                         def update_persona_preview(file):
                             if not file: return ""
-                            personas = select_or_create_personas("", "", 1, "Example Persona", file)
+                            # Preview only needs name/minibio/persona for display, not a
+                            # compiled BehaviorProfile -- skip the persona-runtime network
+                            # call so this works with no authenticated client (this can run
+                            # at Gradio module-import time, before any request identity
+                            # exists) and doesn't cost a compile call just to render text.
+                            personas = select_or_create_personas("", "", 1, "Example Persona", file, compile_behavior=False)
                             if personas:
                                 p = personas[0]
                                 name = p.get('name', 'Unknown')
