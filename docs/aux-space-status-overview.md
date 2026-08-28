@@ -16,11 +16,18 @@ Follow-up to §-2's 363s/3-persona measurement. Implemented every lever identifi
 there:
 
 - `MAX_CONCURRENT_MODEL_CALLS` (the `threading.BoundedSemaphore` gating every
-  outgoing chat-completion call process-wide): `4` -> `12` in `config.ini`. A
+  outgoing chat-completion call process-wide): `4` -> `8` in `config.ini`. A
   batch of N personas needs up to N concurrent calls per generation "wave"
   (TinyTroupe's own raw-generation phase, then behavior+ability compilation);
-  4 throttled a 10-person batch into 3 sequential waves per phase for no reason
-  once the backend can sustain more.
+  4 throttled a 10-person batch into multiple sequential waves per phase for no
+  reason once the backend can sustain more. **First tried 12**: against a
+  10-persona batch (up to 20 desired concurrent calls in the compilation wave)
+  this overwhelmed the self-hosted router (Tailscale Funnel + Caddy on the
+  user's own machine, not a large cloud provider) -- several calls failed live
+  with `SSL: UNEXPECTED_EOF_WHILE_READING` (the server dropping connections
+  under load, not a code bug). Dialed back to 8 as a more conservative middle
+  ground; still independently tunable via `OPENAI_MAX_CONCURRENT_MODEL_CALLS`
+  in either direction depending on what a given host can sustain.
 - Retry/backoff tuned down to match a fast/reliable provider instead of
   Blablador's: `timeout` 480->180s, `max_attempts` 5->3,
   `exponential_backoff_factor` 5->2 (worst-case pure backoff across retries for
@@ -42,6 +49,17 @@ there:
 - `app.py`'s `generate_tasks` retry wait: hardcoded `35s` (tuned for
   Blablador's proxy errors) -> `3s` default, overridable via
   `OPENAI_TASK_RETRY_WAIT_SECONDS`.
+- **Found live while testing this at 10 personas, fixed separately**: TinyTroupe's
+  one-time sampling-plan step (before any per-person generation) can have the
+  model return quantities summing to `0` instead of the requested count
+  (`"Expected 10 samples, but got 0 samples"`), and nothing retried that step --
+  every person then failed instantly with `"No more characteristics samples left"`,
+  and the API reported `"Generation complete!"` with zero personas and no error at
+  all. `_generate_people_with_retry` now retries the *whole* batch call (fresh
+  `TinyPersonFactory` each attempt -- reusing one after a failed sampling plan
+  means its sample pool is already empty) up to `PERSONA_BATCH_RETRY_ATTEMPTS`
+  (default 2) times, and a batch that still yields 0 people now raises a clear
+  error instead of silently returning `[]`.
 
 Verified: unit tests for every new env-override helper and the
 `_configure_openai_compatible` wiring; a mocked-TinyTroupe test confirming the
