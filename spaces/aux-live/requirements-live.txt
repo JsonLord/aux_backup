@@ -16,6 +16,18 @@ pyjwt[crypto]>=2.10,<3
 llama-index-core>=0.14,<0.15
 llama-index-embeddings-openai>=0.6,<0.7
 llama-index-readers-web>=0.6,<0.7
+# TinyPerson.__init__ unconditionally imports tinytroupe.agent.action_generator ->
+# tinytroupe.experimentation -> in_place_experiment_runner, which does
+# `import IPython` / `from IPython.display import ...` at module level purely for
+# an unused notebook-display feature (InPlaceExperimentRunner). This is not an
+# optional/lazy import: every persona construction hits it, so it must be present
+# even though nothing here runs inside a notebook. Found live: this path was never
+# exercised until the Blablador-502 and system-message-ordering fixes let
+# generation reach actual TinyPerson construction for the first time. That same
+# import chain (tinytroupe.experimentation.statistical_tests) also needs scipy
+# unconditionally, for the same reason.
+ipython>=8.0,<10
+scipy>=1.11,<2
 # Pinned to match services/persona_service/dspy-artifact.lock's reviewed wheel
 # (sha256:358cbfb15d13246dc4a289bb2350c0ee602260c8a3869f7f63a48a9d2233e48c). Installed
 # with full dependency resolution (not --no-deps like the TinyTroupe install below)

@@ -5,6 +5,8 @@ import hashlib
 import json
 import os
 import random
+import re
+import time
 from typing import Any, Protocol
 
 import requests
@@ -85,11 +87,51 @@ class DirectLLMSemanticEngine:
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
 
-    def _complete_json(self, prompt: dict) -> dict:
-        response = requests.post(f"{self.base_url}/chat/completions", headers={"authorization": f"Bearer {self.api_key}"}, json={"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": json.dumps(prompt)}]}, timeout=60)
-        response.raise_for_status()
-        content = response.json()["choices"][0]["message"]["content"]
-        return json.loads(content)
+    @staticmethod
+    def _parse_json_completion(content: str) -> dict:
+        """Parse a JSON object out of a chat completion, tolerating a markdown code
+        fence around it even though response_format: json_object was requested.
+
+        Observed live: the "auto" router can land on a model (e.g. a Gemini variant)
+        that answers with ```json\\n{...}\\n``` instead of a bare JSON object despite
+        that parameter. Falls back to extracting the first {...} block (same
+        technique app.py's generate_tasks already uses) if a direct parse fails.
+        """
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
+            stripped = re.sub(r"\n?```\s*$", "", stripped)
+            stripped = stripped.strip()
+        try:
+            return json.loads(stripped)
+        except json.JSONDecodeError:
+            match = re.search(r"\{.*\}", stripped, re.DOTALL)
+            if match:
+                return json.loads(match.group())
+            raise
+
+    def _complete_json(self, prompt: dict, max_attempts: int = 3, retry_wait_seconds: float = 2.0) -> dict:
+        """POST the prompt and parse a JSON completion, retrying the same request on
+        transient failure. The "auto" router occasionally returns a non-2xx status,
+        a connection error, or (observed live) an empty completion body -- none of
+        which TinyTroupe's own retry logic covers, since this call bypasses
+        TinyTroupe entirely. Each attempt is the exact same request; nothing about
+        the prompt changes between retries.
+        """
+        last_error: Exception | None = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                response = requests.post(f"{self.base_url}/chat/completions", headers={"authorization": f"Bearer {self.api_key}"}, json={"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": json.dumps(prompt)}]}, timeout=60)
+                response.raise_for_status()
+                content = response.json()["choices"][0]["message"]["content"]
+                if not content or not content.strip():
+                    raise ValueError("model returned an empty completion")
+                return self._parse_json_completion(content)
+            except (requests.RequestException, ValueError, KeyError, IndexError, json.JSONDecodeError) as error:
+                last_error = error
+                if attempt < max_attempts:
+                    time.sleep(retry_wait_seconds)
+        raise RuntimeError(f"semantic engine request failed after {max_attempts} attempts: {last_error}") from last_error
 
     def compile_behavior(self, persona, scenario, traits, seed):
         schema = {trait: "number from 0 to 1" for trait in traits}
