@@ -1,6 +1,118 @@
 # AUX Synthetic UX Demo — Space status overview
 
-Date: 2026-08-27, updated 2026-08-28
+Date: 2026-08-27, updated 2026-08-28 (multiple passes)
+
+## -6. Example-persona journey testing, real pain-points, real UI generation,
+## and the first live end-to-end verdicts against real target sites
+
+Continuing-development pass driven by two directives: always use a bundled
+example persona (Friedrich_Wolf and friends) rather than live TinyTroupe
+generation for backend/API testing, and never accept a hardcoded/placeholder
+result where the spec calls for something real.
+
+**Example personas were silently unusable for journey testing.** The
+"Example Persona" method built a bare `{name, minibio, persona}` dict with no
+`behavior`/`abilities` -- but live journey runs require `profile.behavior`
+(journey-worker validates this). Added `POST /v1/personas/compile`
+(persona_service) and `TinyTroupeGenerator.compile_existing`, which run an
+already-built persona through the same `PersonaCompiler` live generation
+uses, without paying TinyTroupe's generation latency/cost. Wired into
+`app.py`'s Example Persona path and a new `example_persona` parameter on
+`/api/v1/workflows/usability`. First deploy of this crashed the whole Space
+at Gradio module-import time: the dropdown's default preview eagerly
+compiles before any authenticated identity exists, hit the new endpoint
+unauthenticated, 401'd, and the unhandled exception took the whole
+`with gr.Blocks()` block down with it. Fixed by splitting a pure-file-read
+preview path (`compile_behavior=False`, no network call) from the real
+compile path used for actual journey testing -- verified this time by
+**actually importing `app.py` locally** (installed gradio+itsdangerous in
+the dev sandbox) rather than trusting `py_compile`, which can't catch
+module-import-time bugs.
+
+**`_combined_test`'s pain-points were a fixed per-task sentence
+("Validate task clarity: <task>"), regardless of what the browser run
+found.** Inspecting `@baguette-studios/journeytest-core@0.1.2`'s actual
+`RunResultSchema` (installed and read locally, not guessed) shows every
+live run already carries a genuine `AgentVerdict`: `blockers`, `uxFindings`,
+`suggestedImprovements`, and per-criterion pass/fail results,
+evidence-grounded in what the director actually observed.
+`_pain_points_from_journeys` now derives `critical_pain_points` from that
+verdict, falling back to the old inferred list only when
+`JOURNEY_WORKER_URL` isn't configured at all. Also found and fixed a related
+dead-code bug: journey-worker's `index.js` looped over `result.steps` to
+enqueue Eyeson evidence for live runs, but the real `RunResultSchema` has no
+`.steps` field at all -- that loop silently never ran. Replaced with
+`timelineToEvents()`, mapping the run's real `timeline` into worker events.
+
+**First live smoke test caught a real logic bug in the fix above.**
+Friedrich_Wolf against `https://example.com` (via the new `example_persona`
+API path) came back `verdict.status: "passed"` with a real screenshot
+(downloaded and visually confirmed as the actual example.com page) but
+`critical_pain_points` still flagged `"Pass criterion not-met: tasks-blocked"`
+as a high-severity finding. `journeyContract()` always emits one pass
+criterion (`tasks-completed`: bad when not-met/blocked) and one **fail**
+criterion (`tasks-blocked`: bad when the failure condition is actually
+*met*) -- the deriver treated every criterion's `not-met` as bad, which is
+backwards for a fail criterion. Fixed with a small id-keyed polarity map;
+`"blocked"` (assessment itself couldn't complete) stays bad either way.
+Verified live a second time (see below) with the same criteria pattern
+correctly producing no false pain-point.
+
+**`ui_adaptation` jobs ("Full New UI" tab, chat-based "Real-time
+Adaptation") always returned the same fixed HTML template** with the
+request text merely embedded as inert copy -- "Change primary color to
+emerald" produced identical output to any other request. Now calls the
+already-configured OpenAI-compatible model for a real, self-contained HTML
+prototype (`DirectLLMSemanticEngine.complete_text`, a new sibling to
+`_complete_json` sharing its retry/backoff machinery), falling back to the
+old static template (now honestly labeled "Offline fallback") only when no
+LLM credentials are configured or generation fails. The chat path now also
+passes the session's most recent `ui.prototype` artifact as `previous_html`
+so follow-up requests genuinely revise the current prototype instead of
+generating an unrelated one from scratch each turn.
+
+**Two full end-to-end live runs against real target sites, evaluated for
+judgment quality, not just plumbing:**
+
+- `https://example.com` -- `passed`, high confidence, correct specific
+  summary of the actual page content.
+- `https://leon4gr45-nova-right-nav.hf.space` (a real user-provided site,
+  "Nova Workspace") -- `passed`, high confidence:
+  > "The tester successfully understood the website's offerings (Branding
+  > Simulation API for Global Teams) and how the main navigation works
+  > (tabs and sidebar). The tester also used the navigation to find and
+  > interact with a specific feature (Leave Feedback modal)."
+
+  Cross-checked against the actual screenshots: the H1 text, the tab/sidebar
+  nav model, and the "Leave Feedback" sidebar link are all real and
+  correctly identified -- not generic boilerplate. Task-completion judgment
+  quality: genuinely good. UX-critique *depth* is honestly limited: with
+  nothing blocking either task, pain-points stayed empty, because this
+  pipeline currently judges "did the persona complete the task," not "is
+  this well-designed" -- deep Eyeson visual/element-attribution critique
+  (spec.md §20) is still not wired to live evidence, and the report's own
+  `limitations` field says so.
+
+  **Found a real defect in evidence capture, not the target site:** two
+  "full page" screenshots from the Nova run are 9,956px tall and just tile
+  the same short landing-page hero section repeatedly instead of capturing
+  more unique content -- viewed both, byte-identical height despite being
+  taken at different points ~200s apart in the session, which points to a
+  fixed/capped tiling fallback in `agent-browser`'s (or journeytest-core's)
+  full-page capture rather than a growing DOM bug in the target site (a
+  real accumulating-duplicate-DOM bug would produce a *taller* second
+  capture, not an identical one). `agent-browser` ships as a closed,
+  precompiled binary per platform (no readable source), so this is
+  documented rather than patched -- out of this repo's ownership boundary
+  per spec.md §3.1 (JourneyTest "must own" screenshots).
+
+Regression tests added for all of the above:
+`test_compile_endpoint_gives_an_existing_persona_real_behavior_and_abilities`,
+`test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardcoded`,
+`test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point`,
+`test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype`,
+`test_ui_adaptation_falls_back_to_static_template_without_llm_credentials`,
+and a journey-worker `index.test.js` for the timeline→events mapping.
 
 ## -5. Real-usage bug: Workspace dropdown rejected a real signed-in user
 
