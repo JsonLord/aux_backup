@@ -351,7 +351,40 @@ class JobExecutor:
                     findings.append(finding)
         if not attempted:
             return [], None
-        return findings, (last_error if not findings and last_error else None)
+        return cls._dedupe_vision_findings(findings), (last_error if not findings and last_error else None)
+
+    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+    @classmethod
+    def _dedupe_vision_findings(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The same real issue (e.g. a page-wide rendering bug) can legitimately
+        show up on more than one sampled screenshot from the same run, producing
+        near-identical findings that read as noise rather than confirmation.
+        Collapse findings sharing a (title, category) key -- keeping the highest
+        severity and first crop seen, and folding every occurrence's evidence
+        into one list -- instead of listing the same finding once per screenshot."""
+        merged: dict[tuple[str, str], dict[str, Any]] = {}
+        order: list[tuple[str, str]] = []
+        for finding in findings:
+            key = (finding["title"].strip().lower(), finding.get("category", ""))
+            if key not in merged:
+                merged[key] = {**finding, "evidence": [finding["evidence"]]}
+                order.append(key)
+                continue
+            existing = merged[key]
+            existing["evidence"].append(finding["evidence"])
+            if cls._SEVERITY_RANK.get(finding.get("severity"), 0) > cls._SEVERITY_RANK.get(existing.get("severity"), 0):
+                existing["severity"] = finding["severity"]
+            if not existing.get("screenshotCrop") and finding.get("screenshotCrop"):
+                existing["screenshotCrop"] = finding["screenshotCrop"]
+        deduped = []
+        for key in order:
+            finding = merged[key]
+            occurrences = finding.pop("evidence")
+            finding["evidence"] = occurrences[0] if len(occurrences) == 1 else \
+                f"seen on {len(occurrences)} screenshots -- " + " | ".join(occurrences)
+            deduped.append(finding)
+        return deduped
 
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]

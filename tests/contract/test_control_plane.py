@@ -358,6 +358,32 @@ def test_vision_critique_pairs_screenshot_with_its_snapshot_and_crops_the_findin
     assert '<img src="data:image/png;base64,' in presentation
 
 
+def test_vision_findings_seen_on_multiple_screenshots_are_deduped_not_repeated():
+    """Regression test for a live observation: the same page-wide rendering bug
+    was independently flagged on two different sampled screenshots from one run,
+    producing two near-identical "Infinite repetition of page content" findings
+    in the report. That reads as noise, not confirmation -- collapse them."""
+    findings = [
+        {"severity": "critical", "category": "usability", "title": "Infinite repetition of page content",
+         "summary": "The hero section repeats down the page.", "recommendation": "Fix the render loop.",
+         "evidence": "screenshot: /run/screenshots/001.png", "source": "eyeson-vision", "runId": "run1", "personaId": "p1"},
+        {"severity": "critical", "category": "usability", "title": "Infinite repetition of page content",
+         "summary": "The layout repeats vertically many times.", "recommendation": "Check the layout component.",
+         "evidence": "screenshot: /run/screenshots/007.png", "source": "eyeson-vision", "runId": "run1", "personaId": "p1"},
+        {"severity": "medium", "category": "accessibility", "title": "Low contrast form labels",
+         "summary": "Labels are hard to read.", "evidence": "screenshot: /run/screenshots/001.png",
+         "source": "eyeson-vision", "runId": "run1", "personaId": "p1"},
+    ]
+    deduped = JobExecutor._dedupe_vision_findings(findings)
+    assert len(deduped) == 2
+    repetition = next(item for item in deduped if item["title"] == "Infinite repetition of page content")
+    assert repetition["severity"] == "critical"
+    assert "seen on 2 screenshots" in repetition["evidence"]
+    assert "001.png" in repetition["evidence"] and "007.png" in repetition["evidence"]
+    contrast = next(item for item in deduped if item["title"] == "Low contrast form labels")
+    assert contrast["evidence"] == "screenshot: /run/screenshots/001.png"  # single occurrence, not rewritten
+
+
 def test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype(tmp_path, monkeypatch):
     """ui_adaptation jobs must actually ask the model to implement the requested
     change, including revising the previous prototype for iterative chat-based
