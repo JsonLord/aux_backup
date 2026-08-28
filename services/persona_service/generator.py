@@ -38,22 +38,12 @@ class TinyTroupeGenerator:
             clients = importlib.import_module("tinytroupe.clients")
             self._configure_openai_compatible(tinytroupe.config_manager, clients)
             factory_type = importlib.import_module("tinytroupe.factory.tiny_person_factory").TinyPersonFactory
-            factory = factory_type(context=f"{theme}. Target customers: {customer_profile}. Generation seed: {seed}.")
-            generate = factory.generate_people
-            arguments = {"number_of_people": count}
-            try:
-                generate_params = inspect.signature(generate).parameters
-            except (TypeError, ValueError):
-                generate_params = {}
-            if "seed" in generate_params:
-                arguments["seed"] = seed
-            if "attempts" in generate_params:
-                arguments["attempts"] = self._generation_attempts()
-            try:
-                people = generate(**arguments)
-            except Exception:
+            people, last_error = self._generate_people_with_retry(factory_type, theme, customer_profile, seed, count)
+            if not people and count > 0:
                 if not allow_offline_fallback:
-                    raise
+                    if last_error is not None:
+                        raise last_error
+                    raise RuntimeError(f"TinyTroupe generated 0 of {count} requested people")
                 # Explicit acceptance-only fallback: retain the failed runtime in
                 # provenance and never label these profiles as model-generated.
                 return self._offline_profiles(theme, customer_profile, count, scenario, seed,
@@ -142,6 +132,55 @@ class TinyTroupeGenerator:
         provider that mostly just wastes time on a single stuck persona, so it is
         capped lower here. Override with PERSONA_GENERATION_ATTEMPTS."""
         return cls._int_env_override("PERSONA_GENERATION_ATTEMPTS") or 3
+
+    @classmethod
+    def _batch_retry_attempts(cls) -> int:
+        """Total attempts (including the first) at the *whole* batch call,
+        distinct from _generation_attempts (retries of one persona within a
+        single batch call). TinyTroupe's own sampling-plan step
+        (initialize_sampling_plan -> _compute_sampling_dimensions ->
+        _compute_sample_plan) is a one-time, unguarded model call before any
+        per-person generation begins; if the model miscomputes it (observed
+        live: quantities summing to 0 instead of the requested count), every
+        person in the batch fails immediately with no further retry at all.
+        Retrying the whole batch with a fresh factory is the same "retry the
+        same request" fix already applied to semantic.py's completions, one
+        level up. Override with PERSONA_BATCH_RETRY_ATTEMPTS."""
+        return cls._int_env_override("PERSONA_BATCH_RETRY_ATTEMPTS") or 2
+
+    def _generate_people_with_retry(self, factory_type, theme, customer_profile, seed, count):
+        """Call factory_type(...).generate_people(...) up to _batch_retry_attempts
+        times, keeping the best (most people) result seen. A fresh TinyPersonFactory
+        is used on every attempt: reusing one after a failed sampling plan means its
+        remaining_characteristics_sample pool is already empty, so every subsequent
+        person would fail immediately regardless of what the model does this time.
+        Returns (people, last_error) -- people is [] only if every attempt failed
+        or returned nothing; last_error is the most recent exception, if any.
+        """
+        best_people: list = []
+        last_error: Exception | None = None
+        for attempt in range(1, self._batch_retry_attempts() + 1):
+            factory = factory_type(context=f"{theme}. Target customers: {customer_profile}. Generation seed: {seed}.")
+            generate = factory.generate_people
+            arguments = {"number_of_people": count}
+            try:
+                generate_params = inspect.signature(generate).parameters
+            except (TypeError, ValueError):
+                generate_params = {}
+            if "seed" in generate_params:
+                arguments["seed"] = seed
+            if "attempts" in generate_params:
+                arguments["attempts"] = self._generation_attempts()
+            try:
+                people = generate(**arguments)
+            except Exception as error:
+                last_error = error
+                people = []
+            if len(people) > len(best_people):
+                best_people = people
+            if len(best_people) >= count:
+                break
+        return best_people, last_error
 
     @classmethod
     def _configure_openai_compatible(cls, config_manager, clients):
