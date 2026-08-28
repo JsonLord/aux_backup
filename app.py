@@ -1092,24 +1092,22 @@ def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfi
         return f"Unable to load the saved UI artifact: {error}"
 
 def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-    print(f"DEBUG: blablador_chat_adaptation called with message='{message}', history='{history}', jules_uuid='{jules_uuid}'")
     if not jules_uuid:
         return history + [("System", "Error: Analysis job ID missing.")], ""
-    
-    # This should call sendMessage to the same session_id for real-time adaptation
-    # but also use alias-code for the chat experience if desired.
-    # The user asked to call alias-code model on blablador endpoint.
-    
-    prompt = f"User request for UI adaptation: {message}\n\nPlease update the generated UI and save it."
-    
     try:
         session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         parent = session_client.get_job(jules_uuid)
-        job = session_client.run_job("ui_adaptation", {"title": "Interactive UI adaptation", "request": prompt}, session_id=parent["session_id"])
+        # Revise the most recently generated prototype rather than regenerating
+        # from scratch each turn, so the chat is actually iterative.
+        prototypes = [a for a in session_client.list_artifacts(parent["session_id"]) if a["kind"] == "ui.prototype"]
+        previous_html = session_client.get_artifact_content(prototypes[-1]["artifact_id"]) if prototypes else None
+        job = session_client.run_job("ui_adaptation",
+            {"title": "Interactive UI adaptation", "request": message, "previous_html": previous_html},
+            session_id=parent["session_id"])
         if job["status"] != "succeeded":
             raise RuntimeError(job.get("error"))
         agent_msg = f"Adaptation completed as job {job['job_id']}. The responsive prototype is stored as artifact {job['output_artifacts'][0]}."
-        
+
         history.append((message, agent_msg))
         return history, ""
     except Exception as e:

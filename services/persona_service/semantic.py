@@ -132,37 +132,62 @@ class DirectLLMSemanticEngine:
                 return json.loads(match.group())
             raise
 
-    def _complete_json(self, prompt: dict, max_attempts: int | None = None, retry_wait_seconds: float | None = None) -> dict:
-        """POST the prompt and parse a JSON completion, retrying the same request on
-        transient failure. The "auto" router occasionally returns a non-2xx status,
-        a connection error (observed live, under concurrent load against a
-        self-hosted backend: SSL: UNEXPECTED_EOF_WHILE_READING -- the server
-        dropping the connection), or an empty completion body -- none of which
-        TinyTroupe's own retry logic covers, since this call bypasses TinyTroupe
-        entirely. Each attempt is the exact same request; nothing about the prompt
-        changes between retries. The wait grows with each attempt (retry_wait_seconds
-        * attempt number) to give a momentarily overloaded server more room to
-        recover on later tries. Overridable via SEMANTIC_ENGINE_MAX_ATTEMPTS /
-        SEMANTIC_ENGINE_RETRY_WAIT_SECONDS.
+    def _complete(self, messages: list[dict], response_format: dict | None = None,
+                   max_attempts: int | None = None, retry_wait_seconds: float | None = None,
+                   temperature: float = 0, timeout: float = 60) -> str:
+        """POST a chat completion and return its raw text content, retrying the same
+        request on transient failure. The "auto" router occasionally returns a
+        non-2xx status, a connection error (observed live, under concurrent load
+        against a self-hosted backend: SSL: UNEXPECTED_EOF_WHILE_READING -- the
+        server dropping the connection), or an empty completion body -- none of
+        which TinyTroupe's own retry logic covers, since this call bypasses
+        TinyTroupe entirely. Each attempt is the exact same request; nothing about
+        the prompt changes between retries. The wait grows with each attempt
+        (retry_wait_seconds * attempt number) to give a momentarily overloaded
+        server more room to recover on later tries. Overridable via
+        SEMANTIC_ENGINE_MAX_ATTEMPTS / SEMANTIC_ENGINE_RETRY_WAIT_SECONDS.
         """
         if max_attempts is None:
             max_attempts = _int_env_override("SEMANTIC_ENGINE_MAX_ATTEMPTS") or 4
         if retry_wait_seconds is None:
             retry_wait_seconds = _float_env_override("SEMANTIC_ENGINE_RETRY_WAIT_SECONDS") or 2.0
+        payload = {"model": self.model, "temperature": temperature, "messages": messages}
+        if response_format is not None:
+            payload["response_format"] = response_format
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
-                response = requests.post(f"{self.base_url}/chat/completions", headers={"authorization": f"Bearer {self.api_key}"}, json={"model": self.model, "temperature": 0, "response_format": {"type": "json_object"}, "messages": [{"role": "user", "content": json.dumps(prompt)}]}, timeout=60)
+                response = requests.post(f"{self.base_url}/chat/completions", headers={"authorization": f"Bearer {self.api_key}"}, json=payload, timeout=timeout)
                 response.raise_for_status()
                 content = response.json()["choices"][0]["message"]["content"]
                 if not content or not content.strip():
                     raise ValueError("model returned an empty completion")
-                return self._parse_json_completion(content)
-            except (requests.RequestException, ValueError, KeyError, IndexError, json.JSONDecodeError) as error:
+                return content
+            except (requests.RequestException, ValueError, KeyError, IndexError) as error:
                 last_error = error
                 if attempt < max_attempts:
                     time.sleep(retry_wait_seconds * attempt)
         raise RuntimeError(f"semantic engine request failed after {max_attempts} attempts: {last_error}") from last_error
+
+    def _complete_json(self, prompt: dict, max_attempts: int | None = None, retry_wait_seconds: float | None = None) -> dict:
+        """Like _complete, but sends `prompt` as a JSON-encoded user message and
+        parses the response as JSON (tolerating a markdown code fence)."""
+        content = self._complete([{"role": "user", "content": json.dumps(prompt)}],
+                                  response_format={"type": "json_object"},
+                                  max_attempts=max_attempts, retry_wait_seconds=retry_wait_seconds)
+        try:
+            return self._parse_json_completion(content)
+        except json.JSONDecodeError as error:
+            raise RuntimeError(f"semantic engine returned unparseable JSON: {error}") from error
+
+    def complete_text(self, system_prompt: str, user_prompt: str,
+                       max_attempts: int | None = None, retry_wait_seconds: float | None = None,
+                       temperature: float = 0.4, timeout: float = 90) -> str:
+        """Free-form text/HTML completion (no JSON response_format constraint),
+        reusing the same retry/backoff behavior as _complete_json."""
+        return self._complete([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
+                               max_attempts=max_attempts, retry_wait_seconds=retry_wait_seconds,
+                               temperature=temperature, timeout=timeout)
 
     def compile_behavior(self, persona, scenario, traits, seed):
         schema = {trait: "number from 0 to 1" for trait in traits}

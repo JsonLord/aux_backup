@@ -277,6 +277,56 @@ def test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point(tmp_path
     assert findings[0]["title"] == "No pain points detected"
 
 
+def test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype(tmp_path, monkeypatch):
+    """ui_adaptation jobs must actually ask the model to implement the requested
+    change, including revising the previous prototype for iterative chat-based
+    adaptation, instead of always returning the same fixed HTML template regardless
+    of what was requested."""
+    import services.persona_service.semantic as semantic_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+
+    monkeypatch.setenv("OPENAI_API_KEY", "test-key")
+    captured = {}
+
+    def fake_complete_text(self, system_prompt, user_prompt, **kwargs):
+        captured["system_prompt"], captured["user_prompt"] = system_prompt, user_prompt
+        return "```html\n<html><body><h1>Emerald button</h1></body></html>\n```"
+
+    monkeypatch.setattr(semantic_module.DirectLLMSemanticEngine, "complete_text", fake_complete_text)
+
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "ui_adaptation", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": [], "seed": None,
+        "metadata": {"title": "Interactive UI adaptation", "request": "Change primary color to emerald",
+                     "previous_html": "<html><body><h1>Old button</h1></body></html>"},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    html = store.read_artifact(completed["output_artifacts"][0]).decode("utf-8")
+
+    assert "Emerald button" in html
+    assert not html.strip().startswith("```")
+    assert "Change primary color to emerald" in captured["user_prompt"]
+    assert "Old button" in captured["user_prompt"]  # previous prototype passed through for revision
+
+
+def test_ui_adaptation_falls_back_to_static_template_without_llm_credentials(tmp_path, monkeypatch):
+    for var in ("OPENAI_API_KEY", "BLABLADOR_API_KEY"):
+        monkeypatch.delenv(var, raising=False)
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "ui_adaptation", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": [], "seed": None,
+        "metadata": {"title": "UX solution prototype", "request": "Improve clarity"}, "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    html = store.read_artifact(completed["output_artifacts"][0]).decode("utf-8")
+    assert "Offline fallback" in html
+    assert "Improve clarity" in html
+
+
 def test_existing_sqlite_schema_receives_additive_tenant_columns(tmp_path):
     database = tmp_path / "legacy.db"
     with sqlite3.connect(database) as db:

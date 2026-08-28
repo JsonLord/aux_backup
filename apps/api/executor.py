@@ -9,6 +9,7 @@ from html import escape
 import json
 import os
 from pathlib import Path
+import re
 from typing import Any
 from urllib import request
 
@@ -211,9 +212,53 @@ class JobExecutor:
 
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]
-        title = escape(data.get("title", "Responsive UX prototype"))
-        request = escape(data.get("request", "Improve clarity and responsiveness"))
-        return f"""<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><style>body{{font:16px system-ui;margin:auto;max-width:72rem;padding:clamp(1rem,4vw,4rem);color:#18202a}}main{{display:grid;gap:1rem}}section{{padding:1.5rem;border:1px solid #ccd5df;border-radius:1rem}}@media(min-width:48rem){{main{{grid-template-columns:2fr 1fr}}}}</style></head><body><h1>{title}</h1><main><section><h2>Adaptation request</h2><p>{request}</p></section><section><h2>Accessible by default</h2><p>Responsive layout, semantic landmarks, and readable contrast.</p></section></main></body></html>"""
+        title, request = data.get("title", "Responsive UX prototype"), data.get("request", "Improve clarity and responsiveness")
+        html = self._generate_ui_html(title, request, data.get("url"), data.get("previous_html"))
+        if html:
+            return html
+        # Deterministic offline fallback (no OPENAI_API_KEY/BLABLADOR_API_KEY
+        # configured, or the LLM call failed): a real generation was attempted
+        # and could not be produced, not a claim of a designed prototype.
+        return f"""<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><style>body{{font:16px system-ui;margin:auto;max-width:72rem;padding:clamp(1rem,4vw,4rem);color:#18202a}}main{{display:grid;gap:1rem}}section{{padding:1.5rem;border:1px solid #ccd5df;border-radius:1rem}}@media(min-width:48rem){{main{{grid-template-columns:2fr 1fr}}}}</style></head><body><h1>{escape(title)}</h1><main><section><h2>Adaptation request</h2><p>{escape(request)}</p></section><section><h2>Offline fallback</h2><p>No LLM credentials are configured (or generation failed), so this is a static placeholder rather than a generated prototype.</p></section></main></body></html>"""
+
+    @staticmethod
+    def _generate_ui_html(title: str, request: str, url: str | None, previous_html: str | None) -> str | None:
+        """Ask the configured OpenAI-compatible model for a real, self-contained
+        HTML prototype implementing `request`, optionally revising `previous_html`
+        for iterative chat-based adaptation. Returns None (caller falls back) if no
+        LLM credentials are configured or the call fails after retries -- this is
+        never faked with a fixed template that ignores the actual request."""
+        if not (os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")):
+            return None
+        try:
+            from services.persona_service.semantic import DirectLLMSemanticEngine
+            engine = DirectLLMSemanticEngine()
+        except (ImportError, ValueError):
+            return None
+        system_prompt = ("You are a senior frontend engineer producing a single, complete, "
+                          "self-contained HTML document (inline <style> and <script> only, no "
+                          "external network requests) for a UX prototype. Respond with ONLY the "
+                          "HTML document -- no markdown fences, no commentary before or after it. "
+                          "It must be responsive, accessible (semantic landmarks, sufficient "
+                          "contrast, labeled interactive elements), and visually implement the "
+                          "requested change or design, not just describe it in text.")
+        parts = [f"Prototype title: {title}", f"Requested change: {request}"]
+        if url:
+            parts.append(f"Target site being redesigned/adapted: {url}")
+        if previous_html:
+            parts.append("Revise the following existing prototype to satisfy the requested change "
+                         "above, preserving anything not affected by the request:\n\n"
+                         f"```html\n{previous_html}\n```")
+        try:
+            content = engine.complete_text(system_prompt, "\n\n".join(parts))
+        except RuntimeError:
+            return None
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
+            stripped = re.sub(r"\n?```\s*$", "", stripped)
+            stripped = stripped.strip()
+        return stripped if "<html" in stripped.lower() else None
 
     @staticmethod
     def _download_name(kind: str, job_id: str) -> str:
