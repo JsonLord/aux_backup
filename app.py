@@ -397,10 +397,30 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
         personas = []
         for i in range(int(num_personas)):
             p = generate_persona_from_deeppersona(theme, customer_profile)
-            if p: personas.append(p)
+            if not p:
+                continue
+            if compile_behavior:
+                # DeepPersona's own result has no behavior/abilities -- journey
+                # testing requires profile.behavior (same gap Example Persona had
+                # before it was fixed to always compile). Compile it through the
+                # same PersonaCompiler as every other persona source.
+                try:
+                    compiled = (persona_client or persona_runtime).compile(
+                        p["persona"], scenario=f"PersonaPool: {theme}", seed=i + 1)
+                    compiled["name"], compiled["minibio"] = p["name"], p["minibio"]
+                    p = compiled
+                except Exception as e:
+                    add_log(f"Failed to compile PersonaPool persona: {e}")
+                    continue
+            personas.append(p)
         if len(personas) >= int(num_personas): return personas[:int(num_personas)]
-        # fallback if some failed
-        num_personas = int(num_personas) - len(personas)
+        if personas:
+            # Partial success: force_method="PersonaPool" was an explicit choice,
+            # so return what it actually produced rather than silently falling
+            # through into the unrelated generic LLM-judged-pool path below,
+            # which would previously discard these already-generated personas.
+            add_log(f"PersonaPool produced {len(personas)}/{num_personas} requested personas; returning the partial result.")
+            return personas
     elif force_method == "TinyTroupe":
         add_log("Forcing TinyTroupe generation...")
         return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
