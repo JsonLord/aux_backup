@@ -106,13 +106,6 @@ def authenticated_clients(workspace_id, oauth_profile, oauth_token):
         PersonaRuntimeClient(workspace_id=identity.workspace_id, user_id=identity.user_id, authorization=identity.authorization),
     )
 
-# Historical GitHub helpers remain below only for read-only migration compatibility;
-# the application runtime and visible tabs use workspace-scoped control-plane storage.
-gh = None
-REPO_NAME = "JsonLord/tiny_web"
-POOL_REPO_NAME = "JsonLord/agent-notes"
-POOL_PATH = "PersonaPool"
-
 # Better summaries for example personas
 BETTER_SUMMARIES = {
     "Friedrich_Wolf.agent.json": "A meticulous German architect at Awesome Inc. He focuses on standardizing apartment designs, favoring quality over cost, and can be confrontational when challenged.",
@@ -125,9 +118,7 @@ BETTER_SUMMARIES = {
     "John_Doe.md": "Standard, versatile persona representing a broad range of consumer behaviors and expectations."
 }
 
-# Global state for processed reports
-processed_prs = set()
-all_discovered_reports = ""
+# In-app activity log (rendered in Live Monitoring / status messages)
 github_logs = []
 
 # Slide rendering configuration
@@ -181,89 +172,6 @@ def get_blablador_client():
         base_url=BLABLADOR_BASE_URL
     )
 
-def get_user_repos(github_client=None):
-    client = github_client or gh
-    add_log("Fetching user repositories...")
-    if not client:
-        add_log("ERROR: GitHub client not initialized.")
-        return ["JsonLord/tiny_web"]
-    try:
-        user = client.get_user()
-        repos = [repo.full_name for repo in user.get_repos()]
-        add_log(f"Found {len(repos)} repositories.")
-        if "JsonLord/tiny_web" not in repos:
-            repos.append("JsonLord/tiny_web")
-        return sorted(repos)
-    except Exception as e:
-        add_log(f"ERROR fetching repos: {e}")
-        return ["JsonLord/tiny_web"]
-
-def get_repo_branches(repo_full_name, github_client=None):
-    client = github_client or gh
-    add_log(f"Fetching branches for {repo_full_name}...")
-    if not client:
-        add_log("ERROR: GitHub client is None.")
-        return ["main"]
-    if not repo_full_name:
-        return ["main"]
-    try:
-        repo = client.get_repo(repo_full_name)
-        # Fetch branches
-        branches = list(repo.get_branches())
-        add_log(f"Discovered {len(branches)} branches.")
-        
-        # Use ThreadPool to fetch commit dates in parallel to be MUCH faster
-        branch_info = []
-        
-        def fetch_branch_date(b):
-            try:
-                commit = repo.get_commit(b.commit.sha)
-                # Try multiple ways to get the date
-                date = None
-                if commit.commit and commit.commit.author:
-                    date = commit.commit.author.date
-                elif commit.commit and commit.commit.committer:
-                    date = commit.commit.committer.date
-                
-                if not date:
-                    date = datetime.min
-                return (b.name, date)
-            except Exception as e:
-                return (b.name, datetime.min)
-
-        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
-            branch_info = list(executor.map(fetch_branch_date, branches))
-        
-        # Sort by date descending
-        branch_info.sort(key=lambda x: x[1], reverse=True)
-        result = [b[0] for b in branch_info]
-        
-        if result:
-            add_log(f"Successfully sorted {len(result)} branches. Latest: {result[0]}")
-        
-        return result
-    except Exception as e:
-        add_log(f"ERROR fetching branches: {e}")
-        import traceback
-        traceback.print_exc()
-        return ["main"]
-
-def get_persona_pool():
-    if not gh:
-        return []
-    try:
-        repo = gh.get_repo(POOL_REPO_NAME)
-        contents = repo.get_contents(POOL_PATH)
-        pool = []
-        for content_file in contents:
-            if content_file.name.endswith(".json"):
-                file_content = content_file.decoded_content.decode("utf-8")
-                pool.append(json.loads(file_content))
-        return pool
-    except Exception as e:
-        print(f"Error fetching persona pool: {e}")
-        return []
-
 def _example_persona_dirs():
     """Candidate directories that hold bundled TinyTroupe example agents.
 
@@ -304,26 +212,6 @@ def get_example_personas():
         except OSError as e:
             print(f"Error listing example personas in {directory}: {e}")
     return []
-
-def upload_persona_to_pool(persona_data):
-    if not gh:
-        return
-    try:
-        repo = gh.get_repo(POOL_REPO_NAME)
-        name = persona_data.get("name", "unknown").replace(" ", "_")
-        file_path = f"{POOL_PATH}/{name}.json"
-        content = json.dumps(persona_data, indent=4)
-
-        try:
-            # Check if file exists to get its sha
-            existing_file = repo.get_contents(file_path)
-            repo.update_file(file_path, f"Update persona: {name}", content, existing_file.sha)
-        except:
-            # Create new file
-            repo.create_file(file_path, f"Add persona: {name}", content)
-        print(f"Uploaded persona {name} to pool.")
-    except Exception as e:
-        print(f"Error uploading persona to pool: {e}")
 
 def _read_example_persona_file(example_file):
     """Pure file read of a bundled example persona -- no network call. Returns
@@ -429,16 +317,23 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
     if not client:
         return generate_personas(theme, customer_profile, num_personas, persona_client)
 
-    pool = get_persona_pool()
+    # Real local persona pool: every persona this workspace has ever generated
+    # or compiled (live TinyTroupe, Example Persona, PersonaPool/DeepPersona) is
+    # already durably saved in the persona-runtime's own store (persona_service's
+    # generate/compile endpoints call profiles.save(...) themselves) -- no
+    # separate "upload to pool" step needed, and no external repo either.
+    pool = (persona_client or persona_runtime).list(limit=50)
     if not pool:
-        print("Pool is empty, generating new personas.")
-        new_personas = generate_personas(theme, customer_profile, num_personas, persona_client)
-        for p in new_personas:
-            upload_persona_to_pool(p)
-        return new_personas
+        add_log("Local persona pool is empty; generating new personas.")
+        return generate_personas(theme, customer_profile, num_personas, persona_client)
 
     # Ask LLM to judge
-    pool_summaries = [{"index": i, "name": p["name"], "minibio": p.get("minibio", "")} for i, p in enumerate(pool)]
+    def _pool_summary(p):
+        identity = p.get("persona", {})
+        name = identity.get("name") or p.get("id", "Persona")
+        minibio = (identity.get("occupation") or {}).get("title") if isinstance(identity.get("occupation"), dict) else identity.get("occupation")
+        return {"name": name, "minibio": minibio or ""}
+    pool_summaries = [{"index": i, **_pool_summary(p)} for i, p in enumerate(pool)]
 
     prompt = f"""
     You are an expert in user experience research and persona management.
@@ -483,17 +378,16 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
     to_create_count = 0
     for d in decisions:
         if d["action"] == "use_pool" and 0 <= d["pool_index"] < len(pool):
-            print(f"Using persona from pool: {pool[d['pool_index']]['name']}")
+            add_log(f"Using persona from local pool: {pool_summaries[d['pool_index']]['name']}")
             final_personas.append(pool[d['pool_index']])
         else:
             to_create_count += 1
 
     if to_create_count > 0:
-        print(f"Creating {to_create_count} new personas.")
-        newly_created = generate_personas(theme, customer_profile, to_create_count, persona_client)
-        for p in newly_created:
-            upload_persona_to_pool(p)
-            final_personas.append(p)
+        add_log(f"Creating {to_create_count} new personas.")
+        # generate_personas() -> persona_client.generate() already durably saves
+        # each generated profile server-side; no separate pool-upload step.
+        final_personas.extend(generate_personas(theme, customer_profile, to_create_count, persona_client))
 
     return final_personas
 
@@ -708,15 +602,6 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
         yield f"Error during generation: {str(e)}", None, None, None
 
 
-def check_branch_exists(repo_full_name, branch_name):
-    if not gh: return False
-    try:
-        repo = gh.get_repo(repo_full_name)
-        repo.get_branch(branch_name)
-        return True
-    except:
-        return False
-
 def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not personas or not tasks:
         yield "Error: Personas or Tasks missing. Please generate them first.", "", "", ""
@@ -753,316 +638,6 @@ def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, o
         yield "Analysis complete.", summary, session["session_id"], job["job_id"]
     except Exception as exc:
         yield f"Control-plane error: {exc}", "", "", ""
-
-def get_reports_in_branch(repo_full_name, branch_name, filter_type=None):
-    if not gh or not repo_full_name or not branch_name:
-        return []
-    try:
-        repo = gh.get_repo(repo_full_name)
-        add_log(f"Scanning branch {branch_name} for reports (filter: {filter_type})...")
-        
-        exclude_files = {"analysis_template.md", "readme.md", "contributing.md", "license.md"}
-        
-        # Method 1: Check user_experience_reports directory
-        reports = []
-
-        # Check for merged slides folder first if we are looking for slides
-        if filter_type == "slides":
-            try:
-                repo.get_contents("user_experience_reports/slides", ref=branch_name)
-                reports.append("user_experience_reports/slides")
-                add_log("Detected 'user_experience_reports/slides' directory. Added as merged presentation option.")
-            except:
-                pass
-
-        try:
-            contents = repo.get_contents("user_experience_reports", ref=branch_name)
-            for content_file in contents:
-                name = content_file.name
-                if name.endswith(".md"):
-                    filename = name.lower()
-                    if filename in exclude_files: continue
-                    
-                    # Optional filtering
-                    if filter_type == "report" and "slide" in filename: continue
-                    if filter_type == "slides" and "report" in filename: continue
-                    
-                    path = f"user_experience_reports/{name}"
-                    reports.append(path)
-        except:
-            pass
-            
-        # Method 2: Recursive scan for ALL Markdown files
-        add_log("Deep scanning repository for all Markdown files...")
-        tree = repo.get_git_tree(branch_name, recursive=True).tree
-        for element in tree:
-            if element.type == "blob" and element.path.endswith(".md"):
-                path = element.path
-                filename = os.path.basename(path).lower()
-                if filename in exclude_files:
-                    continue
-                
-                # Optional filtering
-                if filter_type == "report" and "slide" in filename: continue
-                if filter_type == "slides" and "report" in filename: continue
-
-                if path not in reports:
-                    reports.append(path)
-        
-        # Filter out individual slides if they are inside a slides folder
-        if filter_type == "slides":
-            folders = [r for r in reports if not r.endswith(".md")]
-            if folders:
-                reports = [r for r in reports if not any(r.startswith(f + "/") for f in folders)]
-
-        # Sort by relevance
-        def sort_key(path):
-            p_lower = path.lower()
-            score = 0
-            # Highest priority: specific report.md and slides.md in user_experience_reports
-            if filter_type == "report" and p_lower == "user_experience_reports/report.md": score -= 1000
-            if filter_type == "slides" and p_lower == "user_experience_reports/slides.md": score -= 1000
-            if filter_type == "slides" and p_lower == "user_experience_reports/slides": score -= 2000
-            
-            # High priority: other files in user_experience_reports
-            if "user_experience_reports" in p_lower: score -= 100
-            
-            # Medium priority: keywords in filename
-            filename = os.path.basename(p_lower)
-            if "report" in filename: score -= 50
-            if "slide" in filename: score -= 30
-            if "ux" in filename: score -= 20
-            
-            return (score, p_lower)
-
-        reports.sort(key=sort_key)
-        
-        add_log(f"Discovered {len(reports)} entries.")
-        return reports
-    except Exception as e:
-        add_log(f"Error fetching reports in branch {branch_name}: {e}")
-        return []
-
-def get_report_content(repo_full_name, branch_name, report_path):
-    if not gh:
-        return "Error: GitHub client not initialized. Check your token."
-    if not repo_full_name or not branch_name or not report_path:
-        return "Please select a repository, branch, and report."
-    try:
-        repo = gh.get_repo(repo_full_name)
-        add_log(f"Fetching content from branch '{branch_name}' at path: {report_path}")
-        file_content = repo.get_contents(report_path, ref=branch_name)
-        return file_content.decoded_content.decode("utf-8")
-    except Exception as e:
-        msg = str(e)
-        if "404" in msg:
-            add_log(f"ERROR: File not found: {report_path} in branch {branch_name}")
-            return f"Error: File '{report_path}' not found in branch '{branch_name}'. Please verify the path and branch."
-        add_log(f"Error fetching {report_path}: {e}")
-        return f"Error fetching report: {str(e)}"
-
-def pull_report_from_pr(pr_url):
-    if not gh:
-        return "Error: GITHUB_TOKEN not set."
-
-    try:
-        # Extract repo and PR number from URL
-        match = re.search(r"github\.com/([^/]+/[^/]+)/pull/(\d+)", pr_url)
-        if not match:
-            return "Error: Could not parse PR URL."
-
-        repo_full_name = match.group(1)
-        pr_number = int(match.group(2))
-
-        repo = gh.get_repo(repo_full_name)
-        pr = repo.get_pull(pr_number)
-        branch_name = pr.head.ref
-
-        # Fetch the report files
-        reports = get_reports_in_branch(repo_full_name, branch_name)
-        if not reports:
-            # Try legacy name
-            try:
-                file_content = repo.get_contents("user_experience_reports/report.md", ref=branch_name)
-                content = file_content.decoded_content.decode("utf-8")
-                processed_prs.add(pr_number)
-                return content
-            except:
-                return "Report not found yet in this branch."
-        
-        # Get the first report found
-        content = get_report_content(repo_full_name, branch_name, reports[0])
-        processed_prs.add(pr_number)
-        return content
-
-    except Exception as e:
-        print(f"Error pulling report: {e}")
-        return f"Error pulling report: {str(e)}"
-
-def render_slides(repo_full_name, branch_name, report_path):
-    if not gh:
-        return "Error: GitHub client not initialized. Check your token."
-    if not repo_full_name or not branch_name or not report_path:
-        return "Please select a repository, branch, and report."
-    
-    try:
-        repo = gh.get_repo(repo_full_name)
-        content = None
-        
-        # Check if the path is a directory or points to a slide folder
-        is_slides_dir = report_path.endswith("/slides") or report_path.endswith("/slides/")
-
-        if is_slides_dir or "user_experience_reports/slides" in report_path:
-            slides_folder = report_path if is_slides_dir else "user_experience_reports/slides"
-            try:
-                folder_contents = repo.get_contents(slides_folder, ref=branch_name)
-                if isinstance(folder_contents, list):
-                    add_log(f"Merging multi-file slides from {slides_folder} in branch {branch_name}...")
-                    slide_files = [c for c in folder_contents if c.name.endswith(".md")]
-                    slide_files.sort(key=lambda x: x.name)
-                    
-                    merged_content = ""
-                    for i, sf in enumerate(slide_files):
-                        file_data = repo.get_contents(sf.path, ref=branch_name)
-                        slide_text = file_data.decoded_content.decode("utf-8")
-                        if i > 0:
-                            merged_content += "\n\n---\n\n"
-                        merged_content += slide_text
-                    
-                    content = merged_content
-                    add_log(f"Successfully merged {len(slide_files)} slides.")
-            except Exception as e:
-                add_log(f"Failed to fetch slides from folder: {e}")
-
-        if content is None:
-            # Fallback to single file logic
-            add_log(f"Attempting to fetch single-file slides from branch '{branch_name}' at path: {report_path}")
-            try:
-                file_content = repo.get_contents(report_path, ref=branch_name)
-                content = file_content.decoded_content.decode("utf-8")
-            except Exception as e:
-                return f"Error fetching slides: {str(e)}"
-            
-        # Generate a unique ID for this rendering
-        render_id = str(uuid.uuid4())[:8]
-        work_dir = f"slides_work_{render_id}"
-        os.makedirs(work_dir, exist_ok=True)
-        with open(os.path.join(work_dir, "index.md"), "w") as f:
-            f.write(content)
-        
-        # Set output directory in the SLIDES_OUTPUT_ROOT
-        site_name = f"site_{render_id}"
-        output_dir = os.path.join(SLIDES_OUTPUT_ROOT, site_name)
-            
-        subprocess.run(["mkslides", "build", work_dir, "--site-dir", output_dir])
-        
-        # Cleanup work dir
-        shutil.rmtree(work_dir)
-
-        if os.path.exists(os.path.join(output_dir, "index.html")):
-            # Return IFrame pointing to the static route
-            add_log(f"Slides rendered successfully in {site_name}")
-            return f'<iframe src="/static_slides/{site_name}/index.html" width="100%" height="600px" frameborder="0"></iframe>'
-        else:
-            add_log(f"ERROR: mkslides finished but index.html not found.")
-            return "Failed to render slides: index.html not found."
-            
-    except Exception as e:
-        print(f"Error rendering slides: {e}")
-        return f"Error rendering slides: {str(e)}"
-
-def get_heatmaps_from_repo(repo_full_name, branch_name):
-    if not gh or not repo_full_name or not branch_name:
-        return []
-    try:
-        repo = gh.get_repo(repo_full_name)
-        add_log(f"Scanning branch {branch_name} for heatmaps...")
-        try:
-            contents = repo.get_contents("user_experience_reports/heatmaps", ref=branch_name)
-            heatmaps = []
-            for c in contents:
-                if c.name.endswith(".png"):
-                    # Categorize by filename - Extract problem category
-                    # Expected format: heatmap_problem_category_id.png
-                    raw_name = c.name.replace(".png", "").replace("heatmap_", "")
-                    parts = raw_name.split("_")
-                    if len(parts) > 1:
-                        category = parts[0].title()
-                        desc = " ".join(parts[1:]).title()
-                        name = f"[{category}] {desc}"
-                    else:
-                        name = raw_name.replace("_", " ").title()
-                    
-                    heatmaps.append((c.download_url, name))
-            
-            # Sort by name to group categories together
-            heatmaps.sort(key=lambda x: x[1])
-            return heatmaps
-        except:
-            return []
-    except Exception as e:
-        add_log(f"Error fetching heatmaps: {e}")
-        return []
-
-def deploy_to_hf():
-    hf_token = os.environ.get("HF_TOKEN")
-    hf_space_dest = os.environ.get("HF_SPACE_DEST", "harvesthealth/aux_backup")
-    if not hf_token:
-        return "❌ Error: HF_TOKEN environment variable not set."
-    
-    add_log(f"Deploying to HF Space: {hf_space_dest}...")
-    try:
-        # Use provided token and revision
-        cmd = f"hf upload {hf_space_dest} . --repo-type=space --token {hf_token} --revision main"
-        result = subprocess.run(cmd, shell=True, capture_output=True, text=True)
-        if result.returncode == 0:
-            add_log("Deployment successful.")
-            return "✅ Deployment successful."
-        else:
-            add_log(f"Deployment failed: {result.stderr}")
-            return f"❌ Deployment failed: {result.stderr}"
-    except Exception as e:
-        add_log(f"Error during deployment: {e}")
-        return f"❌ Error: {str(e)}"
-
-def get_solutions_from_repo(repo_full_name, branch_name):
-    if not gh or not repo_full_name or not branch_name:
-        return []
-    try:
-        repo = gh.get_repo(repo_full_name)
-        add_log(f"Scanning branch {branch_name} for solutions...")
-        try:
-            contents = repo.get_contents("user_experience_reports/solutions", ref=branch_name)
-            solutions = []
-            for c in contents:
-                if c.name.endswith(".md"):
-                    text = c.decoded_content.decode("utf-8")
-                    solutions.append({"name": c.name, "content": text, "path": c.path})
-            return solutions
-        except:
-            return []
-    except Exception as e:
-        add_log(f"Error fetching solutions: {e}")
-        return []
-
-def get_thought_logs_from_repo(repo_full_name, branch_name):
-    if not gh or not repo_full_name or not branch_name:
-        return []
-    try:
-        repo = gh.get_repo(repo_full_name)
-        add_log(f"Scanning branch {branch_name} for thought logs...")
-        try:
-            contents = repo.get_contents("user_experience_reports/thought_logs", ref=branch_name)
-            logs = []
-            for c in contents:
-                if c.name.endswith(".md"):
-                    logs.append(c.path)
-            return logs
-        except:
-            return []
-    except Exception as e:
-        add_log(f"Error fetching thought logs: {e}")
-        return []
 
 def generate_agents_prompt(selected_solutions_json):
     if not selected_solutions_json:
@@ -1142,41 +717,6 @@ def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_
     except Exception as e:
         history.append((message, f"Error: {str(e)}"))
         return history, ""
-
-def monitor_repo_for_reports():
-    global all_discovered_reports
-    if not gh:
-        return all_discovered_reports
-
-    add_log("Monitoring repository for new reports across branches...")
-    try:
-        branches = get_repo_branches(REPO_NAME)
-        repo = gh.get_repo(REPO_NAME)
-
-        new_content_found = False
-        for branch_name in branches[:25]: # Check top 25 recent branches
-            reports = get_reports_in_branch(REPO_NAME, branch_name, filter_type="report")
-            
-            for report_file in reports:
-                report_key = f"{branch_name}/{report_file}"
-                if report_key not in processed_prs:
-                    try:
-                        content = get_report_content(REPO_NAME, branch_name, report_file)
-                        report_header = f"\n\n## Discovered Report: {report_file} (Branch: {branch_name})\n\n"
-                        all_discovered_reports = report_header + content + "\n\n---\n\n" + all_discovered_reports
-                        processed_prs.add(report_key)
-                        new_content_found = True
-                        add_log(f"New report found: {report_file} in {branch_name}")
-                    except:
-                        continue
-        
-        if not new_content_found:
-            add_log("No new reports found in recent branches.")
-
-        return all_discovered_reports
-    except Exception as e:
-        add_log(f"Error monitoring repo: {e}")
-        return all_discovered_reports
 
 # Gradio UI
 with gr.Blocks(title="UX Analysis Orchestrator") as demo:
