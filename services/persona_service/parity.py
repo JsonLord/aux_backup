@@ -32,5 +32,5 @@ def run_metadata(corpus_path: str | Path, uv_lock_path: str | Path) -> dict[str,
         "dspy_program_version": PROGRAM_VERSION,
         "evaluation_set": corpus.name,
         "evaluation_set_sha256": hashlib.sha256(corpus.read_bytes()).hexdigest(),
-        "direct_baseline": "DirectLLMSemanticEngine/alias-large",
+        "direct_baseline": "DirectLLMSemanticEngine/auto",
     }

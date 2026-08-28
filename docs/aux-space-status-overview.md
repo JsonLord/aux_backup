@@ -10,6 +10,40 @@ written from live read-only probes plus a code review. It was then updated after
 redeploying the Space four times and driving real, admin-authenticated batch persona
 generation against it end to end — see §0 for what that testing found.
 
+## -1. Provider switch: Blablador → self-hosted freellmapi router
+
+After §0's testing pinned every remaining failure on Blablador's own gateway
+reliability (persistent `502 Proxy Error`), the Space was switched to a different
+OpenAI-compatible provider:
+
+- **Endpoint:** `https://debian-devil.tail3f341b.ts.net/v1` (Tailscale Funnel → a
+  self-hosted `desk_agent_2.0` Caddy/router), set as the public `OPENAI_COMPATIBLE_ENDPOINT`
+  Space variable.
+- **Model:** must be the literal id `"auto"` (the router's own model-selection
+  logic) — any other id 400s with `model_not_found`. Set as the `OPENAI_MODEL` Space
+  secret; also the new code-level default everywhere `alias-large`/`alias-huge` used
+  to be (`app.py`, `config.ini`, the persona generator/semantic engine defaults,
+  `start-live.sh`).
+- **API key:** set as the `OPENAI_API_KEY` Space secret.
+
+Verified directly before rollout: `GET /v1/models` returns 200 with `auto` listed as
+`available: true` (1,048,576 token context window), and a live
+`POST /v1/chat/completions` with `model: "auto"` returned a clean, fast `200 OK`
+(routed to `gemini-2.5-flash` in that instance). This endpoint is self-hosted by the
+user and was substantially more responsive in this initial check than Blablador was
+throughout §0's testing.
+
+The system-message-consolidation fix from §0.2 is provider-agnostic (it only
+normalizes outgoing message ordering) and was left in place — harmless if this
+router doesn't share Blablador's strict ordering requirement, still protective if it
+does. `BLABLADOR_*` env var names remain supported everywhere as legacy aliases for
+the same `OPENAI_*` settings; nothing reads them as Blablador-specific anymore.
+
+**Not yet re-verified after this switch:** an actual end-to-end batch persona
+generation run against the new provider (redeploy was still in progress / pending at
+the time this section was written — check the live conversation or `/api/readiness`
+plus `/api/v1/sessions` for the current state).
+
 ## 0. Update: live redeploy + batch persona generation testing
 
 The Space was redeployed with this branch, its `OPENAI_MODEL` secret was corrected,

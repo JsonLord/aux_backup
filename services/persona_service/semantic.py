@@ -34,9 +34,9 @@ class DirectLLMSemanticEngine:
         self.api_key = api_key or os.getenv("BLABLADOR_API_KEY") or os.getenv("OPENAI_API_KEY")
         self.base_url = (base_url or os.getenv("BLABLADOR_BASE_URL")
                          or os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
-                         or "https://api.helmholtz-blablador.fz-juelich.de/v1").rstrip("/")
-        # "alias-huge" 404s on Blablador; alias-large is the documented largest alias.
-        self.model = model or os.getenv("OPENAI_MODEL", "alias-large")
+                         or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
+        # The freellmapi router requires the literal model id "auto"; other ids 400.
+        self.model = model or os.getenv("OPENAI_MODEL", "auto")
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
 

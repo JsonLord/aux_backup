@@ -13,19 +13,21 @@ trap stop_services TERM INT EXIT
 
 # Normalize the Hugging Face Space variable names into the internal service
 # contracts. Explicit OPENAI_* Space settings take precedence over legacy
-# Blablador aliases without printing any secret value.
-export OPENAI_BASE_URL="${OPENAI_COMPATIBLE_ENDPOINT:-${OPENAI_BASE_URL:-https://api.helmholtz-blablador.fz-juelich.de/v1}}"
-# "alias-huge" is not a valid Blablador alias (live gateway returns 404). The
-# documented aliases are alias-fast, alias-large, alias-code, alias-embeddings,
-# alias-reasoning; alias-large is the largest general-purpose model.
-export OPENAI_MODEL="${OPENAI_MODEL:-alias-large}"
-export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-alias-large}}"
+# Blablador aliases without printing any secret value. Primary provider is the
+# self-hosted freellmapi router (Tailscale Funnel); Helmholtz Blablador was the
+# prior provider and BLABLADOR_* names remain supported as legacy aliases only.
+export OPENAI_BASE_URL="${OPENAI_COMPATIBLE_ENDPOINT:-${OPENAI_BASE_URL:-https://debian-devil.tail3f341b.ts.net/v1}}"
+# The freellmapi router requires the literal model id "auto" (its router picks the
+# best available model); any other id 400s with model_not_found.
+export OPENAI_MODEL="${OPENAI_MODEL:-auto}"
+export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-auto}}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
 export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-${OPENAI_API_KEY:-}}"
 export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"
 # Bound the OpenAI-compatible completion budget. TinyTroupe 0.7 otherwise requests
-# 128000 completion tokens, which the Blablador gateway cannot stream for the large
-# aliases and rejects with "502 Proxy Error / Error reading from remote server".
+# 128000 completion tokens by default; an explicit ceiling keeps completions
+# bounded and predictable. The router's ~1,048,576 token context window leaves
+# ample room to raise this if longer completions are ever needed.
 export OPENAI_MAX_COMPLETION_TOKENS="${OPENAI_MAX_COMPLETION_TOKENS:-8192}"
 export AGENT_BROWSER_COMMAND="${AGENT_BROWSER_COMMAND:-/home/user/app/spaces/aux-live/agent-browser-container.sh}"
 

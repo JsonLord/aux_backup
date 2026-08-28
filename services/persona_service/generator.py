@@ -64,13 +64,18 @@ class TinyTroupeGenerator:
 
     @staticmethod
     def _openai_compatible_settings():
-        """Resolve aliases and prepare the standard OpenAI SDK environment."""
+        """Resolve aliases and prepare the standard OpenAI SDK environment.
+
+        Primary provider is the self-hosted freellmapi router (Tailscale Funnel,
+        see spaces/aux-live/start-live.sh); BLABLADOR_* names remain supported as
+        legacy aliases. The router requires the literal model id "auto" -- any
+        other id 400s with model_not_found -- so that is the default here.
+        """
         api_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
         base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
                     or os.getenv("BLABLADOR_BASE_URL")
-                    or "https://api.helmholtz-blablador.fz-juelich.de/v1").rstrip("/")
-        # "alias-huge" 404s on Blablador; alias-large is the documented largest alias.
-        model = os.getenv("OPENAI_MODEL", "alias-large")
+                    or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
+        model = os.getenv("OPENAI_MODEL", "auto")
         if not api_key:
             raise RuntimeError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for TinyTroupe")
         os.environ["OPENAI_API_KEY"] = api_key

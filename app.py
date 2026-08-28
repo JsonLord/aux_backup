@@ -25,18 +25,21 @@ import logging
 
 # Configuration from environment variables
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_TOKEN") or os.environ.get("GITHUB_API_KEY")
+# Primary provider is the self-hosted freellmapi router (Tailscale Funnel; see
+# spaces/aux-live/start-live.sh). BLABLADOR_* names remain supported as legacy
+# aliases for the same OPENAI_* settings.
 BLABLADOR_API_KEY = os.environ.get("BLABLADOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
 BLABLADOR_BASE_URL = (
     os.environ.get("BLABLADOR_BASE_URL")
     or os.environ.get("OPENAI_COMPATIBLE_ENDPOINT")
     or os.environ.get("OPENAI_BASE_URL")
-    or "https://api.helmholtz-blablador.fz-juelich.de/v1"
+    or "https://debian-devil.tail3f341b.ts.net/v1"
 )
-# "alias-huge" is not a valid Blablador alias (confirmed via a live 404: "Model
-# 'alias-huge' not found"). The documented aliases are alias-fast, alias-large,
-# alias-code, alias-embeddings, alias-reasoning; alias-large is the largest/most
-# accurate general-purpose model, so it is the default here.
-OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "alias-large")
+# The freellmapi router requires the literal model id "auto" (its router picks the
+# best available model); any other id 400s with model_not_found. GET /v1/models on
+# the router lists other catalog ids (fusion, kimi-k2.6, ...) if a specific model is
+# ever wanted instead of the router's own selection.
+OPENAI_MODEL = os.environ.get("OPENAI_MODEL", "auto")
 # Operator break-glass credential. When ADMIN_API_TOKEN is configured (Hugging Face
 # Space secret), maintainers can use the app and API before Hugging Face OAuth login
 # by presenting `Authorization: Admin <token>`. Requests fall back to this identity
@@ -425,7 +428,7 @@ def generate_persona_from_deeppersona(theme, customer_profile):
     if not client:
         return None
 
-    # Step 1: Breakdown profile into parameters using LLM alias-huge
+    # Step 1: Breakdown profile into parameters using the configured OPENAI_MODEL
     prompt = f"""
     You are an expert in persona creation. 
     Break down the following business theme and customer profile into detailed attributes for a persona.
