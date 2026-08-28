@@ -225,6 +225,58 @@ def test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardco
     assert ux_finding["severity"] == "medium"  # journeytest "minor" maps to report "medium"
 
 
+def test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point(tmp_path, monkeypatch):
+    """Regression test for a bug found in a live smoke test against the real
+    JourneyTest engine: journeyContract() emits one pass criterion
+    ("tasks-completed") and one fail criterion ("tasks-blocked"). For the fail
+    criterion, result "not-met" means the failure condition did NOT occur --
+    that's the GOOD outcome and must not be reported as a pain point. (Verified
+    live: a real run against https://example.com returned verdict.status
+    "passed" with criteria [{"id": "tasks-completed", "result": "met"},
+    {"id": "tasks-blocked", "result": "not-met"}], and the pre-fix code
+    incorrectly flagged the second one as a "high" severity pain point.)"""
+    import json as json_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
+        "metadata": {}})
+
+    verdict = {
+        "status": "passed", "confidence": "high", "summary": "Understood the page.",
+        "criteria": [{"id": "tasks-completed", "result": "met", "explanation": "Task completed."},
+                     {"id": "tasks-blocked", "result": "not-met", "explanation": "No blocking issue occurred."}],
+        "blockers": [], "uxFindings": [], "suggestedImprovements": [],
+    }
+
+    class WorkerResponse:
+        def __init__(self, request): self.request = request
+        def __enter__(self):
+            payload = json_module.loads(self.request.data)
+            self.payload = json_module.dumps({"runId": payload["runId"], "runStatus": "completed",
+                "profileId": "persona_fw", "verdict": verdict, "simulationProfile": payload["profile"]}).encode()
+            return self
+        def __exit__(self, *args): pass
+        def read(self): return self.payload
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", lambda request, timeout: WorkerResponse(request))
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Understand the page"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+
+    findings = report["critical_pain_points"]
+    assert not any(item["source"] == "criteria" for item in findings), findings
+    assert findings[0]["title"] == "No pain points detected"
+
+
 def test_existing_sqlite_schema_receives_additive_tenant_columns(tmp_path):
     database = tmp_path / "legacy.db"
     with sqlite3.connect(database) as db:

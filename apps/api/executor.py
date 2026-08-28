@@ -16,6 +16,11 @@ from .store import Store
 
 
 _JOURNEYTEST_SEVERITY_MAP = {"info": "low", "minor": "medium", "major": "high", "critical": "critical"}
+# journeyContract() always emits a single fail criterion with this id (see
+# services/journey-worker/node/src/journeytest.js) -- for a fail criterion,
+# result == "met" means the failure condition occurred (bad); every other
+# criterion in this codebase is a pass criterion, where "not-met"/"blocked" is bad.
+_FAIL_CRITERION_IDS = {"tasks-blocked"}
 
 
 def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
@@ -172,13 +177,26 @@ class JobExecutor:
                         "source": bucket, "runId": run_id, "personaId": persona_id,
                     })
             for criterion in verdict.get("criteria", []):
-                result = criterion.get("result")
-                if result not in ("not-met", "blocked"):
+                result, criterion_id = criterion.get("result"), criterion.get("id")
+                # journeyContract() (services/journey-worker/node/src/journeytest.js)
+                # always emits exactly one pass criterion ("tasks-completed": bad
+                # when not-met/blocked) and one fail criterion ("tasks-blocked": bad
+                # when *met*, i.e. the failure condition actually occurred -- for a
+                # fail criterion, "not-met" is the GOOD outcome and must not be
+                # reported as a pain point.
+                # "blocked" (the run couldn't even assess the criterion) is bad
+                # regardless of criterion polarity; only "met" vs. "not-met" flip
+                # between pass and fail criteria.
+                if criterion_id in _FAIL_CRITERION_IDS:
+                    is_pain_point = result in ("met", "blocked")
+                else:
+                    is_pain_point = result in ("not-met", "blocked")
+                if not is_pain_point:
                     continue
                 findings.append({
-                    "severity": "critical" if result == "blocked" else "high",
-                    "category": "blocker" if result == "blocked" else "ux",
-                    "title": f"Pass criterion {result}: {criterion.get('id')}",
+                    "severity": "critical" if result == "blocked" or criterion_id in _FAIL_CRITERION_IDS else "high",
+                    "category": "blocker" if result == "blocked" or criterion_id in _FAIL_CRITERION_IDS else "ux",
+                    "title": f"Pass criterion {result}: {criterion_id}",
                     "summary": criterion.get("explanation") or "",
                     "evidence": _evidence_reference_summary(criterion.get("evidence")),
                     "source": "criteria", "runId": run_id, "personaId": persona_id,
