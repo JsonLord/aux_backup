@@ -240,7 +240,7 @@ def _read_example_persona_file(example_file):
     return name, bio, raw_persona
 
 
-def load_example_persona(example_file, persona_client=None, compile_behavior=True):
+def load_example_persona(example_file, persona_client=None, compile_behavior=True, seed=1):
     """Load a bundled example persona (e.g. Friedrich_Wolf.agent.json).
 
     When compile_behavior is True (the default, needed for journey testing --
@@ -261,7 +261,7 @@ def load_example_persona(example_file, persona_client=None, compile_behavior=Tru
     if not compile_behavior:
         return {"name": name, "minibio": bio, "persona": raw_persona}
     compiled = (persona_client or persona_runtime).compile(
-        raw_persona, scenario=f"Example persona preview: {name}", seed=1)
+        raw_persona, scenario=f"Example persona preview: {name}", seed=seed)
     compiled["name"] = name
     compiled["minibio"] = bio
     return compiled
@@ -271,8 +271,17 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
     if force_method == "Example Persona" and example_file:
         add_log(f"Loading example persona from {example_file}...")
         try:
-            compiled = load_example_persona(example_file, persona_client, compile_behavior=compile_behavior)
-            return [compiled] * int(num_personas)
+            if not compile_behavior:
+                # Preview-only: no network call, no distinct identity needed.
+                compiled = load_example_persona(example_file, persona_client, compile_behavior=False)
+                return [compiled] * int(num_personas)
+            # Compile once per requested persona with a distinct seed, so each
+            # gets its own id and its own seed-varied behavior/ability sample --
+            # requesting N personas from one fixed example must not silently
+            # collapse into N references to the exact same persona (breaks
+            # cross-persona synthesis, which groups findings by persona id).
+            return [load_example_persona(example_file, persona_client, compile_behavior=True, seed=seed)
+                    for seed in range(1, int(num_personas) + 1)]
         except Exception as e:
             add_log(f"Failed to load example persona: {e}")
 
@@ -1387,7 +1396,9 @@ if __name__ == "__main__":
                 # (e.g. "Friedrich_Wolf.agent.json") instead -- the recommended
                 # default for exercising the rest of the pipeline (journey run,
                 # report) without paying live generation latency/cost each time.
-                personas = [load_example_persona(example_persona, personas_client)] * int(payload.get("persona_count", 1))
+                persona_count = int(payload.get("persona_count", 1))
+                personas = [load_example_persona(example_persona, personas_client, compile_behavior=True, seed=seed)
+                            for seed in range(1, persona_count + 1)]
             else:
                 personas = personas_client.generate(payload["theme"], payload["customer_profile"],
                                                     int(payload.get("persona_count", 5)),
