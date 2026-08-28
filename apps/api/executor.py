@@ -134,7 +134,8 @@ class JobExecutor:
                     raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)
-            vision_findings, vision_error = self._vision_critique_journeys(journeys, tasks, personas, data.get("url"))
+            cohort_runs, screenshot_bytes, vision_error = self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
+            vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             findings.extend(vision_findings)
             evidence_language, journey_status = "observed", "completed"
             limitations = [
@@ -144,11 +145,11 @@ class JobExecutor:
             ]
             if vision_findings:
                 limitations.append(
-                    "Findings tagged source=eyeson-vision are a real vision-model critique of actual "
-                    "JourneyTest screenshots (grounded against a small curated UX-heuristics corpus), "
-                    "not the deterministic behavior-transition pain-point model in spec.md section 20 "
-                    "(that model requires the native fixture engine's elementMap/behavior-transition "
-                    "evidence contract, which live JourneyTest runs do not produce)."
+                    "Findings tagged source=eyeson-vision-synthesis are cross-persona-aggregated (spec.md "
+                    "section 20/21 cohort/root-cause aggregation): a real vision-model critique of actual "
+                    "JourneyTest screenshots, grounded against a small curated UX-heuristics corpus, then "
+                    "synthesized across every persona that hit the same underlying issue -- never a single "
+                    "persona's individual citation, even when only one persona ran."
                 )
             elif vision_error:
                 limitations.append(f"Vision-based UX critique was attempted but failed: {vision_error}")
@@ -284,107 +285,131 @@ class JobExecutor:
         except (KeyError, TypeError, ValueError, OSError):
             return None
 
+    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
     @classmethod
-    def _vision_critique_journeys(cls, journeys: list[dict[str, Any]], tasks: list[str],
-                                   personas: list[dict[str, Any]], url: str | None) -> tuple[list[dict[str, Any]], str | None]:
-        """Stage 2 of the two-stage UX feedback model (spec.md sections 19-21):
-        independent of whether JourneyTest's own task-completion verdict (stage 1,
-        _pain_points_from_journeys) found a blocker, ask a real vision model
-        (services/eyeson-worker's new /v1/journey-evidence-analyses) to critique a
-        bounded sample of the run's actual screenshots, referenced against
-        journeytest-core's own semantic element snapshots so a finding can be tied
-        to a specific place on the screenshot (cropped into `screenshotCrop`),
-        grounded against a curated UX-heuristics corpus. Best-effort: a failure
-        here never fails the run -- stage 1's findings still stand on their own.
-        """
+    def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
+                                     personas: list[dict[str, Any]], url: str | None
+                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], str | None]:
+        """Critique a bounded, evenly-spaced sample of each run's real screenshots
+        with a real vision model (services/eyeson-worker's /v1/journey-evidence-
+        analyses), referenced against journeytest-core's own semantic element
+        snapshots. Returns (cohort_runs, screenshot_bytes_by_ref, error) --
+        cohort_runs is one entry per persona, each carrying the full UXPainPoint
+        records that persona's screenshots produced, ready for
+        _synthesize_pain_points' cross-persona aggregation. Best-effort: a
+        failure here never fails the run -- stage 1's findings still stand on
+        their own."""
         worker_url = os.getenv("EYESON_WORKER_URL", "http://127.0.0.1:8081")
         try:
             limit = int(os.getenv("EYESON_VISION_SCREENSHOT_LIMIT", "3"))
         except (TypeError, ValueError):
             limit = 3
         task_summary = "; ".join(tasks)
-        findings: list[dict[str, Any]] = []
+        cohort_runs: list[dict[str, Any]] = []
+        screenshot_bytes: dict[str, bytes] = {}
         attempted, last_error = False, None
         for journey, persona in zip(journeys, personas):
             artifacts = journey.get("artifacts") or {}
             screenshots, snapshots = artifacts.get("screenshots") or [], artifacts.get("snapshots") or []
-            if not screenshots:
-                continue
-            persona_summary = persona.get("minibio") or (persona.get("persona") or {}).get("name")
-            for screenshot_path in cls._evenly_spaced(screenshots, max(1, limit)):
-                attempted = True
-                try:
-                    image_bytes = Path(screenshot_path).read_bytes()
-                except OSError as error:
-                    last_error = str(error)
-                    continue
-                elements = cls._elements_for_screenshot(screenshot_path, snapshots)
-                payload = json.dumps({
-                    "imageBase64": base64.b64encode(image_bytes).decode("ascii"),
-                    "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
-                }).encode()
-                call = request.Request(f"{worker_url.rstrip('/')}/v1/journey-evidence-analyses",
-                    data=payload, headers={"content-type": "application/json"}, method="POST")
-                try:
-                    with request.urlopen(call, timeout=float(os.getenv("EYESON_VISION_TIMEOUT", "90"))) as response:
-                        result = json.loads(response.read())
-                except (request.HTTPError, OSError, ValueError) as error:
-                    last_error = str(error)
-                    continue
-                for item in result.get("findings", []):
-                    crop = cls._crop_element_data_uri(image_bytes, item.get("box"))
-                    grounding_refs = ((item.get("grounding") or {}).get("references")) or []
-                    evidence_parts = [f"screenshot: {screenshot_path}"]
-                    if item.get("elementSelector"):
-                        evidence_parts.append(f"element: {item['elementSelector']}")
-                    if grounding_refs:
-                        evidence_parts.append("grounded in " + "; ".join(
-                            f"{ref.get('source')}: {ref.get('principle') or ref.get('title')}" for ref in grounding_refs))
-                    finding = {
-                        "severity": item.get("severity", "medium"), "category": item.get("category", "usability"),
-                        "title": item.get("title", "Vision critique finding"), "summary": item.get("description", ""),
-                        "recommendation": item.get("recommendation"), "evidence": "; ".join(evidence_parts),
-                        "source": "eyeson-vision", "runId": journey.get("runId"), "personaId": persona.get("id"),
-                    }
-                    if crop:
-                        finding["screenshotCrop"] = crop
-                    findings.append(finding)
+            pain_points: list[dict[str, Any]] = []
+            if screenshots:
+                persona_summary = persona.get("minibio") or (persona.get("persona") or {}).get("name")
+                for step_index, screenshot_path in enumerate(cls._evenly_spaced(screenshots, max(1, limit))):
+                    attempted = True
+                    try:
+                        image_bytes = Path(screenshot_path).read_bytes()
+                    except OSError as error:
+                        last_error = str(error)
+                        continue
+                    screenshot_bytes[screenshot_path] = image_bytes
+                    elements = cls._elements_for_screenshot(screenshot_path, snapshots)
+                    payload = json.dumps({
+                        "imageBase64": base64.b64encode(image_bytes).decode("ascii"),
+                        "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
+                        "runId": journey.get("runId"), "userId": persona.get("id"),
+                        "stepId": f"vision-{step_index + 1}", "screenshotRef": screenshot_path,
+                    }).encode()
+                    call = request.Request(f"{worker_url.rstrip('/')}/v1/journey-evidence-analyses",
+                        data=payload, headers={"content-type": "application/json"}, method="POST")
+                    try:
+                        with request.urlopen(call, timeout=float(os.getenv("EYESON_VISION_TIMEOUT", "90"))) as response:
+                            result = json.loads(response.read())
+                    except (request.HTTPError, OSError, ValueError) as error:
+                        last_error = str(error)
+                        continue
+                    pain_points.extend(result.get("painPoints", []))
+            cohort_runs.append({
+                "runId": journey.get("runId"), "profileId": persona.get("id"),
+                "iterationId": journey.get("runId"), "verdict": (journey.get("verdict") or {}).get("status"),
+                "simulationProfile": {"behavior": persona.get("behavior", {})}, "painPoints": pain_points,
+            })
         if not attempted:
-            return [], None
-        return cls._dedupe_vision_findings(findings), (last_error if not findings and last_error else None)
-
-    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+            return [], {}, None
+        return cohort_runs, screenshot_bytes, (last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
 
     @classmethod
-    def _dedupe_vision_findings(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """The same real issue (e.g. a page-wide rendering bug) can legitimately
-        show up on more than one sampled screenshot from the same run, producing
-        near-identical findings that read as noise rather than confirmation.
-        Collapse findings sharing a (title, category) key -- keeping the highest
-        severity and first crop seen, and folding every occurrence's evidence
-        into one list -- instead of listing the same finding once per screenshot."""
-        merged: dict[tuple[str, str], dict[str, Any]] = {}
-        order: list[tuple[str, str]] = []
-        for finding in findings:
-            key = (finding["title"].strip().lower(), finding.get("category", ""))
-            if key not in merged:
-                merged[key] = {**finding, "evidence": [finding["evidence"]]}
-                order.append(key)
+    def _synthesize_pain_points(cls, cohort_runs: list[dict[str, Any]], screenshot_bytes: dict[str, bytes]) -> list[dict[str, Any]]:
+        """Cross-persona synthesis (spec.md's cohort/root-cause aggregation,
+        services/eyeson-worker/node/src/aggregate.js's aggregateCohort -- real,
+        tested code that existed but was never wired to a live evidence source
+        before this). Groups every persona's vision-critique pain points by
+        shared route/elements/category/mechanism into root causes and returns
+        the SYNTHESIZED result: every finding here describes how many personas
+        hit it, the average estimated behavioral impact, and combined
+        alternatives -- never a single persona's individual citation, even when
+        only one persona ran (that just produces a root cause with one affected
+        user, through the same synthesis path, not a special case)."""
+        worker_url = os.getenv("EYESON_WORKER_URL", "http://127.0.0.1:8081")
+        payload = json.dumps({"runs": cohort_runs}).encode()
+        call = request.Request(f"{worker_url.rstrip('/')}/v1/cohort-aggregation",
+            data=payload, headers={"content-type": "application/json"}, method="POST")
+        try:
+            with request.urlopen(call, timeout=float(os.getenv("EYESON_VISION_TIMEOUT", "90"))) as response:
+                root_causes = json.loads(response.read()).get("rootCauses", [])
+        except (request.HTTPError, OSError, ValueError):
+            return []
+        pain_point_by_id = {point["id"]: point for run in cohort_runs for point in run["painPoints"]}
+        findings = []
+        for root_cause in root_causes:
+            member_points = [pain_point_by_id[pid] for pid in root_cause["painPointIds"] if pid in pain_point_by_id]
+            if not member_points:
                 continue
-            existing = merged[key]
-            existing["evidence"].append(finding["evidence"])
-            if cls._SEVERITY_RANK.get(finding.get("severity"), 0) > cls._SEVERITY_RANK.get(existing.get("severity"), 0):
-                existing["severity"] = finding["severity"]
-            if not existing.get("screenshotCrop") and finding.get("screenshotCrop"):
-                existing["screenshotCrop"] = finding["screenshotCrop"]
-        deduped = []
-        for key in order:
-            finding = merged[key]
-            occurrences = finding.pop("evidence")
-            finding["evidence"] = occurrences[0] if len(occurrences) == 1 else \
-                f"seen on {len(occurrences)} screenshots -- " + " | ".join(occurrences)
-            deduped.append(finding)
-        return deduped
+            representative = member_points[0]
+            severity = max((point.get("severity", "medium") for point in member_points),
+                           key=lambda value: cls._SEVERITY_RANK.get(value, 1))
+            affected = len(root_cause["affectedUsers"])
+            impact = root_cause["averageStateImpact"]
+            crop = None
+            element = (representative.get("elements") or [{}])[0]
+            if element.get("box") and representative.get("screenshotRef") in screenshot_bytes:
+                crop = cls._crop_element_data_uri(screenshot_bytes[representative["screenshotRef"]], element["box"])
+            alternatives = root_cause.get("alternatives") or []
+            recommendation = alternatives[0]["proposedChange"] if alternatives else None
+            susceptible_traits = [trait for trait, correlation in (root_cause.get("personaSusceptibility") or {}).items()
+                                   if isinstance(correlation, (int, float)) and abs(correlation) >= 0.6]
+            summary_parts = [representative.get("summary", "")]
+            if affected > 1:
+                summary_parts.append(f"Seen across {affected} of the tested personas "
+                                      f"({root_cause['affectedIterations'].__len__()} run(s)).")
+            if susceptible_traits:
+                summary_parts.append(f"More pronounced for personas with distinctive {', '.join(susceptible_traits)}.")
+            finding = {
+                "severity": severity, "category": root_cause.get("category", "usability"),
+                "title": representative.get("title", "Synthesized UX finding"),
+                "summary": " ".join(part for part in summary_parts if part),
+                "recommendation": recommendation,
+                "alternatives": [{"proposedChange": alt["proposedChange"], "rationale": alt.get("rationale"),
+                                  "effort": alt.get("effort")} for alt in alternatives],
+                "evidence": f"synthesized from {len(member_points)} observation(s) across {affected} persona(s); "
+                            f"estimated impact: frustration {impact['frustration']:.2f}, "
+                            f"confusion {impact['confusion']:.2f}, trust erosion {-impact['trust']:.2f}",
+                "affectedPersonas": affected, "source": "eyeson-vision-synthesis",
+            }
+            if crop:
+                finding["screenshotCrop"] = crop
+            findings.append(finding)
+        return findings
 
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]

@@ -277,21 +277,25 @@ def test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point(tmp_path
     assert findings[0]["title"] == "No pain points detected"
 
 
-def test_vision_critique_pairs_screenshot_with_its_snapshot_and_crops_the_finding(tmp_path, monkeypatch):
+def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path, monkeypatch):
     """Stage 2 of the two-stage UX feedback model: real screenshots from a
     JourneyTest run get critiqued by a (mocked) vision model, matched to their
-    semantic snapshot by filename stem so a finding can reference a real element
-    and get a cropped image of exactly the region it's about."""
+    semantic snapshot by filename stem so a finding can reference a real
+    element and get a cropped image of the region it's about. The two
+    personas' pain points then go through real cross-persona synthesis
+    (aggregateCohort, mocked here at the HTTP boundary since it's already
+    covered directly by services/eyeson-worker/node/test/visionCritique.test.js)
+    -- the report must show the synthesized result, not per-persona citations."""
     import json as json_module
     from PIL import Image
 
     store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
     session = store.create_session({"metadata": {}, "external_ref": {}})
-    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+    personas = [store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
         "content_type": "application/json",
-        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "minibio": "A busy shopper",
+        "content": {"id": pid, "persona": {"name": name}, "minibio": f"A {name} persona",
                     "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
-        "metadata": {}})
+        "metadata": {}}) for pid, name in [("persona_ada", "impatient"), ("persona_lin", "patient")]]
 
     run_dir = tmp_path / "run"
     (run_dir / "screenshots").mkdir(parents=True)
@@ -307,6 +311,24 @@ def test_vision_critique_pairs_screenshot_with_its_snapshot_and_crops_the_findin
         "criteria": [{"id": "tasks-completed", "result": "met"}, {"id": "tasks-blocked", "result": "not-met"}],
         "blockers": [], "uxFindings": [], "suggestedImprovements": []}
 
+    def pain_point(pid, run_id):
+        return {"id": f"pain_{pid}", "runId": run_id, "userId": pid, "route": "https://example.com",
+            "stepIds": ["vision-1"], "title": "Ambiguous button label",
+            "summary": "The label does not describe the action.", "severity": "high", "category": "accessibility",
+            "confidence": 0.7, "screenshotRef": str(screenshot_path), "videoTimestampMs": 0,
+            "behavioralImpact": {"frustrationDelta": 0.4, "confusionDelta": 0.3, "trustDelta": -0.1,
+                "cognitiveEffortDelta": 0, "physicalEffortDelta": 0, "elapsedCostMs": 0, "retries": 0, "backtracks": 0},
+            "elements": [{"elementId": "#buy-button", "box": {"x": 20, "y": 30, "width": 60, "height": 20},
+                "role": "trigger", "contribution": 1, "confidence": 0.7}],
+            "diagnosis": {"category": "accessibility", "mechanism": "The label does not describe the action.",
+                "rootCause": "Ambiguous button label", "observedEvidence": [], "behavioralEvidence": [],
+                "personaInteraction": "", "confidence": 0.7},
+            "grounding": {"status": "completed", "references": [{"source": "Nielsen Norman Group", "principle": "Usability heuristic 1"}]},
+            "alternatives": [{"id": f"alt_{pid}", "title": "accessibility alternative", "strategy": "accessibility",
+                "proposedChange": "Use 'Complete purchase'.", "rationale": "Names the action.",
+                "addressesPainPointIds": [f"pain_{pid}"], "expectedImpact": {}, "effort": "low", "confidence": 0.7, "grounding": []}],
+            "overlays": []}
+
     def dispatch(req, timeout):
         class Response:
             def __init__(self, body): self.body = body
@@ -316,22 +338,31 @@ def test_vision_critique_pairs_screenshot_with_its_snapshot_and_crops_the_findin
         payload = json_module.loads(req.data)
         if req.full_url.endswith("/v1/runs"):
             return Response(json_module.dumps({"runId": payload["runId"], "runStatus": "completed",
-                "profileId": "persona_ada", "verdict": verdict, "simulationProfile": payload["profile"],
+                "profileId": payload["profile"]["id"], "verdict": verdict, "simulationProfile": payload["profile"],
                 "artifacts": {"screenshots": [str(screenshot_path)], "snapshots": [str(snapshot_path)]}}).encode())
-        assert req.full_url.endswith("/v1/journey-evidence-analyses")
-        assert payload["elements"][0]["selector"] == "#buy-button"
-        assert payload["personaSummary"] == "A busy shopper"
-        return Response(json_module.dumps({"schemaVersion": "1.0", "findings": [
-            {"category": "accessibility", "severity": "high", "elementSelector": "#buy-button",
-             "title": "Ambiguous button label", "description": "The label does not describe the action.",
-             "recommendation": "Use 'Complete purchase'.", "box": {"x": 20, "y": 30, "width": 60, "height": 20},
-             "grounding": {"status": "completed", "references": [{"source": "Nielsen Norman Group", "principle": "Usability heuristic 1"}]}},
-        ]}).encode())
+        if req.full_url.endswith("/v1/journey-evidence-analyses"):
+            assert payload["elements"][0]["selector"] == "#buy-button"
+            return Response(json_module.dumps({"schemaVersion": "1.0",
+                "painPoints": [pain_point(payload["userId"], payload["runId"])]}).encode())
+        assert req.full_url.endswith("/v1/cohort-aggregation")
+        runs = payload["runs"]
+        assert {run["profileId"] for run in runs} == {"persona_ada", "persona_lin"}
+        all_points = [point for run in runs for point in run["painPoints"]]
+        assert len(all_points) == 2  # one per persona, both fed into aggregation
+        return Response(json_module.dumps({"schemaVersion": "1.0", "rootCauses": [{
+            "id": "root_1", "signature": "sig", "category": "accessibility",
+            "mechanism": "The label does not describe the action.", "elementIds": ["#buy-button"],
+            "painPointIds": [point["id"] for point in all_points],
+            "affectedUsers": ["persona_ada", "persona_lin"], "affectedIterations": [run["runId"] for run in runs],
+            "averageStateImpact": {"frustration": 0.4, "confusion": 0.3, "trust": -0.1}, "abandonmentCount": 0,
+            "personaSusceptibility": {"patience": -0.9},
+            "alternatives": [all_points[0]["alternatives"][0]],
+        }]}).encode())
 
     monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
     monkeypatch.setenv("EYESON_WORKER_URL", "http://eyeson.invalid")
     monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
-    ids = [persona["artifact_id"]]
+    ids = [persona["artifact_id"] for persona in personas]
     job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
         "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
         "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
@@ -341,47 +372,22 @@ def test_vision_critique_pairs_screenshot_with_its_snapshot_and_crops_the_findin
     assert completed["status"] == "succeeded"
     report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
 
-    vision_findings = [item for item in report["critical_pain_points"] if item["source"] == "eyeson-vision"]
+    vision_findings = [item for item in report["critical_pain_points"] if item["source"] == "eyeson-vision-synthesis"]
     assert len(vision_findings) == 1
     finding = vision_findings[0]
     assert finding["title"] == "Ambiguous button label"
     assert finding["severity"] == "high"
-    assert "#buy-button" in finding["evidence"]
-    assert "Nielsen Norman Group" in finding["evidence"]
+    assert finding["affectedPersonas"] == 2
+    assert "2 observation(s) across 2 persona(s)" in finding["evidence"]
+    assert finding["recommendation"] == "Use 'Complete purchase'."
     assert finding["screenshotCrop"].startswith("data:image/png;base64,")
-    # No stage-1 findings (verdict passed cleanly) and no misleading "No pain
-    # points detected" alongside a real stage-2 finding.
+    # Not a per-persona citation list -- one synthesized finding, not two.
+    assert len([item for item in report["critical_pain_points"] if "Ambiguous button label" in item["title"]]) == 1
     assert not any(item["title"] == "No pain points detected" for item in report["critical_pain_points"])
 
     presentation = store.read_artifact(completed["output_artifacts"][1]).decode("utf-8")
     assert "Ambiguous button label" in presentation
     assert '<img src="data:image/png;base64,' in presentation
-
-
-def test_vision_findings_seen_on_multiple_screenshots_are_deduped_not_repeated():
-    """Regression test for a live observation: the same page-wide rendering bug
-    was independently flagged on two different sampled screenshots from one run,
-    producing two near-identical "Infinite repetition of page content" findings
-    in the report. That reads as noise, not confirmation -- collapse them."""
-    findings = [
-        {"severity": "critical", "category": "usability", "title": "Infinite repetition of page content",
-         "summary": "The hero section repeats down the page.", "recommendation": "Fix the render loop.",
-         "evidence": "screenshot: /run/screenshots/001.png", "source": "eyeson-vision", "runId": "run1", "personaId": "p1"},
-        {"severity": "critical", "category": "usability", "title": "Infinite repetition of page content",
-         "summary": "The layout repeats vertically many times.", "recommendation": "Check the layout component.",
-         "evidence": "screenshot: /run/screenshots/007.png", "source": "eyeson-vision", "runId": "run1", "personaId": "p1"},
-        {"severity": "medium", "category": "accessibility", "title": "Low contrast form labels",
-         "summary": "Labels are hard to read.", "evidence": "screenshot: /run/screenshots/001.png",
-         "source": "eyeson-vision", "runId": "run1", "personaId": "p1"},
-    ]
-    deduped = JobExecutor._dedupe_vision_findings(findings)
-    assert len(deduped) == 2
-    repetition = next(item for item in deduped if item["title"] == "Infinite repetition of page content")
-    assert repetition["severity"] == "critical"
-    assert "seen on 2 screenshots" in repetition["evidence"]
-    assert "001.png" in repetition["evidence"] and "007.png" in repetition["evidence"]
-    contrast = next(item for item in deduped if item["title"] == "Low contrast form labels")
-    assert contrast["evidence"] == "screenshot: /run/screenshots/001.png"  # single occurrence, not rewritten
 
 
 def test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype(tmp_path, monkeypatch):
