@@ -42,11 +42,13 @@ class TinyTroupeGenerator:
             generate = factory.generate_people
             arguments = {"number_of_people": count}
             try:
-                accepts_seed = "seed" in inspect.signature(generate).parameters
+                generate_params = inspect.signature(generate).parameters
             except (TypeError, ValueError):
-                accepts_seed = False
-            if accepts_seed:
+                generate_params = {}
+            if "seed" in generate_params:
                 arguments["seed"] = seed
+            if "attempts" in generate_params:
+                arguments["attempts"] = self._generation_attempts()
             try:
                 people = generate(**arguments)
             except Exception:
@@ -58,7 +60,17 @@ class TinyTroupeGenerator:
                                               "tinytroupe-offline-fallback-after-runtime-error",
                                               allow_compiler_fallback=True)
             raw = [self._serialize_tiny_person(person) for person in people]
-            return [self._profile(item, scenario, seed + index, "tinytroupe@a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4") for index, item in enumerate(raw)]
+            model_label = "tinytroupe@a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4"
+            # Compile every generated persona's behavior/ability profile concurrently
+            # (each call already parallelizes its own behavior+ability pair -- see
+            # _profile). TinyTroupe's own raw-generation phase above has already
+            # finished by this point, so this doesn't contend with it; it shares the
+            # same max_concurrent_model_calls semaphore that phase used.
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(raw))) as executor:
+                return list(executor.map(
+                    lambda args: self._profile(args[1], scenario, seed + args[0], model_label),
+                    enumerate(raw),
+                ))
         # Offline fallback remains explicit and cannot satisfy pinned-package acceptance.
         return self._offline_profiles(theme, customer_profile, count, scenario, seed,
                                       "tinytroupe-offline-placeholder")
@@ -99,6 +111,38 @@ class TinyTroupeGenerator:
             return None
         return value if value > 0 else None
 
+    @staticmethod
+    def _int_env_override(name: str):
+        """Read a positive-int env override, or None to fall back to config.ini."""
+        raw = os.getenv(name)
+        if not raw:
+            return None
+        try:
+            value = int(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @staticmethod
+    def _float_env_override(name: str):
+        raw = os.getenv(name)
+        if not raw:
+            return None
+        try:
+            value = float(raw)
+        except (TypeError, ValueError):
+            return None
+        return value if value > 0 else None
+
+    @classmethod
+    def _generation_attempts(cls) -> int:
+        """How many times TinyTroupe retries a single persona's own generation
+        call (name-collision or a malformed spec) before giving up on that one
+        person. TinyTroupe 0.7 defaults this to 10; against a fast/reliable
+        provider that mostly just wastes time on a single stuck persona, so it is
+        capped lower here. Override with PERSONA_GENERATION_ATTEMPTS."""
+        return cls._int_env_override("PERSONA_GENERATION_ATTEMPTS") or 3
+
     @classmethod
     def _configure_openai_compatible(cls, config_manager, clients):
         """Map Helmholtz settings onto TinyTroupe's registered OpenAI client.
@@ -115,6 +159,23 @@ class TinyTroupeGenerator:
         max_completion_tokens = cls._max_completion_tokens()
         if max_completion_tokens is not None:
             overrides["max_completion_tokens"] = max_completion_tokens
+        # These all default in config.ini to values tuned defensively for
+        # Blablador's unreliable gateway (max_concurrent_model_calls=4,
+        # max_attempts=5, exponential_backoff_factor=5, timeout=480). Against a
+        # fast/reliable provider those mostly just throttle a batch into more
+        # sequential "waves" than necessary and let one stuck call block for up
+        # to ~13 minutes of pure backoff. Each is overridable independently via
+        # OPENAI_* env vars without editing config.ini.
+        for config_key, env_name, parser in (
+            ("max_concurrent_model_calls", "OPENAI_MAX_CONCURRENT_MODEL_CALLS", cls._int_env_override),
+            ("max_attempts", "OPENAI_MAX_ATTEMPTS", cls._int_env_override),
+            ("exponential_backoff_factor", "OPENAI_EXPONENTIAL_BACKOFF_FACTOR", cls._float_env_override),
+            ("waiting_time", "OPENAI_WAITING_TIME", cls._float_env_override),
+            ("timeout", "OPENAI_TIMEOUT", cls._int_env_override),
+        ):
+            value = parser(env_name)
+            if value is not None:
+                overrides[config_key] = value
         config_manager.update_multiple(overrides)
         clients.force_api_type("openai")
         cls._patch_system_message_ordering()

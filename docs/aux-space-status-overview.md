@@ -10,6 +10,46 @@ written from live read-only probes plus a code review. It was then updated after
 redeploying the Space four times and driving real, admin-authenticated batch persona
 generation against it end to end — see §0 for what that testing found.
 
+## -3. Speed: concurrency + retry tuning
+
+Follow-up to §-2's 363s/3-persona measurement. Implemented every lever identified
+there:
+
+- `MAX_CONCURRENT_MODEL_CALLS` (the `threading.BoundedSemaphore` gating every
+  outgoing chat-completion call process-wide): `4` -> `12` in `config.ini`. A
+  batch of N personas needs up to N concurrent calls per generation "wave"
+  (TinyTroupe's own raw-generation phase, then behavior+ability compilation);
+  4 throttled a 10-person batch into 3 sequential waves per phase for no reason
+  once the backend can sustain more.
+- Retry/backoff tuned down to match a fast/reliable provider instead of
+  Blablador's: `timeout` 480->180s, `max_attempts` 5->3,
+  `exponential_backoff_factor` 5->2 (worst-case pure backoff across retries for
+  one call drops from ~13 minutes to ~7s). Each of these five knobs, plus the
+  concurrency ceiling, is independently overridable via `OPENAI_*` env vars
+  without touching `config.ini` (`services/persona_service/generator.py`,
+  `_configure_openai_compatible`).
+- `factory.generate_people(..., attempts=3)` now passed explicitly (TinyTroupe
+  0.7 defaults this to `10` retries for a single problematic persona's own
+  generation call before giving up on it). Override via
+  `PERSONA_GENERATION_ATTEMPTS`.
+- `generator.py`'s outer per-persona compilation loop (behavior+ability, one
+  call each, already parallelized against each other per persona) now also
+  runs **across all N personas concurrently** via `ThreadPoolExecutor`, instead
+  of looping through them one at a time after TinyTroupe's own raw-generation
+  phase finishes. This was the largest hidden serialization: for a 10-person
+  batch it turned "10 sequential rounds of paired calls" into one wave (up to
+  the concurrency ceiling above).
+- `app.py`'s `generate_tasks` retry wait: hardcoded `35s` (tuned for
+  Blablador's proxy errors) -> `3s` default, overridable via
+  `OPENAI_TASK_RETRY_WAIT_SECONDS`.
+
+Verified: unit tests for every new env-override helper and the
+`_configure_openai_compatible` wiring; a mocked-TinyTroupe test confirming the
+parallelized outer loop still preserves persona order and per-persona seed
+assignment correctly (order is not guaranteed by thread completion order, only
+by `ThreadPoolExecutor.map`'s input-order guarantee); full contract suite green.
+Live timing after this change: see the measurement appended below once run.
+
 ## -2. Milestone: first fully completed live batch persona generation (2026-08-28)
 
 A real batch of 3 TinyTroupe personas was generated end to end through the live

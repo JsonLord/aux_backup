@@ -56,6 +56,16 @@ try:
         OPENAI_MAX_COMPLETION_TOKENS = None
 except (TypeError, ValueError):
     OPENAI_MAX_COMPLETION_TOKENS = 8192
+# Wait between retry attempts in generate_tasks. Was a hardcoded 35s tuned for
+# Blablador's proxy errors/rate limiting; against the fast self-hosted router that
+# mostly just wastes time when a retry is actually needed. Overridable via
+# OPENAI_TASK_RETRY_WAIT_SECONDS.
+try:
+    TASK_RETRY_WAIT_SECONDS = float(os.environ.get("OPENAI_TASK_RETRY_WAIT_SECONDS", "3"))
+    if TASK_RETRY_WAIT_SECONDS < 0:
+        TASK_RETRY_WAIT_SECONDS = 3.0
+except (TypeError, ValueError):
+    TASK_RETRY_WAIT_SECONDS = 3.0
 control_plane = ControlPlaneClient()
 persona_runtime = PersonaRuntimeClient()
 
@@ -528,8 +538,7 @@ def generate_tasks(theme, customer_profile, url):
             print(f"Attempt {attempt+1} for task generation...")
             if attempt > 0:
                 print(f"Retrying in parallel with {models_to_try}")
-                # Wait 35s if it's a retry (likely Proxy Error or Rate Limit)
-                time.sleep(35)
+                time.sleep(TASK_RETRY_WAIT_SECONDS)
                 response = call_llm_parallel(client, models_to_try, [{"role": "user", "content": prompt}], response_format={"type": "json_object"})
             else:
                 response = client.chat.completions.create(
