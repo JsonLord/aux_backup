@@ -2,6 +2,44 @@
 
 Date: 2026-08-27, updated 2026-08-28 (multiple passes)
 
+## -9. Persistent local storage for sessions/reports/artifacts across restarts
+
+Live multi-persona verification (two `Friedrich_Wolf` example personas,
+distinct ids/seeds, against `https://leon4gr45-nova-right-nav.hf.space`)
+confirmed the previous identity-collapse fix works end-to-end in production,
+and surfaced a real limitation in cross-persona synthesis: `aggregate.js`'s
+`rootCauseSignature` groups on an exact string match of the vision model's
+free-form `diagnosis.mechanism` text, so near-duplicate findings from
+different personas describing the same real issue in different words (e.g.
+"Primary navigation hidden inside a dropdown" vs. "Unconventional tab-based
+navigation dropdown" from the two runs) stayed as separate single-persona
+root causes instead of merging. Left open as a follow-up (needs a semantic
+or category+element-overlap grouping key, not exact-text matching).
+
+Separately, the "Workspace session / Refresh sessions / Report / Load
+report / Download report" flow (Report Viewer, Persona Thought Logs,
+Presentations, Slide deck, and Evidence Artifacts tabs) was already real
+and workspace-scoped -- `apps/api/store.py`'s SQLite `Store` keys every
+session/job/artifact row by `workspace_id`, and artifacts are written under
+`<ARTIFACT_ROOT>/<workspace_id>/<session_id>/<artifact_id>`. The actual gap:
+the live Space's `Dockerfile` points `DATABASE_URL`/`ARTIFACT_ROOT` at
+`/home/user/data` and `/home/user/artifacts`, which are inside the
+container's own ephemeral filesystem -- every redeploy or Space restart
+wiped all sessions and reports, defeating "current sessions to load and
+follow along." `spec.md` calls for Cloudflare R2 (S3-compatible) as the
+*production* artifact store but explicitly requires "support local-only
+runs" too, so switching this demo Space to R2 isn't the right fix; the
+SQLite/local-filesystem path is correct here, it just needs to survive a
+restart. `spaces/aux-live/start-live.sh` now detects Hugging Face Spaces'
+persistent storage volume (mounted at `/data` when the Space has the
+Persistent Storage add-on attached) at container start: if `/data` is a
+writable mount, `DATABASE_URL`, `PERSONA_DATABASE_PATH`, `ARTIFACT_ROOT`,
+and `JOURNEY_ARTIFACT_ROOT` are redirected under it before any service
+starts; otherwise the Dockerfile's original ephemeral paths are used
+unchanged, so this is a no-op unless persistent storage is actually
+attached to the Space (a paid HF Spaces setting the user controls, not
+something settable from inside the container).
+
 ## -8. Full UXPainPoint synthesis, dead-code removal, and three tabs made real
 
 User-directed expansion of §-7's stage-2 critique toward spec.md §20's full

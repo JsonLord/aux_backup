@@ -31,6 +31,24 @@ export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"
 export OPENAI_MAX_COMPLETION_TOKENS="${OPENAI_MAX_COMPLETION_TOKENS:-8192}"
 export AGENT_BROWSER_COMMAND="${AGENT_BROWSER_COMMAND:-/home/user/app/spaces/aux-live/agent-browser-container.sh}"
 
+# Prefer Hugging Face Spaces' persistent storage volume (mounted at /data when a
+# Space has the Persistent Storage add-on attached) for the control-plane DB,
+# persona pool DB, and artifact tree, so sessions/reports/artifacts survive Space
+# restarts and redeploys instead of resetting to empty container filesystem every
+# time. Falls back to the Dockerfile's ephemeral /home/user paths when /data isn't
+# a writable mount (no persistent storage attached).
+if [ -d /data ] && ( : > /data/.aux-write-test ) 2>/dev/null; then
+  rm -f /data/.aux-write-test
+  mkdir -p /data/control-plane /data/artifacts
+  export DATABASE_URL="sqlite:////data/control-plane/control-plane.sqlite3"
+  export PERSONA_DATABASE_PATH="/data/control-plane/personas.sqlite3"
+  export ARTIFACT_ROOT="/data/artifacts"
+  export JOURNEY_ARTIFACT_ROOT="/data/artifacts/journeys"
+  echo "[start-live] Using persistent storage at /data for the control-plane DB and artifacts."
+else
+  echo "[start-live] No writable /data mount found; using ephemeral in-container storage ($ARTIFACT_ROOT) -- reports will not survive a Space restart."
+fi
+
 uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 & pids+=("$!")
 uvicorn services.persona_service.main:app --host 127.0.0.1 --port 8090 & pids+=("$!")
 node services/journey-worker/node/src/index.js & pids+=("$!")
