@@ -10,6 +10,7 @@ const { AnalysisQueue, selectScreenBudget } = require("./scheduler");
 const { createAlternativeLineage, addValidationRun } = require("./lineage");
 const { StructuredTracer } = require("./observability");
 const { redactArtifact } = require("./privacy");
+const { critiqueScreenshot } = require("./visionCritique");
 
 const tracer = new StructuredTracer();
 const analysisQueue = new AnalysisQueue({ concurrency: Number(process.env.ANALYSIS_CONCURRENCY || 2),
@@ -56,6 +57,17 @@ const server = http.createServer(async (request, response) => {
       const payload = await body(request);
       const evidence = redactArtifact(payload.evidence);
       return json(response, 201, await analysisQueue.enqueue({ runId: evidence.runId, evidence, options: payload.options }));
+    }
+    if (request.method === "POST" && request.url === "/v1/journey-evidence-analyses") {
+      // Real vision-based UX critique of a live JourneyTest screenshot -- see
+      // visionCritique.js. Distinct from /v1/evidence-analyses, which requires
+      // the native fixture engine's elementMap/behavior-transition evidence
+      // contract that live JourneyTest runs don't produce.
+      const payload = await body(request);
+      if (!payload.imageBase64) return json(response, 422, { error: "invalid_request", message: "imageBase64 is required" });
+      const findings = await critiqueScreenshot({ imageBase64: payload.imageBase64, elements: payload.elements,
+        url: payload.url, task: payload.task, personaSummary: payload.personaSummary, options: payload.options });
+      return json(response, 201, { schemaVersion: "1.0", findings });
     }
     if (request.method === "POST" && request.url === "/v1/evidence-batches") {
       const payload = await body(request);

@@ -277,6 +277,87 @@ def test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point(tmp_path
     assert findings[0]["title"] == "No pain points detected"
 
 
+def test_vision_critique_pairs_screenshot_with_its_snapshot_and_crops_the_finding(tmp_path, monkeypatch):
+    """Stage 2 of the two-stage UX feedback model: real screenshots from a
+    JourneyTest run get critiqued by a (mocked) vision model, matched to their
+    semantic snapshot by filename stem so a finding can reference a real element
+    and get a cropped image of exactly the region it's about."""
+    import json as json_module
+    from PIL import Image
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "minibio": "A busy shopper",
+                    "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
+        "metadata": {}})
+
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "snapshots").mkdir(parents=True)
+    screenshot_path = run_dir / "screenshots" / "step1.png"
+    Image.new("RGB", (200, 150), color="white").save(screenshot_path)
+    snapshot_path = run_dir / "snapshots" / "step1.json"
+    snapshot_path.write_text(json_module.dumps({"elements": [
+        {"selector": "#buy-button", "role": "button", "text": "Buy", "boundingBox": {"x": 20, "y": 30, "width": 60, "height": 20}},
+    ]}))
+
+    verdict = {"status": "passed", "confidence": "high", "summary": "Task completed.",
+        "criteria": [{"id": "tasks-completed", "result": "met"}, {"id": "tasks-blocked", "result": "not-met"}],
+        "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+
+    def dispatch(req, timeout):
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return self.body
+        payload = json_module.loads(req.data)
+        if req.full_url.endswith("/v1/runs"):
+            return Response(json_module.dumps({"runId": payload["runId"], "runStatus": "completed",
+                "profileId": "persona_ada", "verdict": verdict, "simulationProfile": payload["profile"],
+                "artifacts": {"screenshots": [str(screenshot_path)], "snapshots": [str(snapshot_path)]}}).encode())
+        assert req.full_url.endswith("/v1/journey-evidence-analyses")
+        assert payload["elements"][0]["selector"] == "#buy-button"
+        assert payload["personaSummary"] == "A busy shopper"
+        return Response(json_module.dumps({"schemaVersion": "1.0", "findings": [
+            {"category": "accessibility", "severity": "high", "elementSelector": "#buy-button",
+             "title": "Ambiguous button label", "description": "The label does not describe the action.",
+             "recommendation": "Use 'Complete purchase'.", "box": {"x": 20, "y": 30, "width": 60, "height": 20},
+             "grounding": {"status": "completed", "references": [{"source": "Nielsen Norman Group", "principle": "Usability heuristic 1"}]}},
+        ]}).encode())
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setenv("EYESON_WORKER_URL", "http://eyeson.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+
+    vision_findings = [item for item in report["critical_pain_points"] if item["source"] == "eyeson-vision"]
+    assert len(vision_findings) == 1
+    finding = vision_findings[0]
+    assert finding["title"] == "Ambiguous button label"
+    assert finding["severity"] == "high"
+    assert "#buy-button" in finding["evidence"]
+    assert "Nielsen Norman Group" in finding["evidence"]
+    assert finding["screenshotCrop"].startswith("data:image/png;base64,")
+    # No stage-1 findings (verdict passed cleanly) and no misleading "No pain
+    # points detected" alongside a real stage-2 finding.
+    assert not any(item["title"] == "No pain points detected" for item in report["critical_pain_points"])
+
+    presentation = store.read_artifact(completed["output_artifacts"][1]).decode("utf-8")
+    assert "Ambiguous button label" in presentation
+    assert '<img src="data:image/png;base64,' in presentation
+
+
 def test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype(tmp_path, monkeypatch):
     """ui_adaptation jobs must actually ask the model to implement the requested
     change, including revising the previous prototype for iterative chat-based

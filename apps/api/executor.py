@@ -5,7 +5,9 @@ JourneyTest worker can replace this development executor without changing client
 """
 from __future__ import annotations
 
+import base64
 from html import escape
+from io import BytesIO
 import json
 import os
 from pathlib import Path
@@ -132,17 +134,30 @@ class JobExecutor:
                     raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)
+            vision_findings, vision_error = self._vision_critique_journeys(journeys, tasks, personas, data.get("url"))
+            findings.extend(vision_findings)
             evidence_language, journey_status = "observed", "completed"
             limitations = [
                 "Findings are JourneyTest's own evidence-grounded verdict (blockers/uxFindings/"
                 "suggestedImprovements/failed pass-criteria) from a real browser run against the "
                 "target URL, not text inferred from the task description.",
-                "Deep Eyeson visual pain-point resolution with element attribution "
-                "(spec.md section 20) is not yet wired to live JourneyTest evidence: "
-                "services/eyeson-worker's evidence analyzer still requires the native "
-                "fixture engine's elementMap/behavior-transition evidence contract, which "
-                "live JourneyTest runs do not yet produce.",
             ]
+            if vision_findings:
+                limitations.append(
+                    "Findings tagged source=eyeson-vision are a real vision-model critique of actual "
+                    "JourneyTest screenshots (grounded against a small curated UX-heuristics corpus), "
+                    "not the deterministic behavior-transition pain-point model in spec.md section 20 "
+                    "(that model requires the native fixture engine's elementMap/behavior-transition "
+                    "evidence contract, which live JourneyTest runs do not produce)."
+                )
+            elif vision_error:
+                limitations.append(f"Vision-based UX critique was attempted but failed: {vision_error}")
+            else:
+                limitations.append(
+                    "Vision-based UX critique (EYESON_WORKER_URL) is not configured for this deployment; "
+                    "critical_pain_points reflect JourneyTest's own task-completion verdict only, not a "
+                    "deeper visual/accessibility critique of the screenshots."
+                )
         else:
             findings = [{"severity": "medium", "category": "ux", "title": f"Validate task clarity: {task}",
                 "summary": "", "evidence": "Inferred from the configured task; JOURNEY_WORKER_URL is not "
@@ -152,6 +167,12 @@ class JobExecutor:
             limitations = ["JOURNEY_WORKER_URL is not configured for this deployment; no live "
                            "browser evidence was collected, so these findings are inferred from "
                            "the configured task text alone."]
+        if worker_url and not findings:
+            findings.append({"severity": "low", "category": "ux", "title": "No pain points detected",
+                "summary": "Neither JourneyTest's verdict nor the vision-based UX critique reported "
+                           "any blockers, UX findings, or failed pass criteria for the configured tasks.",
+                "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
+                "source": "verdict"})
         return {"schema_version": "1.0", "mode": "user_journey", "url": data.get("url"), "executive_summary": f"Prepared {len(tasks)} task scenarios for {len(personas)} synthetic users.", "synthetic_users": personas, "persona_artifacts": persona_artifacts, "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys}, "critical_pain_points": findings, "evidence_language": evidence_language, "limitations": limitations}
 
     @staticmethod
@@ -202,13 +223,135 @@ class JobExecutor:
                     "evidence": _evidence_reference_summary(criterion.get("evidence")),
                     "source": "criteria", "runId": run_id, "personaId": persona_id,
                 })
-        if journeys and not findings:
-            findings.append({"severity": "low", "category": "ux", "title": "No pain points detected",
-                "summary": "JourneyTest's verdict reported no blockers, UX findings, or failed pass "
-                           "criteria for the configured tasks.",
-                "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
-                "source": "verdict"})
         return findings
+
+    @staticmethod
+    def _evenly_spaced(items: list, limit: int) -> list:
+        if len(items) <= limit or limit <= 0:
+            return items
+        step = len(items) / limit
+        return [items[int(index * step)] for index in range(limit)]
+
+    _SNAPSHOT_SUFFIX_PATTERN = re.compile(r"-(before|after|change-\d+)$")
+
+    @classmethod
+    def _stem(cls, path: str) -> str:
+        name = Path(path).stem
+        return cls._SNAPSHOT_SUFFIX_PATTERN.sub("", name)
+
+    @classmethod
+    def _elements_for_screenshot(cls, screenshot_path: str, snapshot_paths: list[str]) -> list[dict]:
+        """Best-effort pairing of a screenshot with the semantic snapshot captured
+        alongside it, by shared filename stem (journeytest-core's uiChangeRecording
+        middleware names paired before/after/change-N screenshots and snapshots
+        with a common stem). Returns [] rather than guessing when no exact stem
+        match exists -- a page-wide vision finding with no element attribution is
+        honest; a wrongly paired element attribution is not."""
+        target_stem = cls._stem(screenshot_path)
+        for snapshot_path in snapshot_paths:
+            if cls._stem(snapshot_path) == target_stem:
+                try:
+                    snapshot = json.loads(Path(snapshot_path).read_text())
+                except (OSError, json.JSONDecodeError):
+                    return []
+                return snapshot.get("elements", []) if isinstance(snapshot, dict) else []
+        return []
+
+    @staticmethod
+    def _crop_element_data_uri(image_bytes: bytes, box: dict[str, Any] | None) -> str | None:
+        """Crop the specific region a vision finding refers to out of the full
+        screenshot, so the UI can show exactly what the finding is about instead
+        of just a wall of text. Returns None (caller shows no image) rather than
+        raising -- a missing crop is a lesser failure than losing the finding."""
+        if not box:
+            return None
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        try:
+            x, y, width, height = float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"])
+            with Image.open(BytesIO(image_bytes)) as image:
+                pad = 12
+                left, top = max(0, int(x - pad)), max(0, int(y - pad))
+                right, bottom = min(image.width, int(x + width + pad)), min(image.height, int(y + height + pad))
+                if right <= left or bottom <= top:
+                    return None
+                cropped = image.crop((left, top, right, bottom))
+                buffer = BytesIO()
+                cropped.save(buffer, format="PNG")
+                return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+        except (KeyError, TypeError, ValueError, OSError):
+            return None
+
+    @classmethod
+    def _vision_critique_journeys(cls, journeys: list[dict[str, Any]], tasks: list[str],
+                                   personas: list[dict[str, Any]], url: str | None) -> tuple[list[dict[str, Any]], str | None]:
+        """Stage 2 of the two-stage UX feedback model (spec.md sections 19-21):
+        independent of whether JourneyTest's own task-completion verdict (stage 1,
+        _pain_points_from_journeys) found a blocker, ask a real vision model
+        (services/eyeson-worker's new /v1/journey-evidence-analyses) to critique a
+        bounded sample of the run's actual screenshots, referenced against
+        journeytest-core's own semantic element snapshots so a finding can be tied
+        to a specific place on the screenshot (cropped into `screenshotCrop`),
+        grounded against a curated UX-heuristics corpus. Best-effort: a failure
+        here never fails the run -- stage 1's findings still stand on their own.
+        """
+        worker_url = os.getenv("EYESON_WORKER_URL", "http://127.0.0.1:8081")
+        try:
+            limit = int(os.getenv("EYESON_VISION_SCREENSHOT_LIMIT", "3"))
+        except (TypeError, ValueError):
+            limit = 3
+        task_summary = "; ".join(tasks)
+        findings: list[dict[str, Any]] = []
+        attempted, last_error = False, None
+        for journey, persona in zip(journeys, personas):
+            artifacts = journey.get("artifacts") or {}
+            screenshots, snapshots = artifacts.get("screenshots") or [], artifacts.get("snapshots") or []
+            if not screenshots:
+                continue
+            persona_summary = persona.get("minibio") or (persona.get("persona") or {}).get("name")
+            for screenshot_path in cls._evenly_spaced(screenshots, max(1, limit)):
+                attempted = True
+                try:
+                    image_bytes = Path(screenshot_path).read_bytes()
+                except OSError as error:
+                    last_error = str(error)
+                    continue
+                elements = cls._elements_for_screenshot(screenshot_path, snapshots)
+                payload = json.dumps({
+                    "imageBase64": base64.b64encode(image_bytes).decode("ascii"),
+                    "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
+                }).encode()
+                call = request.Request(f"{worker_url.rstrip('/')}/v1/journey-evidence-analyses",
+                    data=payload, headers={"content-type": "application/json"}, method="POST")
+                try:
+                    with request.urlopen(call, timeout=float(os.getenv("EYESON_VISION_TIMEOUT", "90"))) as response:
+                        result = json.loads(response.read())
+                except (request.HTTPError, OSError, ValueError) as error:
+                    last_error = str(error)
+                    continue
+                for item in result.get("findings", []):
+                    crop = cls._crop_element_data_uri(image_bytes, item.get("box"))
+                    grounding_refs = ((item.get("grounding") or {}).get("references")) or []
+                    evidence_parts = [f"screenshot: {screenshot_path}"]
+                    if item.get("elementSelector"):
+                        evidence_parts.append(f"element: {item['elementSelector']}")
+                    if grounding_refs:
+                        evidence_parts.append("grounded in " + "; ".join(
+                            f"{ref.get('source')}: {ref.get('principle') or ref.get('title')}" for ref in grounding_refs))
+                    finding = {
+                        "severity": item.get("severity", "medium"), "category": item.get("category", "usability"),
+                        "title": item.get("title", "Vision critique finding"), "summary": item.get("description", ""),
+                        "recommendation": item.get("recommendation"), "evidence": "; ".join(evidence_parts),
+                        "source": "eyeson-vision", "runId": journey.get("runId"), "personaId": persona.get("id"),
+                    }
+                    if crop:
+                        finding["screenshotCrop"] = crop
+                    findings.append(finding)
+        if not attempted:
+            return [], None
+        return findings, (last_error if not findings and last_error else None)
 
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]
@@ -269,9 +412,20 @@ class JobExecutor:
 
     @staticmethod
     def _presentation(report: dict[str, Any]) -> str:
-        findings = "".join(f"<li><strong>{escape(item['title'])}</strong><br>{escape(item['evidence'])}</li>"
-                           for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
-        return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section><section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
+        def render_finding(item: dict[str, Any]) -> str:
+            image = (f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="Screenshot region for this finding" '
+                     'style="max-width:min(100%,420px);border-radius:.5rem;border:1px solid #334155;margin-top:.5rem">'
+                     if item.get("screenshotCrop") else "")
+            recommendation = (f'<p style="opacity:.85"><strong>Recommendation:</strong> {escape(item["recommendation"])}</p>'
+                              if item.get("recommendation") else "")
+            badge = escape(str(item.get("severity", "")).upper())
+            category = escape(str(item.get("category", "")))
+            return (f'<li><strong>[{badge}] {escape(item["title"])}</strong> '
+                    f'<span style="opacity:.6">({category})</span><br>'
+                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{image}</li>')
+
+        findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
+        return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1.5rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section><section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
 
     @staticmethod
     def _browser_outputs(report: dict[str, Any]):

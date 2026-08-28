@@ -13,6 +13,10 @@ rich>=13.9,<16
 chevron>=0.14,<1
 textdistance>=4.6,<5
 pyjwt[crypto]>=2.10,<3
+# Explicit, not relying on an incidental transitive pull -- crops the specific
+# element region a vision-critique finding refers to out of a full JourneyTest
+# screenshot (apps/api/executor.py's _vision_critique_journeys).
+pillow>=10.4,<12
 llama-index-core>=0.14,<0.15
 llama-index-embeddings-openai>=0.6,<0.7
 llama-index-readers-web>=0.6,<0.7

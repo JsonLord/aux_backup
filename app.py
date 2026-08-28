@@ -720,8 +720,17 @@ def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, o
         if job["status"] != "succeeded":
             yield f"Analysis failed: {job.get('error')}", "", session["session_id"], job["job_id"]
             return
-        report = session_client.get_artifact_content(job["output_artifacts"][0])
-        yield "Analysis complete.", f"```json\n{report}\n```", session["session_id"], job["job_id"]
+        report = json.loads(session_client.get_artifact_content(job["output_artifacts"][0]))
+        # screenshotCrop is a base64 data URI (can be tens of KB per finding) --
+        # unreadable and not renderable in a Markdown code block. Show it as a
+        # placeholder here and point to the Presentations tab, which renders the
+        # actual cropped images inline in the generated ux.presentation HTML.
+        for finding in report.get("critical_pain_points", []):
+            if finding.get("screenshotCrop"):
+                finding["screenshotCrop"] = "(cropped screenshot -- see the Presentations tab for the image)"
+        summary = ("Analysis complete. See the **Presentations** tab for a rendered view with screenshots.\n\n"
+                   f"```json\n{json.dumps(report, indent=2)}\n```")
+        yield "Analysis complete.", summary, session["session_id"], job["job_id"]
     except Exception as exc:
         yield f"Control-plane error: {exc}", "", "", ""
 
