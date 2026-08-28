@@ -148,31 +148,75 @@ class TinyTroupeGenerator:
         level up. Override with PERSONA_BATCH_RETRY_ATTEMPTS."""
         return cls._int_env_override("PERSONA_BATCH_RETRY_ATTEMPTS") or 2
 
+    @staticmethod
+    def _use_sampling_plan() -> bool:
+        """TinyTroupe's population-size/sampling-plan flow
+        (factory.generate_people(number_of_people=N)) gives deliberately
+        quota-controlled demographic diversity, but its setup phase -- compute
+        sampling dimensions, compute a sampling plan, then generate a name for
+        *every* planned person one at a time in a single plain ``for`` loop, all
+        before any parallel per-person generation even starts -- is, on a real
+        live batch, the single largest serial bottleneck in the whole pipeline.
+        Observed live: ~7.5 of ~14 minutes for a 10-person batch was this setup
+        phase alone, entirely serial and unaffected by MAX_CONCURRENT_MODEL_CALLS
+        or any other concurrency tuning, because it all runs under one lock
+        before the parallel phase begins.
+
+        Default here instead calls factory.generate_person() directly, once per
+        person, in our own parallel pool (TinyTroupe's "one-off agents" code
+        path) -- this still serializes one name-generation call per person
+        (under the same lock), but each call is released as soon as that one
+        name is generated, interleaved with other threads' work, instead of
+        blocking everyone behind N sequential calls upfront. Trade-off: loses
+        the sampling plan's demographic-quota diversity control, and (TinyTroupe
+        0.7's generate_person has no seed parameter) raw-generation seed
+        reproducibility -- the compiled behavior/ability profiles are still
+        seeded per persona regardless. Restore the old behavior with
+        PERSONA_USE_SAMPLING_PLAN=true.
+        """
+        return os.getenv("PERSONA_USE_SAMPLING_PLAN", "false").strip().lower() in ("1", "true", "yes")
+
+    @classmethod
+    def _generate_people_via_sampling_plan(cls, factory, seed, count):
+        generate = factory.generate_people
+        arguments = {"number_of_people": count}
+        try:
+            generate_params = inspect.signature(generate).parameters
+        except (TypeError, ValueError):
+            generate_params = {}
+        if "seed" in generate_params:
+            arguments["seed"] = seed
+        if "attempts" in generate_params:
+            arguments["attempts"] = cls._generation_attempts()
+        return generate(**arguments)
+
+    @classmethod
+    def _generate_people_in_parallel_without_sampling_plan(cls, factory, count):
+        attempts = cls._generation_attempts()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, count)) as executor:
+            futures = [executor.submit(factory.generate_person, attempts=attempts) for _ in range(count)]
+            results = [future.result() for future in futures]
+            return [person for person in results if person is not None]
+
     def _generate_people_with_retry(self, factory_type, theme, customer_profile, seed, count):
-        """Call factory_type(...).generate_people(...) up to _batch_retry_attempts
-        times, keeping the best (most people) result seen. A fresh TinyPersonFactory
-        is used on every attempt: reusing one after a failed sampling plan means its
-        remaining_characteristics_sample pool is already empty, so every subsequent
-        person would fail immediately regardless of what the model does this time.
-        Returns (people, last_error) -- people is [] only if every attempt failed
-        or returned nothing; last_error is the most recent exception, if any.
+        """Generate a batch of people up to _batch_retry_attempts times, keeping
+        the best (most people) result seen. A fresh TinyPersonFactory is used on
+        every attempt: reusing one after a failed sampling plan means its
+        remaining_characteristics_sample pool is already empty, so every
+        subsequent person would fail immediately regardless of what the model
+        does this time. Returns (people, last_error) -- people is [] only if
+        every attempt failed or returned nothing; last_error is the most recent
+        exception, if any.
         """
         best_people: list = []
         last_error: Exception | None = None
         for attempt in range(1, self._batch_retry_attempts() + 1):
             factory = factory_type(context=f"{theme}. Target customers: {customer_profile}. Generation seed: {seed}.")
-            generate = factory.generate_people
-            arguments = {"number_of_people": count}
             try:
-                generate_params = inspect.signature(generate).parameters
-            except (TypeError, ValueError):
-                generate_params = {}
-            if "seed" in generate_params:
-                arguments["seed"] = seed
-            if "attempts" in generate_params:
-                arguments["attempts"] = self._generation_attempts()
-            try:
-                people = generate(**arguments)
+                if self._use_sampling_plan():
+                    people = self._generate_people_via_sampling_plan(factory, seed, count)
+                else:
+                    people = self._generate_people_in_parallel_without_sampling_plan(factory, count)
             except Exception as error:
                 last_error = error
                 people = []

@@ -1,6 +1,37 @@
 # AUX Synthetic UX Demo — Space status overview
 
 Date: 2026-08-27, updated 2026-08-28
+
+## -4. Speed, round 2: bypassing TinyTroupe's sampling-plan setup phase
+
+Round 1's tuning (§-3) got a 10-persona batch to complete successfully for the
+first time, but at 845 seconds -- and the live log timeline showed why: with
+`factory.generate_people(number_of_people=N)`, TinyTroupe first computes sampling
+dimensions and a sampling plan (a couple of slow calls), then generates a name for
+**every** planned person **one at a time in a plain sequential `for` loop**, all
+under one lock, before any parallel per-person generation even starts. Observed
+live: ~7.5 of ~14 minutes was this setup phase alone -- entirely unaffected by
+`MAX_CONCURRENT_MODEL_CALLS` or any other concurrency/retry tuning, since none of
+that applies until after this phase finishes.
+
+Fix: default to calling `factory.generate_person()` directly, once per person, in
+our own `ThreadPoolExecutor` (TinyTroupe's "one-off agents" code path) instead of
+`generate_people(number_of_people=N)`. This still serializes one name-generation
+call per person under the same lock, but each call releases the lock immediately
+after, interleaved with other threads' work, instead of blocking every thread
+behind N sequential calls upfront. Trade-off, and it's a real one: this loses the
+sampling plan's demographic-quota diversity control, and TinyTroupe 0.7's
+`generate_person()` has no `seed` parameter, so raw-generation seed
+reproducibility is lost too (the compiled behavior/ability profiles are still
+seeded per persona regardless). Restore the old behavior with
+`PERSONA_USE_SAMPLING_PLAN=true` if that trade-off isn't wanted.
+
+Verified: a mocked-factory test confirming the default path calls
+`generate_person()` N times in parallel (never `generate_people()`), with
+`attempts` still passed through, producing N distinct personas; full contract
+suite green. Live timing after this change: see the measurement appended below
+once run.
+
 Space: [`Leon4gr45/aux-synthetic-ux-demo`](https://huggingface.co/spaces/Leon4gr45/aux-synthetic-ux-demo)
 Deployment overlay: `spaces/aux-live` (single-container preview topology)
 
