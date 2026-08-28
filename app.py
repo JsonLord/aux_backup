@@ -7,6 +7,7 @@ import re
 import time
 import json
 import concurrent.futures
+import threading
 import uuid
 import shutil
 from gradio_client import Client
@@ -66,6 +67,20 @@ try:
         TASK_RETRY_WAIT_SECONDS = 3.0
 except (TypeError, ValueError):
     TASK_RETRY_WAIT_SECONDS = 3.0
+# Live TinyTroupe generation is a real, model-backed call per persona and can take
+# up to ~10 minutes even after the speed tuning in services/persona_service --
+# capped here to keep a single on-Space run within a reasonable, honestly-labeled
+# wait. Overridable via TINYTROUPE_MAX_PERSONAS; not a limit on other generation
+# methods (Example Persona, PersonaPool), which don't hit the slow live path.
+try:
+    TINYTROUPE_MAX_PERSONAS = int(os.environ.get("TINYTROUPE_MAX_PERSONAS", "3"))
+    if TINYTROUPE_MAX_PERSONAS <= 0:
+        TINYTROUPE_MAX_PERSONAS = 3
+except (TypeError, ValueError):
+    TINYTROUPE_MAX_PERSONAS = 3
+# Rough ceiling used only to pace the progress bar during live TinyTroupe
+# generation (see handle_generate); not an enforced timeout.
+TINYTROUPE_ESTIMATED_SECONDS = 600
 control_plane = ControlPlaneClient()
 persona_runtime = PersonaRuntimeClient()
 
@@ -347,8 +362,12 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
         except Exception as e:
             add_log(f"Failed to load example persona: {e}")
 
-    if force_method == "DeepPersona":
-        add_log("Forcing DeepPersona generation...")
+    if force_method == "PersonaPool":
+        # Current stand-in implementation calls the external DeepPersona experience
+        # Space for instant generation. Planned replacement: a maintained GitHub
+        # persona pool refreshed daily via GitHub Actions -- see
+        # docs/persona-pool-plan.md.
+        add_log("Forcing PersonaPool (DeepPersona-backed) generation...")
         personas = []
         for i in range(int(num_personas)):
             p = generate_persona_from_deeppersona(theme, customer_profile)
@@ -573,7 +592,9 @@ def generate_tasks(theme, customer_profile, url):
 
     return [f"Task {i+1} for {theme} (Manual fallback)" for i in range(10)]
 
-def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id,
+                     oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None,
+                     progress=gr.Progress()):
     try:
         _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         current_profile = customer_profile
@@ -583,16 +604,56 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
             if ex_personas:
                 current_profile = ex_personas[0].get('minibio', customer_profile)
 
+        progress(0.02, desc="Thinking...")
         yield "Thinking...", None, None, None
         tasks = generate_tasks(theme, current_profile, url)
         tasks_text = "\n".join(tasks) if isinstance(tasks, list) else str(tasks)
 
-        yield "Selecting or creating personas...", tasks_text, None, tasks
-        if method == "TinyTroupe":
-            personas = personas_client.generate(theme, customer_profile, num_personas, scenario=f"Test {url}")
-        else:
-            personas = select_or_create_personas(theme, customer_profile, num_personas, force_method=method, example_file=example_file, persona_client=personas_client)
+        requested = int(num_personas)
+        warning = ""
+        if method == "TinyTroupe" and requested > TINYTROUPE_MAX_PERSONAS:
+            warning = (f" (capped at {TINYTROUPE_MAX_PERSONAS} personas for live generation; "
+                       "can take up to ~10 minutes)")
+            requested = TINYTROUPE_MAX_PERSONAS
+        elif method == "TinyTroupe":
+            warning = " (live generation can take up to ~10 minutes)"
 
+        progress(0.15, desc=f"Selecting or creating personas...{warning}")
+        yield f"Selecting or creating personas...{warning}", tasks_text, None, tasks
+
+        if method == "TinyTroupe":
+            # personas_client.generate() is a single blocking HTTP call with no
+            # intermediate progress signal from the persona runtime. Run it in a
+            # background thread and poll from here so the progress bar and status
+            # text keep moving (paced against TINYTROUPE_ESTIMATED_SECONDS, an
+            # estimate only -- not an enforced timeout) instead of sitting frozen
+            # for up to ~10 minutes.
+            outcome = {}
+
+            def _run_generation():
+                try:
+                    outcome["personas"] = personas_client.generate(
+                        theme, customer_profile, requested, scenario=f"Test {url}")
+                except Exception as error:
+                    outcome["error"] = error
+
+            worker = threading.Thread(target=_run_generation, daemon=True)
+            worker.start()
+            started = time.monotonic()
+            while worker.is_alive():
+                worker.join(timeout=3)
+                elapsed = time.monotonic() - started
+                fraction = min(0.95, 0.15 + 0.80 * (elapsed / TINYTROUPE_ESTIMATED_SECONDS))
+                status = f"Generating personas... ({int(elapsed)}s elapsed){warning}"
+                progress(fraction, desc=status)
+                yield status, tasks_text, None, tasks
+            if "error" in outcome:
+                raise outcome["error"]
+            personas = outcome["personas"]
+        else:
+            personas = select_or_create_personas(theme, customer_profile, requested, force_method=method, example_file=example_file, persona_client=personas_client)
+
+        progress(1.0, desc="Generation complete!")
         yield "Generation complete!", tasks_text, personas, tasks
     except Exception as e:
         yield f"Error during generation: {str(e)}", None, None, None
@@ -1120,10 +1181,16 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 with gr.Column():
                     theme_input = gr.Textbox(label="Theme", placeholder="e.g., Communication, Purchase decisions, Information gathering")
                     profile_input = gr.Textbox(label="Customer Profile Description", placeholder="Describe the target customer...")
-                    num_personas_input = gr.Number(label="Number of Personas", value=1, precision=0)
+                    num_personas_input = gr.Number(label="Number of Personas", value=1, precision=0, minimum=1, maximum=TINYTROUPE_MAX_PERSONAS)
                     url_input = gr.Textbox(label="Target URL", value="https://example.com")
-                    persona_method = gr.Radio(["Example Persona", "TinyTroupe", "DeepPersona"], label="Persona Generation Method", value="TinyTroupe")
-                    
+                    persona_method = gr.Radio(["Example Persona", "TinyTroupe", "PersonaPool"], label="Persona Generation Method", value="TinyTroupe")
+                    tinytroupe_warning = gr.Markdown(
+                        f"⏳ **Live TinyTroupe generation is capped at {TINYTROUPE_MAX_PERSONAS} personas per run "
+                        "and can take up to ~10 minutes** (each persona is a real model-generated profile). "
+                        "For more personas or an instant result, use **PersonaPool**.",
+                        visible=True,
+                    )
+
                     with gr.Column(visible=False) as example_persona_col:
                         gr.Markdown("#### Pre-configured Personas")
                         
@@ -1162,10 +1229,20 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                         
                         example_persona_select.change(fn=update_persona_preview, inputs=[example_persona_select], outputs=[example_persona_preview])
 
-                    def update_method_visibility(method):
-                        return gr.update(visible=(method == "Example Persona"))
-                    
-                    persona_method.change(fn=update_method_visibility, inputs=[persona_method], outputs=[example_persona_col])
+                    def update_method_visibility(method, current_count):
+                        is_tinytroupe = method == "TinyTroupe"
+                        capped_count = min(int(current_count or 1), TINYTROUPE_MAX_PERSONAS) if is_tinytroupe else current_count
+                        return (
+                            gr.update(visible=(method == "Example Persona")),
+                            gr.update(visible=is_tinytroupe),
+                            gr.update(maximum=TINYTROUPE_MAX_PERSONAS if is_tinytroupe else None, value=capped_count),
+                        )
+
+                    persona_method.change(
+                        fn=update_method_visibility,
+                        inputs=[persona_method, num_personas_input],
+                        outputs=[example_persona_col, tinytroupe_warning, num_personas_input],
+                    )
 
                     generate_btn = gr.Button("Generate Personas & Tasks")
 
