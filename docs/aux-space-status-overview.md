@@ -1,6 +1,6 @@
 # AUX Synthetic UX Demo — Space status overview
 
-Date: 2026-08-27 (updated after live redeploys and admin-authenticated testing)
+Date: 2026-08-27, updated 2026-08-28
 Space: [`Leon4gr45/aux-synthetic-ux-demo`](https://huggingface.co/spaces/Leon4gr45/aux-synthetic-ux-demo)
 Deployment overlay: `spaces/aux-live` (single-container preview topology)
 
@@ -9,6 +9,41 @@ fixes applied in this change, and which spec stages remain open. The first pass 
 written from live read-only probes plus a code review. It was then updated after
 redeploying the Space four times and driving real, admin-authenticated batch persona
 generation against it end to end — see §0 for what that testing found.
+
+## -2. Milestone: first fully completed live batch persona generation (2026-08-28)
+
+A real batch of 3 TinyTroupe personas was generated end to end through the live
+Space (`handle_generate`, admin-authenticated, no HF login) and reached
+`event: complete` with full, valid persona/behavior/ability data for all 3 --
+the first time in this project's testing that has happened. Total time: 363
+seconds for 3 personas (~121s/persona average), which is well above the
+previously discussed "<2 minutes for 10 personas" target discussed but not yet
+implemented -- the concurrency/retry-tuning levers identified earlier
+(`max_concurrent_model_calls`, parallelizing the compiler stage across
+personas, tightening `max_attempts`/`exponential_backoff_factor`/`timeout`)
+remain open follow-up work.
+
+Getting here required three more real, previously-hidden bugs, found only by
+running generation for real (not by static review) after the provider switch
+and the persona-varied-abilities feature made execution reach further into
+the pipeline than any earlier attempt:
+
+1. `TinyPerson.__init__` unconditionally imports an unused notebook-display
+   module (`tinytroupe.experimentation.in_place_experiment_runner`) that needs
+   `IPython` and `scipy` at import time. Never exercised before this session
+   because generation always failed earlier (Blablador 502s, then the
+   system-message-ordering 400s). Fixed by adding both to
+   `spaces/aux-live/requirements-live.txt`.
+2. `DirectLLMSemanticEngine._complete_json` (behavior + the new ability
+   compiler) had no retry logic at all, unlike TinyTroupe's own client --
+   raised by the user after observing "the auto model sometimes fails."
+   Fixed: retries the identical request up to 3 times on connection error,
+   non-2xx status, or an empty completion.
+3. The bug that retry then exposed: some models behind the `auto` router
+   (observed live: `gemini-2.5-flash-lite`) wrap their JSON completion in a
+   markdown code fence despite `response_format: json_object`, so every retry
+   was hitting the same deterministic parse failure, not a transient one.
+   Fixed with fence-stripping plus a regex fallback before `json.loads`.
 
 ## -1. Provider switch: Blablador → self-hosted freellmapi router
 
