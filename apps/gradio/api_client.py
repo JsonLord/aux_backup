@@ -139,7 +139,16 @@ class PersonaRuntimeClient:
         return response.json()
 
     def compile(self, persona, scenario="", seed=1, source="preset"):
-        response = requests.post(f"{self.base_url}/v1/personas/compile", headers=self.headers, json={"persona": persona, "scenario": scenario, "seed": int(seed), "source": source}, timeout=60)
+        # The compile endpoint runs its own internal retry/backoff against the
+        # model router (services/persona_service/semantic.py's _complete, up to
+        # SEMANTIC_ENGINE_MAX_ATTEMPTS attempts with growing backoff) for two
+        # concurrent calls (behavior + abilities); a flat 60s timeout here can
+        # fire before that legitimate retry has finished, especially under
+        # router load (observed live: a 429-recovering router took >60s to
+        # answer even a single compile call). Matches generate()'s pattern of a
+        # generous, overridable timeout rather than a tight hardcoded one.
+        timeout = float(os.getenv("PERSONA_COMPILE_TIMEOUT", "180"))
+        response = requests.post(f"{self.base_url}/v1/personas/compile", headers=self.headers, json={"persona": persona, "scenario": scenario, "seed": int(seed), "source": source}, timeout=timeout)
         response.raise_for_status()
         return response.json()
 
