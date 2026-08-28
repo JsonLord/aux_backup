@@ -61,9 +61,9 @@ def test_combined_test_executes_and_exposes_result_and_attempt(tmp_path):
     assert response.status_code == 202
     job = api.get(f"/v1/jobs/{response.json()['job_id']}").json()
     assert job["status"] == "succeeded"
-    assert len(job["output_artifacts"]) == 3
+    assert len(job["output_artifacts"]) == 4
     artifacts = api.get(f"/v1/sessions/{session_id}/artifacts").json()["items"]
-    assert {item["kind"] for item in artifacts} >= {"ux.report", "ux.presentation", "journey.log"}
+    assert {item["kind"] for item in artifacts} >= {"ux.report", "ux.presentation", "ux.slides", "journey.log"}
     assert all(item["metadata"].get("download_name") for item in artifacts if item["kind"] != "persona.profile")
     presentation = next(item for item in artifacts if item["kind"] == "ux.presentation")
     download = api.get(f"/v1/artifacts/{presentation['artifact_id']}/content")
@@ -388,6 +388,35 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     presentation = store.read_artifact(completed["output_artifacts"][1]).decode("utf-8")
     assert "Ambiguous button label" in presentation
     assert '<img src="data:image/png;base64,' in presentation
+
+
+def test_slide_deck_renders_one_navigable_slide_per_synthesized_finding():
+    """Real local slide generation (no GitHub, no external mkslides binary --
+    see docs/aux-space-status-overview.md): one slide per synthesized finding,
+    with its crop image and combined alternatives, plus working keyboard/click
+    navigation, self-contained in one HTML file."""
+    report = {
+        "url": "https://example.com", "executive_summary": "Tested with 2 personas.",
+        "critical_pain_points": [
+            {"severity": "critical", "category": "usability", "title": "Infinite repetition of page content",
+             "affectedPersonas": 2, "summary": "The hero section repeats down the page.",
+             "alternatives": [{"proposedChange": "Fix the render loop."}],
+             "screenshotCrop": "data:image/png;base64,Zm9v"},
+            {"severity": "medium", "category": "accessibility", "title": "Low contrast form labels",
+             "summary": "Labels are hard to read.", "recommendation": "Increase contrast."},
+        ],
+    }
+    html = JobExecutor._slide_deck(report)
+    assert html.count('class="slide') == 3  # title slide + 2 findings
+    assert "Infinite repetition of page content" in html
+    assert "Fix the render loop." in html
+    assert "Low contrast form labels" in html
+    assert "Increase contrast." in html  # recommendation falls back into "what to change"
+    assert '<img src="data:image/png;base64,Zm9v"' in html
+    assert "ArrowRight" in html and "ArrowLeft" in html  # keyboard navigation wired
+
+    empty_html = JobExecutor._slide_deck({"url": "https://example.com", "critical_pain_points": []})
+    assert "No findings" in empty_html
 
 
 def test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype(tmp_path, monkeypatch):

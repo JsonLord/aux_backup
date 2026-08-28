@@ -2,6 +2,80 @@
 
 Date: 2026-08-27, updated 2026-08-28 (multiple passes)
 
+## -8. Full UXPainPoint synthesis, dead-code removal, and three tabs made real
+
+User-directed expansion of §-7's stage-2 critique toward spec.md §20's full
+`UXPainPoint` model and real cross-persona synthesis, plus "go further with
+the next tabs" -- explicitly: results must be based on synthesized data
+analysis, never individual persona citations.
+
+**Full UXPainPoint shape + real cohort aggregation.** `visionCritique.js`
+findings now carry multiple elements with roles (trigger/cause/feedback/
+obstacle/recovery, not one `elementSelector`), a vision-model-*estimated*
+`behavioralImpact` (frustration/confusion/trust -- the same epistemic
+category as its existing severity/category judgment; cognitive/physical
+effort deltas have no analogue in a static screenshot and stay at 0 rather
+than being invented), and structured `alternatives` (proposedChange/
+rationale/effort). New `toPainPoint()` shapes a finding into the full record
+`aggregate.js`'s `aggregateCohort()` expects -- real, tested cohort/root-
+cause aggregation code that already existed in this repo but had never been
+wired to a live evidence source, since it was built against the native
+fixture engine's simulated psychological deltas. New endpoints:
+`/v1/journey-evidence-analyses` also returns full `painPoints`, and
+`/v1/cohort-aggregation` runs `aggregateCohort` across every persona's pain
+points from one run. `apps/api/executor.py`'s vision path now has two
+stages: `_collect_vision_pain_points` (per-persona UXPainPoint records) then
+`_synthesize_pain_points` (cross-persona root causes -> report findings
+tagged `source=eyeson-vision-synthesis`). Every vision finding in the report
+is now a synthesized root cause -- how many personas hit it, average
+estimated impact, combined alternatives -- never a single persona's
+individual citation, even with one persona (that's just a root cause with
+one affected user through the same synthesis path, not a special case).
+
+**Dead GitHub-backed code removed (~480 lines).** `gh` has been `None`
+since the control-plane migration, so everything gated on it was already
+unreachable, and most of it (repo/branch listing, report-in-branch/PR
+pulling, `render_slides`, heatmaps, `deploy_to_hf`, solutions/thought-log
+fetchers, the periodic repo monitor) wasn't even wired to a UI element
+anymore. The one exception that mattered: `select_or_create_personas`'s
+default path always hit `get_persona_pool()` (GitHub, always `[]`), so its
+"ask an LLM which pool persona fits" logic never ran -- every call silently
+generated fresh personas and no-op'd an "upload to pool". Replaced with a
+**real local pool**: `persona_client.list()` against the persona-runtime's
+own store, which already durably saves every persona this workspace has
+ever generated or compiled (no separate upload step needed at all). Also
+fixed a real crash the dead code was hiding: the pool-judging loop read
+`pool[i]['name']` directly, but real profiles nest name under
+`persona.name` -- would have KeyError'd the moment the pool had content.
+
+**Three more tabs made real:**
+- **Persona Thought Logs** now renders a Markdown summary (persona name,
+  verdict with emoji, the real per-action timeline
+  `services/journey-worker`'s `timelineToEvents` records, blockers/UX
+  findings) above a collapsed raw-JSON accordion, instead of a bare JSON
+  code dump. Handles both `journey.log` and `persona.profile` artifact
+  shapes.
+- **Slide deck**: a new `ux.slides` artifact, generated locally alongside
+  the presentation for every `combined_test` run -- one navigable slide
+  (arrow keys or click) per *synthesized* finding, with its crop image and
+  combined alternatives, self-contained in one HTML file. No GitHub, no
+  external `mkslides` binary (which, on inspection, was only ever installed
+  in the *other*, unrelated root `Dockerfile` -- never in
+  `spaces/aux-live/Dockerfile`, so `render_slides` was doubly dead even
+  before its GitHub dependency). Shown in the Presentations tab via an
+  iframe (`gr.HTML` injects via innerHTML, which silently does not execute
+  `<script>` tags -- the deck's navigation JS needs a real iframe document,
+  the same `srcdoc` pattern already used for the generated-UI prototype).
+- **Agents.txt** gained a real "design agent brief" generator, finally using
+  the `session_id_at` textbox that sat wired to nothing. Built entirely from
+  a session's synthesized `critical_pain_points` (severity-sorted, each with
+  its combined alternatives as concrete instructions), not the pre-existing
+  "coding agent prompt" button next to it, which was found to be
+  permanently non-functional: it reads from `selected_solutions_json_state`,
+  a `gr.State("[]")` that is never set as any event's output anywhere in the
+  file, so it always ran on an empty list. Left as-is (a separate,
+  differently-scoped feature) rather than silently repurposed.
+
 ## -7. Stage-2 vision critique, the PersonaPool gap, and infra fixes live
 ## testing surfaced along the way
 

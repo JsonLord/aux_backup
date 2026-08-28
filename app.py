@@ -665,6 +665,59 @@ You are an expert Frontend Developer. Your task is to implement the following "L
 """
     return prompt
 
+_SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+
+
+def generate_design_agent_brief(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+    """Design-agent instructions built from this session's SYNTHESIZED findings
+    (apps/api/executor.py's cross-persona root-cause aggregation), not
+    individually-selected solutions or per-persona citations -- every finding
+    here already reflects how many personas hit it and the combined,
+    grounded alternatives (see apps/api/executor.py's _synthesize_pain_points)."""
+    if not session_id:
+        return "Enter a session ID above, then click Generate."
+    try:
+        session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+        artifacts = [item for item in session_client.list_artifacts(session_id) if item["kind"] == "ux.report"]
+        if not artifacts:
+            return f"No UX report found for session `{session_id}`. Run an analysis first."
+        report = json.loads(session_client.get_artifact_content(artifacts[-1]["artifact_id"]))
+    except Exception as e:
+        return f"Error loading session report: {e}"
+
+    findings = sorted(report.get("critical_pain_points", []),
+                       key=lambda item: _SEVERITY_ORDER.get(item.get("severity"), 4))
+    if not findings or findings[0].get("title") == "No pain points detected":
+        return (f"# Design agent brief for {report.get('url', 'the tested site')}\n\n"
+                "No synthesized UX findings were reported for this session -- nothing to change.")
+
+    lines = [f"# Design agent brief: {report.get('url', 'target site')}",
+              "", report.get("executive_summary", ""), "",
+              "You are a design agent. The findings below are synthesized across every synthetic "
+              "user persona that tested this site (not one person's opinion) and grounded against "
+              "real UX/accessibility references where available. For each finding: understand what is "
+              "wrong and why, then change the layout/design to address it. Do not invent unrelated "
+              "changes.", ""]
+    for index, finding in enumerate(findings, start=1):
+        severity, affected = finding.get("severity", "medium"), finding.get("affectedPersonas")
+        lines.append(f"## {index}. [{severity.upper()}] {finding.get('title', 'Finding')}")
+        if affected:
+            lines.append(f"_Observed across {affected} tested persona(s)._")
+        if finding.get("summary"):
+            lines.append(f"\n**What's wrong:** {finding['summary']}")
+        alternatives = finding.get("alternatives") or ([{"proposedChange": finding["recommendation"]}]
+                                                         if finding.get("recommendation") else [])
+        if alternatives:
+            lines.append("\n**What to change:**")
+            for alternative in alternatives:
+                change = alternative.get("proposedChange", "")
+                rationale = f" ({alternative['rationale']})" if alternative.get("rationale") else ""
+                effort = f" [{alternative['effort']} effort]" if alternative.get("effort") else ""
+                lines.append(f"- {change}{rationale}{effort}")
+        lines.append("")
+    return "\n".join(lines)
+
+
 def generate_full_ui_call(session_id, selected_solutions_json, url, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not session_id:
         return "Error: Job ID missing. Start an analysis first."
@@ -896,6 +949,55 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 save_persona_btn = gr.Button("Save manual profile", variant="primary")
             persona_studio_status = gr.Markdown()
 
+        def format_persona_thought_log(content_json: str) -> str:
+            """Render a journey.log or persona.profile artifact as readable
+            Markdown instead of a wall of raw JSON -- persona identity, the
+            verdict, and the real per-action timeline the director recorded
+            (services/journey-worker's timelineToEvents), not just field dumps."""
+            try:
+                data = json.loads(content_json)
+            except (json.JSONDecodeError, TypeError):
+                return "_Could not parse this artifact as JSON._"
+            if isinstance(data, dict) and isinstance(data.get("runs"), list):
+                sections = []
+                for run in data["runs"]:
+                    persona = (run.get("simulationProfile") or {}).get("persona", {})
+                    name = persona.get("name") or run.get("profileId") or run.get("testerProfileId") or "Persona"
+                    verdict = run.get("verdict") or {}
+                    status_emoji = {"passed": "✅", "failed": "❌", "blocked": "🚫", "inconclusive": "❓"}.get(verdict.get("status"), "•")
+                    lines = [f"## {status_emoji} {name} — run `{run.get('runId', '?')}`",
+                              f"**Verdict:** {verdict.get('status', 'unknown')} ({verdict.get('confidence', 'n/a')} confidence)",
+                              f"\n{verdict.get('summary', '_No summary recorded._')}\n"]
+                    timeline = run.get("timeline") or []
+                    if timeline:
+                        lines.append("**What happened:**")
+                        for event in timeline:
+                            summary = event.get("summary") or event.get("type", "event")
+                            elapsed = event.get("elapsedMs")
+                            when = f" _(+{elapsed / 1000:.1f}s)_" if isinstance(elapsed, (int, float)) else ""
+                            lines.append(f"- {summary}{when}")
+                    for bucket, label in (("blockers", "🚫 Blockers"), ("uxFindings", "⚠️ UX findings")):
+                        items = verdict.get(bucket) or []
+                        if items:
+                            lines.append(f"\n**{label}:**")
+                            lines.extend(f"- **{item.get('title', 'Finding')}**: {item.get('description', '')}" for item in items)
+                    sections.append("\n".join(lines))
+                return "\n\n---\n\n".join(sections) if sections else "_No runs recorded in this log._"
+            if isinstance(data, dict) and ("behavior" in data or "abilities" in data):
+                persona = data.get("persona", {})
+                name = persona.get("name") or data.get("id", "Persona")
+                behavior, abilities = data.get("behavior") or {}, data.get("abilities") or {}
+                lines = [f"## {name}", f"**Source:** {data.get('source', 'unknown')}  ·  **ID:** `{data.get('id', '?')}`"]
+                if behavior:
+                    top_traits = sorted(behavior.items(), key=lambda item: -item[1] if isinstance(item[1], (int, float)) else 0)[:5]
+                    lines.append("\n**Notable behavior traits:** " + ", ".join(
+                        f"{trait} {value:.2f}" for trait, value in top_traits if isinstance(value, (int, float))))
+                vision = (abilities.get("vision") or {})
+                if vision:
+                    lines.append(f"**Vision:** {vision.get('colorVision', 'typical')}, acuity {vision.get('acuity', 1):.2f}")
+                return "\n".join(lines)
+            return f"```json\n{json.dumps(data, indent=2)[:4000]}\n```"
+
         def workspace_session_choices(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
             sessions = session_client.list_sessions()
@@ -924,6 +1026,9 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         def presentation_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"ux.presentation"}, workspace_id, oauth_profile, oauth_token)
 
+        def slides_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+            return workspace_artifact_choices(session_id, {"ux.slides"}, workspace_id, oauth_profile, oauth_token)
+
         def report_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"ux.report"}, workspace_id, oauth_profile, oauth_token)
 
@@ -947,6 +1052,36 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             presentation_refresh.click(workspace_session_choices, [workspace_selector], [presentation_session, presentation_status], api_name="list_presentation_sessions")
             presentation_session.change(presentation_choices, [presentation_session, workspace_selector], [presentation_artifact], api_name="list_session_presentations")
             presentation_load.click(load_workspace_artifact, [presentation_session, presentation_artifact, workspace_selector], [presentation_view, presentation_download], api_name="load_session_presentation")
+
+            gr.Markdown("### Slide deck\nA navigable slide per synthesized finding (arrow keys or click to advance) -- "
+                        "generated locally alongside the presentation, no external tool or repository involved.")
+            with gr.Row():
+                slides_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
+                slides_refresh = gr.Button("Refresh sessions")
+            slides_status = gr.Markdown()
+            with gr.Row():
+                slides_artifact = gr.Dropdown(label="Slide deck", choices=[], interactive=True, allow_custom_value=True)
+                slides_load = gr.Button("Load slides", variant="primary")
+                slides_download = gr.DownloadButton("Download slides")
+            slides_view = gr.HTML(label="Slides")
+
+            def load_and_frame_slides(session_id, artifact_id, workspace_id,
+                                       oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
+                if not artifact_id:
+                    return content, download
+                # gr.HTML injects its value via innerHTML, which silently does not
+                # execute <script> tags -- the slide deck's own keyboard/click
+                # navigation needs a real document context to run in, so embed it
+                # in an iframe (the same srcdoc pattern already used for the
+                # generated UI prototype elsewhere in this file) instead of
+                # rendering the raw HTML directly.
+                framed = f'<iframe srcdoc="{content.replace(chr(34), "&quot;")}" width="100%" height="600" frameborder="0"></iframe>'
+                return framed, download
+
+            slides_refresh.click(workspace_session_choices, [workspace_selector], [slides_session, slides_status], api_name="list_slides_sessions")
+            slides_session.change(slides_choices, [slides_session, workspace_selector], [slides_artifact], api_name="list_session_slides")
+            slides_load.click(load_and_frame_slides, [slides_session, slides_artifact, workspace_selector], [slides_view, slides_download], api_name="load_session_slides")
 
         with gr.Tab("Report Viewer"):
             gr.Markdown("### Saved UX reports\nReports are tenant-owned control-plane artifacts; no GitHub branch or token is used.")
@@ -973,10 +1108,20 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 log_artifact = gr.Dropdown(label="Journey log", choices=[], interactive=True, allow_custom_value=True)
                 log_load = gr.Button("Load log", variant="primary")
                 log_download = gr.DownloadButton("Download log")
-            log_viewer = gr.Code(label="Journey events and persona snapshots", language="json", lines=28)
+            log_summary = gr.Markdown(label="Persona thoughts")
+            with gr.Accordion("Raw JSON", open=False):
+                log_viewer = gr.Code(label="Journey events and persona snapshots", language="json", lines=28)
+
+            def load_and_format_log(session_id, artifact_id, workspace_id,
+                                     oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
+                if not artifact_id:
+                    return content, "", download
+                return format_persona_thought_log(content), content, download
+
             log_refresh.click(workspace_session_choices, [workspace_selector], [log_session, log_status], api_name="list_log_sessions")
             log_session.change(log_choices, [log_session, workspace_selector], [log_artifact], api_name="list_session_logs")
-            log_load.click(load_workspace_artifact, [log_session, log_artifact, workspace_selector], [log_viewer, log_download], api_name="load_session_log")
+            log_load.click(load_and_format_log, [log_session, log_artifact, workspace_selector], [log_summary, log_viewer, log_download], api_name="load_session_log")
 
         with gr.Tab("Evidence Artifacts"):
             gr.Markdown("### Saved browser and UX evidence\nSelect any evidence artifact persisted for this workspace session.")
@@ -994,13 +1139,25 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             evidence_load.click(load_workspace_artifact, [evidence_session, evidence_artifact, workspace_selector], [evidence_viewer, evidence_download], api_name="load_session_evidence")
 
         with gr.Tab("Agents.txt"):
-            gr.Markdown("### Coding Agent Prompt")
+            gr.Markdown("### Agent instructions")
             with gr.Row():
                 session_id_at = gr.Textbox(label="Session ID", placeholder="Enter Session ID...")
                 session_id_sync_list.append(session_id_at)
-            refresh_agent_prompt_btn = gr.Button("Generate Prompt for Agent")
+
+            gr.Markdown("#### Design agent brief")
+            gr.Markdown("Layout/visual-design instructions built from this session's *synthesized* "
+                        "UX findings (cross-persona root-cause aggregation, not one persona's opinion) "
+                        "-- what's wrong, how many personas hit it, and the grounded, concrete change to make.")
+            design_brief_btn = gr.Button("Generate design agent brief", variant="primary")
+            design_brief_display = gr.Code(label="agents.txt (design)", language="markdown", lines=24)
+            design_brief_btn.click(fn=generate_design_agent_brief, inputs=[session_id_at, workspace_selector],
+                                    outputs=[design_brief_display])
+
+            gr.Markdown("#### Coding agent prompt")
+            gr.Markdown("Implementation prompt built from solutions selected/liked elsewhere in this session.")
+            refresh_agent_prompt_btn = gr.Button("Generate prompt for coding agent")
             agent_prompt_display = gr.Code(label="Prompt for Coding Agent", language="markdown")
-            
+
             refresh_agent_prompt_btn.click(fn=generate_agents_prompt, inputs=[selected_solutions_json_state], outputs=[agent_prompt_display])
 
         with gr.Tab("Full New UI"):

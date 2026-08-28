@@ -68,6 +68,7 @@ class JobExecutor:
                 outputs = [
                     ("ux.report", "application/json", result),
                     ("ux.presentation", "text/html", self._presentation(result)),
+                    ("ux.slides", "text/html", self._slide_deck(result)),
                     ("journey.log", "application/json", {
                         "schema_version": "1.0",
                         "session_id": job["session_id"],
@@ -463,7 +464,7 @@ class JobExecutor:
 
     @staticmethod
     def _download_name(kind: str, job_id: str) -> str:
-        extension = {"ux.report": "json", "ux.presentation": "html", "journey.log": "json",
+        extension = {"ux.report": "json", "ux.presentation": "html", "ux.slides": "html", "journey.log": "json",
                      "ui.prototype": "html", "browser.screenshot": "png", "browser.snapshot": "json",
                      "browser.ui-change": "json", "browser.video": "webm"}[kind]
         return f"{kind.replace('.', '-')}-{job_id}.{extension}"
@@ -484,6 +485,77 @@ class JobExecutor:
 
         findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
         return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1.5rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section><section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
+
+    @staticmethod
+    def _slide_deck(report: dict[str, Any]) -> str:
+        """A real, navigable, self-contained slide deck built from this run's
+        SYNTHESIZED findings -- not fetched from a GitHub repo (there is no
+        GitHub dependency left in this deployment) and not requiring an external
+        slide-rendering tool: a single portable HTML file, one slide per
+        synthesized finding, arrow-key/click navigation via inline JS. Every
+        finding shown here already reflects cross-persona synthesis
+        (apps.api.executor._synthesize_pain_points), never one persona's
+        individual citation."""
+        findings = report.get("critical_pain_points", [])
+        severity_counts: dict[str, int] = {}
+        for item in findings:
+            severity_counts[item.get("severity", "medium")] = severity_counts.get(item.get("severity", "medium"), 0) + 1
+        counts_line = ", ".join(f"{count} {severity}" for severity, count in
+                                 sorted(severity_counts.items(), key=lambda pair: -pair[1]))
+
+        def render_slide(index: int, item: dict[str, Any]) -> str:
+            image = (f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="Screenshot region for this finding">'
+                     if item.get("screenshotCrop") else "")
+            alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
+                                                          if item.get("recommendation") else [])
+            changes = "".join(f"<li>{escape(alt.get('proposedChange', ''))}</li>" for alt in alternatives if alt.get("proposedChange"))
+            affected = f'<p class="affected">Observed across {item["affectedPersonas"]} tested persona(s)</p>' if item.get("affectedPersonas") else ""
+            return (f'<section class="slide" data-severity="{escape(str(item.get("severity", "")))}">'
+                    f'<span class="badge">{escape(str(item.get("severity", "")).upper())} &middot; {escape(str(item.get("category", "")))}</span>'
+                    f'<h2>{index}. {escape(item.get("title", "Finding"))}</h2>{affected}'
+                    f'<p class="summary">{escape(item.get("summary") or item.get("evidence") or "")}</p>'
+                    f'{image}{f"<h3>What to change</h3><ul>{changes}</ul>" if changes else ""}</section>')
+
+        slides = "".join(render_slide(index, item) for index, item in enumerate(findings, start=1)) or \
+            '<section class="slide"><h2>No findings</h2><p>No pain points were reported for this run.</p></section>'
+        title_slide = (f'<section class="slide title"><h1>UX findings</h1><p class="url">{escape(report.get("url") or "")}</p>'
+                        f'<p class="summary">{escape(report.get("executive_summary") or "")}</p>'
+                        f'<p class="affected">{escape(str(len(findings)))} finding(s){f" &mdash; {escape(counts_line)}" if counts_line else ""}</p></section>')
+        return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
+<title>UX findings slides</title><style>
+:root{{color-scheme:dark}}
+*{{box-sizing:border-box}}
+body{{margin:0;font:20px/1.5 system-ui,sans-serif;background:#0b1220;color:#f1f5f9;overflow:hidden}}
+.deck{{height:100vh;width:100vw;position:relative}}
+.slide{{position:absolute;inset:0;padding:6vw;display:none;flex-direction:column;justify-content:center;gap:1rem;overflow-y:auto}}
+.slide.active{{display:flex}}
+.slide.title{{align-items:center;text-align:center}}
+.slide h1{{font-size:clamp(2rem,6vw,4rem);margin:0}}
+.slide h2{{font-size:clamp(1.5rem,4vw,2.75rem);margin:0}}
+.slide h3{{opacity:.8;margin:.5rem 0 0}}
+.badge{{align-self:flex-start;font-size:.85rem;letter-spacing:.05em;padding:.25rem .75rem;border-radius:999px;background:#1e293b;border:1px solid #334155}}
+.url{{opacity:.7}}
+.summary{{max-width:60rem}}
+.affected{{opacity:.75;font-size:.95rem}}
+img{{max-width:min(90%,640px);border-radius:.75rem;border:1px solid #334155}}
+.nav{{position:fixed;bottom:1.5rem;right:1.5rem;display:flex;gap:.5rem;z-index:10}}
+.nav button{{background:#1e293b;color:#f1f5f9;border:1px solid #334155;border-radius:.5rem;padding:.5rem 1rem;cursor:pointer;font-size:1rem}}
+.nav button:hover{{background:#334155}}
+.counter{{position:fixed;bottom:1.5rem;left:1.5rem;opacity:.6;font-size:.9rem}}
+</style></head><body>
+<div class="deck">{title_slide}{slides}</div>
+<div class="nav"><button id="prev" aria-label="Previous slide">&larr;</button><button id="next" aria-label="Next slide">&rarr;</button></div>
+<div class="counter" id="counter"></div>
+<script>
+const slides=document.querySelectorAll('.slide');let current=0;
+function show(index){{current=Math.max(0,Math.min(slides.length-1,index));slides.forEach((s,i)=>s.classList.toggle('active',i===current));document.querySelector('#counter').textContent=(current+1)+' / '+slides.length;}}
+document.querySelector('#next').onclick=()=>show(current+1);
+document.querySelector('#prev').onclick=()=>show(current-1);
+document.addEventListener('keydown',(e)=>{{if(e.key==='ArrowRight'||e.key===' ')show(current+1);if(e.key==='ArrowLeft')show(current-1);}});
+document.querySelector('.deck').addEventListener('click',(e)=>{{if(e.target.tagName!=='BUTTON'&&e.target.tagName!=='IMG')show(current+1);}});
+show(0);
+</script>
+</body></html>"""
 
     @staticmethod
     def _browser_outputs(report: dict[str, Any]):
