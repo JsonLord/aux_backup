@@ -2,6 +2,35 @@
 
 Date: 2026-08-27, updated 2026-08-28
 
+## -5. Real-usage bug: Workspace dropdown rejected a real signed-in user
+
+Reported directly by the user against real (non-API-test) browser usage:
+`gradio.exceptions.Error: 'Value: hf:user:675f37b072d14a2cff8b7343 is not in the
+list of choices: []'` -- a genuine, currently-logged-in HF user's own real
+workspace ID, rejected. Same error class found earlier in this session during
+admin/API testing, but this confirms it also breaks real logged-in use, not just
+headless calls.
+
+Root cause, confirmed against Gradio 5.15.0's actual installed source
+(`Dropdown.preprocess`): a submitted value is validated against `self.choices`,
+the *server-side* Python component's own attribute -- and in a `gr.Blocks()` app,
+that component is a single object shared across every concurrent session on the
+deployment, not per-browser-session state. Any other session's (or an earlier
+event's) most recent `gr.update(choices=...)` can leave it stale or empty for
+everyone else, independent of what any individual user's own browser is showing
+them.
+
+Fix: `allow_custom_value=True` on all 10 dynamically-populated dropdowns
+(`workspace_selector`, `persona_index`, and the 4 workspace-session/artifact
+pairs for presentations/reports/logs/evidence) -- Gradio's documented, official
+way to skip this exact validation. Safe here because the real authorization
+check already happens downstream in `authenticated_clients()`/
+`request_identity()` against the actual OAuth token; these dropdowns only need
+to *offer* choices, not gate them. (`example_persona_select` and `color_vision`
+were left untouched -- their choices are genuinely static, not per-session
+dynamic, so they don't share this failure mode.)
+
+
 ## -4. Speed, round 2: bypassing TinyTroupe's sampling-plan setup phase
 
 Round 1's tuning (§-3) got a 10-persona batch to complete successfully for the

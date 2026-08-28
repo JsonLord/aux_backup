@@ -1066,7 +1066,17 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     gr.Markdown("# UX Analysis Orchestrator")
     with gr.Row():
         login_button = gr.LoginButton()
-        workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True)
+        # allow_custom_value: Gradio's Dropdown validates a submitted value against
+        # this component's *server-side* choices list, which is a single shared
+        # object across every concurrent session on this deployment (not
+        # per-browser-session state) -- another user's or an earlier event's most
+        # recent gr.update(choices=...) can leave it stale/empty for everyone else,
+        # producing "Value: hf:user:... is not in the list of choices: []" even for
+        # a real signed-in user with a real workspace. The real authorization check
+        # happens downstream in authenticated_clients()/request_identity() against
+        # the actual OAuth token, so this dropdown only needs to offer choices, not
+        # gate them.
+        workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True, allow_custom_value=True)
     login_status = gr.Markdown("Sign in with Hugging Face to load your personal and organization workspaces.")
 
     def load_hf_workspaces(profile: gr.OAuthProfile | None):
@@ -1187,7 +1197,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         with gr.Tab("Persona Studio"):
             gr.Markdown("## Persona Studio\nInspect identity, functional restrictions, behavioral characteristics, and generation provenance. Changes are explicit and persisted through the persona runtime.")
             with gr.Row():
-                persona_index = gr.Dropdown(label="Persona", choices=[], interactive=True)
+                persona_index = gr.Dropdown(label="Persona", choices=[], interactive=True, allow_custom_value=True)
                 refresh_personas_btn = gr.Button("Refresh generated personas")
             persona_view = gr.JSON(label="Complete synthetic-user profile")
             persona_editor = gr.Code(label="Manual JSON editor", language="json", interactive=True, lines=24)
@@ -1248,11 +1258,11 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         with gr.Tab("Presentations"):
             gr.Markdown("### Saved workspace presentations\nPresentations are generated from completed jobs and stored in the selected user workspace.")
             with gr.Row():
-                presentation_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                presentation_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
                 presentation_refresh = gr.Button("Refresh sessions")
             presentation_status = gr.Markdown()
             with gr.Row():
-                presentation_artifact = gr.Dropdown(label="Presentation", choices=[], interactive=True)
+                presentation_artifact = gr.Dropdown(label="Presentation", choices=[], interactive=True, allow_custom_value=True)
                 presentation_load = gr.Button("Load presentation", variant="primary")
                 presentation_download = gr.DownloadButton("Download presentation")
             presentation_view = gr.HTML(label="Presentation")
@@ -1263,11 +1273,11 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         with gr.Tab("Report Viewer"):
             gr.Markdown("### Saved UX reports\nReports are tenant-owned control-plane artifacts; no GitHub branch or token is used.")
             with gr.Row():
-                report_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                report_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
                 report_refresh = gr.Button("Refresh sessions")
             report_status = gr.Markdown()
             with gr.Row():
-                report_artifact = gr.Dropdown(label="Report", choices=[], interactive=True)
+                report_artifact = gr.Dropdown(label="Report", choices=[], interactive=True, allow_custom_value=True)
                 report_load = gr.Button("Load report", variant="primary")
                 report_download = gr.DownloadButton("Download report")
             rv_report_viewer = gr.Code(label="Report content", language="json", lines=28)
@@ -1278,11 +1288,11 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         with gr.Tab("Persona Thought Logs"):
             gr.Markdown("### Persisted journey and persona logs")
             with gr.Row():
-                log_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                log_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
                 log_refresh = gr.Button("Refresh sessions")
             log_status = gr.Markdown()
             with gr.Row():
-                log_artifact = gr.Dropdown(label="Journey log", choices=[], interactive=True)
+                log_artifact = gr.Dropdown(label="Journey log", choices=[], interactive=True, allow_custom_value=True)
                 log_load = gr.Button("Load log", variant="primary")
                 log_download = gr.DownloadButton("Download log")
             log_viewer = gr.Code(label="Journey events and persona snapshots", language="json", lines=28)
@@ -1293,11 +1303,11 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         with gr.Tab("Evidence Artifacts"):
             gr.Markdown("### Saved browser and UX evidence\nSelect any evidence artifact persisted for this workspace session.")
             with gr.Row():
-                evidence_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True)
+                evidence_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
                 evidence_refresh = gr.Button("Refresh sessions")
             evidence_status = gr.Markdown()
             with gr.Row():
-                evidence_artifact = gr.Dropdown(label="Evidence artifact", choices=[], interactive=True)
+                evidence_artifact = gr.Dropdown(label="Evidence artifact", choices=[], interactive=True, allow_custom_value=True)
                 evidence_load = gr.Button("Load evidence", variant="primary")
                 evidence_download = gr.DownloadButton("Download evidence")
             evidence_viewer = gr.Code(label="Evidence content", lines=24)

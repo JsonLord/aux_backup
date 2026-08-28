@@ -21,6 +21,28 @@ _COLOR_VISION_WEIGHTS = (
 )
 
 
+def _int_env_override(name: str):
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
+def _float_env_override(name: str):
+    raw = os.getenv(name)
+    if not raw:
+        return None
+    try:
+        value = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return value if value > 0 else None
+
+
 class SemanticEngine(Protocol):
     name: str
 
@@ -110,14 +132,23 @@ class DirectLLMSemanticEngine:
                 return json.loads(match.group())
             raise
 
-    def _complete_json(self, prompt: dict, max_attempts: int = 3, retry_wait_seconds: float = 2.0) -> dict:
+    def _complete_json(self, prompt: dict, max_attempts: int | None = None, retry_wait_seconds: float | None = None) -> dict:
         """POST the prompt and parse a JSON completion, retrying the same request on
         transient failure. The "auto" router occasionally returns a non-2xx status,
-        a connection error, or (observed live) an empty completion body -- none of
-        which TinyTroupe's own retry logic covers, since this call bypasses
-        TinyTroupe entirely. Each attempt is the exact same request; nothing about
-        the prompt changes between retries.
+        a connection error (observed live, under concurrent load against a
+        self-hosted backend: SSL: UNEXPECTED_EOF_WHILE_READING -- the server
+        dropping the connection), or an empty completion body -- none of which
+        TinyTroupe's own retry logic covers, since this call bypasses TinyTroupe
+        entirely. Each attempt is the exact same request; nothing about the prompt
+        changes between retries. The wait grows with each attempt (retry_wait_seconds
+        * attempt number) to give a momentarily overloaded server more room to
+        recover on later tries. Overridable via SEMANTIC_ENGINE_MAX_ATTEMPTS /
+        SEMANTIC_ENGINE_RETRY_WAIT_SECONDS.
         """
+        if max_attempts is None:
+            max_attempts = _int_env_override("SEMANTIC_ENGINE_MAX_ATTEMPTS") or 4
+        if retry_wait_seconds is None:
+            retry_wait_seconds = _float_env_override("SEMANTIC_ENGINE_RETRY_WAIT_SECONDS") or 2.0
         last_error: Exception | None = None
         for attempt in range(1, max_attempts + 1):
             try:
@@ -130,7 +161,7 @@ class DirectLLMSemanticEngine:
             except (requests.RequestException, ValueError, KeyError, IndexError, json.JSONDecodeError) as error:
                 last_error = error
                 if attempt < max_attempts:
-                    time.sleep(retry_wait_seconds)
+                    time.sleep(retry_wait_seconds * attempt)
         raise RuntimeError(f"semantic engine request failed after {max_attempts} attempts: {last_error}") from last_error
 
     def compile_behavior(self, persona, scenario, traits, seed):
