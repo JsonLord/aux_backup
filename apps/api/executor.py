@@ -15,6 +15,30 @@ from urllib import request
 from .store import Store
 
 
+_JOURNEYTEST_SEVERITY_MAP = {"info": "low", "minor": "medium", "major": "high", "critical": "critical"}
+
+
+def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
+    """Render a JourneyTest EvidenceReference (screenshot/snapshot/observation/... path
+    or text) into a single human-readable string for the report's ``evidence`` field."""
+    if not evidence:
+        return "No evidence reference recorded on this finding."
+    parts = []
+    if evidence.get("observation"):
+        parts.append(evidence["observation"])
+    if evidence.get("screenshot"):
+        parts.append(f"screenshot: {evidence['screenshot']}")
+    if evidence.get("snapshot"):
+        parts.append(f"snapshot: {evidence['snapshot']}")
+    if evidence.get("uiChangeTimeline"):
+        parts.append(f"UI change timeline: {evidence['uiChangeTimeline']}")
+    if evidence.get("url"):
+        parts.append(f"url: {evidence['url']}")
+    if evidence.get("videoTimeMs") is not None:
+        parts.append(f"video @ {evidence['videoTimeMs']}ms")
+    return "; ".join(parts) if parts else "Evidence reference recorded without a readable field."
+
+
 class JobExecutor:
     def __init__(self, store: Store):
         self.store = store
@@ -100,8 +124,72 @@ class JobExecutor:
                 except request.HTTPError as error:
                     detail = error.read().decode("utf-8", errors="replace")[:2000]
                     raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
-        findings = [{"severity": "medium", "title": f"Validate task clarity: {task}", "evidence": "Inferred from the configured task; browser evidence is pending JourneyTest integration."} for task in tasks]
-        return {"schema_version": "1.0", "mode": "user_journey", "url": data.get("url"), "executive_summary": f"Prepared {len(tasks)} task scenarios for {len(personas)} synthetic users.", "synthetic_users": personas, "persona_artifacts": persona_artifacts, "journey_outcome": {"status": "simulated" if journeys else "configured", "tasks": tasks, "runs": journeys}, "critical_pain_points": findings, "evidence_language": "inferred", "limitations": ["PLACEHOLDER: live JourneyTest browser evidence is not yet connected."]}
+        if worker_url:
+            findings = self._pain_points_from_journeys(journeys)
+            evidence_language, journey_status = "observed", "completed"
+            limitations = [
+                "Findings are JourneyTest's own evidence-grounded verdict (blockers/uxFindings/"
+                "suggestedImprovements/failed pass-criteria) from a real browser run against the "
+                "target URL, not text inferred from the task description.",
+                "Deep Eyeson visual pain-point resolution with element attribution "
+                "(spec.md section 20) is not yet wired to live JourneyTest evidence: "
+                "services/eyeson-worker's evidence analyzer still requires the native "
+                "fixture engine's elementMap/behavior-transition evidence contract, which "
+                "live JourneyTest runs do not yet produce.",
+            ]
+        else:
+            findings = [{"severity": "medium", "category": "ux", "title": f"Validate task clarity: {task}",
+                "summary": "", "evidence": "Inferred from the configured task; JOURNEY_WORKER_URL is not "
+                           "configured for this deployment, so no live browser evidence was collected.",
+                "source": "task_text"} for task in tasks]
+            evidence_language, journey_status = "inferred", "configured"
+            limitations = ["JOURNEY_WORKER_URL is not configured for this deployment; no live "
+                           "browser evidence was collected, so these findings are inferred from "
+                           "the configured task text alone."]
+        return {"schema_version": "1.0", "mode": "user_journey", "url": data.get("url"), "executive_summary": f"Prepared {len(tasks)} task scenarios for {len(personas)} synthetic users.", "synthetic_users": personas, "persona_artifacts": persona_artifacts, "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys}, "critical_pain_points": findings, "evidence_language": evidence_language, "limitations": limitations}
+
+    @staticmethod
+    def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Derive report findings from JourneyTest's own AgentVerdict for each real run
+        (blockers, uxFindings, suggestedImprovements, and failed/blocked pass criteria) --
+        this is the browser-runtime's authoritative, evidence-grounded verdict (spec.md
+        section 3.1: JourneyTest "must own" task completion verdict), not a fixed
+        placeholder. Falls back to a per-task inferred list only when there is no
+        JourneyTest run to draw from (see the caller)."""
+        findings: list[dict[str, Any]] = []
+        for journey in journeys:
+            run_id, persona_id = journey.get("runId"), journey.get("profileId") or journey.get("testerProfileId")
+            verdict = journey.get("verdict") or {}
+            for bucket, fallback_severity in (("blockers", "critical"), ("uxFindings", "medium"), ("suggestedImprovements", "low")):
+                for item in verdict.get(bucket, []):
+                    findings.append({
+                        "severity": _JOURNEYTEST_SEVERITY_MAP.get(item.get("severity"), fallback_severity),
+                        "category": item.get("category"),
+                        "title": item.get("title") or f"{bucket} finding",
+                        "summary": item.get("description") or "",
+                        "recommendation": item.get("recommendation"),
+                        "evidence": _evidence_reference_summary(item.get("evidence")),
+                        "source": bucket, "runId": run_id, "personaId": persona_id,
+                    })
+            for criterion in verdict.get("criteria", []):
+                result = criterion.get("result")
+                if result not in ("not-met", "blocked"):
+                    continue
+                findings.append({
+                    "severity": "critical" if result == "blocked" else "high",
+                    "category": "blocker" if result == "blocked" else "ux",
+                    "title": f"Pass criterion {result}: {criterion.get('id')}",
+                    "summary": criterion.get("explanation") or "",
+                    "evidence": _evidence_reference_summary(criterion.get("evidence")),
+                    "source": "criteria", "runId": run_id, "personaId": persona_id,
+                })
+        if journeys and not findings:
+            findings.append({"severity": "low", "category": "ux", "title": "No pain points detected",
+                "summary": "JourneyTest's verdict reported no blockers, UX findings, or failed pass "
+                           "criteria for the configured tasks.",
+                "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
+                "source": "verdict"})
+        return findings
 
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]

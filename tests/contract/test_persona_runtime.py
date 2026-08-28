@@ -50,6 +50,29 @@ def test_personas_are_distinct_complete_reproducible_and_editable(monkeypatch):
     assert [item["id"] for item in api.get("/v1/personas").json()] == [first["id"], second["id"]]
 
 
+def test_compile_endpoint_gives_an_existing_persona_real_behavior_and_abilities(monkeypatch):
+    """The "Example Persona" / Friedrich_Wolf testing path skips live TinyTroupe
+    generation but must still produce a real, journey-testable profile: journey
+    runs require profile.behavior, so a bare {name, persona} dict isn't enough."""
+    monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
+    profiles.clear()
+    api = TestClient(app)
+    raw_persona = {"name": "Friedrich Wolf", "type": "TinyPerson",
+                   "persona": {"name": "Friedrich Wolf", "occupation": {"title": "Architect"}}}
+    compiled = api.post("/v1/personas/compile", json={"persona": raw_persona, "scenario": "Example persona preview", "seed": 1})
+    assert compiled.status_code == 200
+    body = compiled.json()
+    assert body["source"] == "preset"
+    assert body["persona"]["name"] == "Friedrich Wolf"
+    assert set(body) == {"id", "source", "persona", "abilities", "behavior", "generation"}
+    assert all(0 <= body["behavior"][trait] <= 1 for trait in ("patience", "persistence", "riskTolerance"))
+    assert body["abilities"]["vision"]["colorVision"] in {"typical", "protanopia", "deuteranopia", "tritanopia"}
+
+    fetched = api.get(f"/v1/personas/{body['id']}")
+    assert fetched.status_code == 200
+    assert fetched.json() == body
+
+
 def test_persona_store_survives_reopening(tmp_path):
     database = tmp_path / "personas.db"
     profile = {

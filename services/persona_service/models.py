@@ -18,6 +18,16 @@ class PersonaPatchRequest(BaseModel):
     persona: dict[str, Any]
 
 
+class PersonaCompileRequest(BaseModel):
+    """Compile behavior/ability profiles for an already-built persona (e.g. a
+    bundled TinyTroupe example agent), skipping live TinyTroupe generation."""
+
+    persona: dict[str, Any]
+    scenario: str = ""
+    seed: int = 1
+    source: Literal["tinytroupe", "manual", "preset"] = "preset"
+
+
 class BehaviorProfile(BaseModel):
     """Versioned semantic boundary consumed by the native Journey worker."""
 

@@ -325,40 +325,50 @@ def upload_persona_to_pool(persona_data):
     except Exception as e:
         print(f"Error uploading persona to pool: {e}")
 
+def load_example_persona(example_file, persona_client=None):
+    """Load a bundled example persona (e.g. Friedrich_Wolf.agent.json) and compile a
+    real BehaviorProfile/AbilityProfile for it (through the same PersonaCompiler live
+    generation uses), instead of a bare {name, minibio, persona} dict -- journey
+    testing requires profile.behavior. This keeps example-persona testing free of
+    live TinyTroupe generation latency/cost: recommended default for backend/API
+    testing (see docs/aux-space-status-overview.md).
+
+    Returns the compiled SyntheticUserProfile dict (with "name"/"minibio" added for
+    UI display), or raises if the example file isn't bundled or fails to load.
+    """
+    path = _resolve_example_persona(example_file)
+    if not path:
+        raise FileNotFoundError(f"Example persona '{example_file}' is not bundled in this deployment.")
+    if example_file.endswith(".json"):
+        with open(path, "r") as f:
+            data = json.load(f)
+        name = data.get("name") or data.get("persona", {}).get("name") or "Unknown"
+        bio = BETTER_SUMMARIES.get(example_file)
+        if not bio:
+            bio = data.get("mental_faculties", [{}])[0].get("context") if "mental_faculties" in data else "An example persona."
+        # Match the shape TinyTroupeGenerator._serialize_tiny_person produces for
+        # live-generated personas ({"name": ..., **TinyPerson.to_dict()}), since the
+        # raw example file only has "name" nested under "persona".
+        raw_persona = {"name": name, **data}
+    else:  # .md
+        with open(path, "r") as f:
+            content = f.read()
+        name = example_file.replace(".md", "").replace("_", " ")
+        bio = BETTER_SUMMARIES.get(example_file) or content
+        raw_persona = {"name": name, "background": content}
+    compiled = (persona_client or persona_runtime).compile(
+        raw_persona, scenario=f"Example persona preview: {name}", seed=1)
+    compiled["name"] = name
+    compiled["minibio"] = bio
+    return compiled
+
+
 def select_or_create_personas(theme, customer_profile, num_personas, force_method=None, example_file=None, persona_client=None):
     if force_method == "Example Persona" and example_file:
         add_log(f"Loading example persona from {example_file}...")
         try:
-            path = _resolve_example_persona(example_file)
-            if not path:
-                add_log(f"Example persona '{example_file}' is not bundled in this deployment.")
-                return []
-            if example_file.endswith(".json"):
-                with open(path, "r") as f:
-                    data = json.load(f)
-                
-                name = data.get("name") or data.get("persona", {}).get("name") or "Unknown"
-                bio = BETTER_SUMMARIES.get(example_file)
-                if not bio:
-                    bio = data.get("mental_faculties", [{}])[0].get("context") if "mental_faculties" in data else "An example persona."
-                
-                # Adapt TinyTroupe format to our internal format
-                persona = {
-                    "name": name,
-                    "minibio": bio,
-                    "persona": data
-                }
-            else: # .md
-                with open(path, "r") as f:
-                    content = f.read()
-                name = example_file.replace(".md", "").replace("_", " ")
-                bio = BETTER_SUMMARIES.get(example_file) or content
-                persona = {
-                    "name": name,
-                    "minibio": bio,
-                    "persona": {"name": name, "background": content}
-                }
-            return [persona] * int(num_personas)
+            compiled = load_example_persona(example_file, persona_client)
+            return [compiled] * int(num_personas)
         except Exception as e:
             add_log(f"Failed to load example persona: {e}")
 
@@ -1622,12 +1632,23 @@ if __name__ == "__main__":
     def api_usability_workflow(payload: dict, authorization: str | None = Header(None),
                                workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
         session_client, personas_client = api_clients(authorization, workspace_id)
-        personas = personas_client.generate(payload["theme"], payload["customer_profile"],
-                                            int(payload.get("persona_count", 5)),
-                                            scenario=payload.get("scenario") or f"Test {payload['url']}",
-                                            seed=int(payload.get("seed", 1)),
-                                            allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
-        session = session_client.create_session({"name": payload.get("name") or payload["theme"],
+        example_persona = payload.get("example_persona")
+        if example_persona:
+            # Skip live TinyTroupe generation and use a bundled example persona
+            # (e.g. "Friedrich_Wolf.agent.json") instead -- the recommended default
+            # for exercising the rest of the pipeline (journey run, report) without
+            # paying live generation latency/cost each time.
+            try:
+                personas = [load_example_persona(example_persona, personas_client)] * int(payload.get("persona_count", 1))
+            except FileNotFoundError as error:
+                raise HTTPException(404, str(error))
+        else:
+            personas = personas_client.generate(payload["theme"], payload["customer_profile"],
+                                                int(payload.get("persona_count", 5)),
+                                                scenario=payload.get("scenario") or f"Test {payload['url']}",
+                                                seed=int(payload.get("seed", 1)),
+                                                allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
+        session = session_client.create_session({"name": payload.get("name") or payload.get("theme") or example_persona,
                                                  "target_url": payload["url"], "source": "api"})
         persona_artifacts = [session_client.create_artifact(
             session["session_id"], "persona.profile", profile,

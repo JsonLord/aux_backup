@@ -359,7 +359,7 @@ class TinyTroupeGenerator:
                     return {"name": getattr(person, "name", value.get("name")), **value}
         raise RuntimeError("TinyTroupe TinyPerson exposes no supported serialization method")
 
-    def _profile(self, persona, scenario, seed, model):
+    def _profile(self, persona, scenario, seed, model, source="tinytroupe"):
         # Compilation happens exactly once for this new synthetic user. The validated
         # result is embedded in the durable profile rather than recomputed per run.
         # Behavior and ability compilation are independent calls for the same
@@ -370,8 +370,20 @@ class TinyTroupeGenerator:
             abilities_future = executor.submit(self.compiler.compile_abilities_with_metadata, persona, scenario, seed)
             compilation = behavior_future.result()
             ability_compilation = abilities_future.result()
-        return {"id": f"persona_{uuid4().hex}", "source": "tinytroupe", "persona": persona,
+        return {"id": f"persona_{uuid4().hex}", "source": source, "persona": persona,
                 "abilities": ability_compilation.profile.model_dump(), "behavior": compilation.profile.model_dump(),
                 "generation": {"seed": seed, "model": model,
                                "compilerVersion": f"{self.compiler.version}/{compilation.compiler_version}",
                                "abilityCompilerVersion": f"{self.compiler.version}/{ability_compilation.compiler_version}"}}
+
+    def compile_existing(self, persona, scenario, seed, source="preset"):
+        """Compile behavior/ability profiles for a persona that already exists
+        (e.g. a bundled TinyTroupe example agent), without live generation.
+
+        Used by the "Example Persona" / testing path so a fixed, free persona
+        like Friedrich_Wolf can still get a real, non-default BehaviorProfile
+        and AbilityProfile (through the same PersonaCompiler used for live
+        TinyTroupe generation) and therefore be usable for journey testing,
+        which requires ``profile.behavior``.
+        """
+        return self._profile(persona, scenario, seed, model=source, source=source)

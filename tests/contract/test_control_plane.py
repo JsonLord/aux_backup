@@ -158,6 +158,73 @@ def test_persona_snapshots_reach_worker_and_persist_in_report(tmp_path, monkeypa
     assert [run["simulationProfile"] for run in report["journey_outcome"]["runs"]] == profiles
 
 
+def test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardcoded(tmp_path, monkeypatch):
+    """critical_pain_points must reflect the JourneyTest run's own AgentVerdict
+    (blockers/uxFindings/suggestedImprovements/failed criteria) -- a genuine,
+    per-run, evidence-grounded outcome -- rather than a fixed per-task sentence
+    that's the same regardless of what the browser run actually found."""
+    import json as json_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
+        "metadata": {}})
+
+    verdict = {
+        "status": "failed", "confidence": "high", "summary": "Checkout could not be completed.",
+        "criteria": [{"id": "tasks-completed", "result": "not-met", "explanation": "Checkout button never appeared."},
+                     {"id": "tasks-blocked", "result": "blocked", "explanation": "Blocked by an infinite spinner.",
+                      "evidence": {"screenshot": "/tmp/run/screenshots/003.png"}}],
+        "blockers": [{"id": "blocker-1", "severity": "critical", "category": "blocker",
+                      "title": "Checkout spinner never resolves",
+                      "description": "The spinner after clicking 'Buy' spins indefinitely.",
+                      "evidence": {"screenshot": "/tmp/run/screenshots/003.png", "observation": "Spinner visible for 30s+"},
+                      "recommendation": "Add a timeout and error state to the checkout request."}],
+        "uxFindings": [{"id": "finding-1", "severity": "minor", "category": "ui",
+                        "title": "Low-contrast price label", "description": "Price text is hard to read on the card background."}],
+        "suggestedImprovements": [],
+    }
+
+    class WorkerResponse:
+        def __init__(self, request): self.request = request
+        def __enter__(self):
+            payload = json_module.loads(self.request.data)
+            self.payload = json_module.dumps({"runId": payload["runId"], "runStatus": "completed",
+                "profileId": "persona_ada", "verdict": verdict, "simulationProfile": payload["profile"]}).encode()
+            return self
+        def __exit__(self, *args): pass
+        def read(self): return self.payload
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", lambda request, timeout: WorkerResponse(request))
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+
+    findings = report["critical_pain_points"]
+    assert report["evidence_language"] == "observed"
+    titles = {item["title"] for item in findings}
+    assert "Checkout spinner never resolves" in titles
+    assert "Low-contrast price label" in titles
+    assert any(item["source"] == "criteria" and "tasks-blocked" in item["title"] for item in findings)
+    assert not any("Validate task clarity" in item["title"] for item in findings)
+
+    blocker = next(item for item in findings if item["title"] == "Checkout spinner never resolves")
+    assert blocker["severity"] == "critical"
+    assert "screenshot: /tmp/run/screenshots/003.png" in blocker["evidence"]
+    assert blocker["recommendation"] == "Add a timeout and error state to the checkout request."
+
+    ux_finding = next(item for item in findings if item["title"] == "Low-contrast price label")
+    assert ux_finding["severity"] == "medium"  # journeytest "minor" maps to report "medium"
+
+
 def test_existing_sqlite_schema_receives_additive_tenant_columns(tmp_path):
     database = tmp_path / "legacy.db"
     with sqlite3.connect(database) as db:

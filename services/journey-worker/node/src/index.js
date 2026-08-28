@@ -19,29 +19,31 @@ async function body(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
+function timelineToEvents(timeline, runId) {
+  return (timeline || []).map((entry) => ({
+    type: `journeytest.${entry.type}`, runId, timestamp: entry.wallTime,
+    data: { taskId: entry.taskId, summary: entry.summary, elapsedMs: entry.elapsedMs, ...entry.data },
+  }));
+}
+
 async function runJourney(input, options = {}) {
   if (!input.url || !Array.isArray(input.tasks) || !input.profile?.behavior) throw new Error("url, tasks, and profile.behavior are required");
   const browserSafety = validateBrowserSafety(input);
   if (process.env.JOURNEY_ENGINE === "journeytest") {
     const result = await runWithJourneyTest(input);
     result.browserSafety = browserSafety;
-    const coordinator = options.evidenceCoordinator || new EvidenceCoordinator();
-    result.events ||= [];
-    for (const step of result.steps || []) {
-      const items = Array.isArray(step.evidence) ? step.evidence : step.evidence ? [step.evidence] : [];
-      const selected = items.filter((item) => item?.screenshot);
-      step.evidence = await Promise.all(selected.map(async (evidence) => {
-        result.events.push({ type: "ux.analysis.requested", runId: result.runId,
-          data: { evidenceId: evidence.id, stepId: evidence.stepId, timestampMs: evidence.timestampMs } });
-        const completed = await coordinator.enqueue(evidence);
-        if (completed.eyeson.status !== "pending") result.events.push({
-          type: completed.eyeson.status === "completed" ? "ux.analysis.completed" : "ux.analysis.failed",
-          runId: result.runId, data: { evidenceId: completed.id, stepId: completed.stepId,
-            timestampMs: completed.timestampMs, eyeson: completed.eyeson },
-        });
-        return completed;
-      }));
-    }
+    // journeytest-core's real RunResult (see @baguette-studios/journeytest-core's
+    // core/schemas.ts RunResultSchema) has no `.steps` field -- it reports
+    // `timeline` (real per-action events) and `artifacts.screenshots`/`snapshots`
+    // (file paths on disk), not the fixture engine's elementMap-based step
+    // evidence below. Surface the real timeline as events instead of the
+    // previous no-op loop over a field that never existed on a live run.
+    result.events = timelineToEvents(result.timeline, result.runId);
+    // Eyeson evidence enqueueing (ux.analysis.*) requires the elementMap +
+    // behavior-transition evidence contract built below for the native fixture
+    // engine; live JourneyTest screenshots don't carry that yet (see
+    // apps/api/executor.py's _pain_points_from_journeys limitations for the
+    // user-facing note). Not wired here until that bridge exists.
     return result;
   }
   const controller = new BehaviorController(input.profile);
@@ -103,4 +105,4 @@ const server = http.createServer(async (request, response) => {
 });
 if (require.main === module) server.listen(Number(process.env.PORT || 8080), "0.0.0.0");
 
-module.exports = { runJourney, replayFromEvidence };
+module.exports = { runJourney, replayFromEvidence, timelineToEvents };

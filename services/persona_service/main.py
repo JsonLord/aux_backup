@@ -4,7 +4,7 @@ from apps.api.auth import IdentityProvider
 
 from .compiler import PersonaCompiler
 from .generator import TinyTroupeGenerator
-from .models import PersonaGenerateRequest, PersonaPatchRequest, SyntheticUserProfile
+from .models import PersonaCompileRequest, PersonaGenerateRequest, PersonaPatchRequest, SyntheticUserProfile
 from .store import persona_store_from_environment
 
 app = FastAPI(title="Persona Runtime", version="1.0.0")
@@ -31,6 +31,14 @@ def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
     for item in generated:
         profiles.save(item, auth["workspace_id"], auth["owner_user_id"])
     return generated
+
+
+@app.post("/v1/personas/compile", response_model=SyntheticUserProfile)
+def compile_existing(body: PersonaCompileRequest, auth=Depends(identity)):
+    require_write(auth)
+    compiled = generator.compile_existing(body.persona, body.scenario, body.seed, source=body.source)
+    profiles.save(compiled, auth["workspace_id"], auth["owner_user_id"])
+    return compiled
 
 
 @app.get("/v1/personas", response_model=list[SyntheticUserProfile])

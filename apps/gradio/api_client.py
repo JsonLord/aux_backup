@@ -138,6 +138,11 @@ class PersonaRuntimeClient:
         response.raise_for_status()
         return response.json()
 
+    def compile(self, persona, scenario="", seed=1, source="preset"):
+        response = requests.post(f"{self.base_url}/v1/personas/compile", headers=self.headers, json={"persona": persona, "scenario": scenario, "seed": int(seed), "source": source}, timeout=60)
+        response.raise_for_status()
+        return response.json()
+
     def list(self, limit=50):
         response = requests.get(f"{self.base_url}/v1/personas", headers=self.headers, params={"limit": int(limit)}, timeout=30)
         response.raise_for_status()
