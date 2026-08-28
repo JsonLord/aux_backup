@@ -2,6 +2,77 @@
 
 Date: 2026-08-27, updated 2026-08-28 (multiple passes)
 
+## -7. Stage-2 vision critique, the PersonaPool gap, and infra fixes live
+## testing surfaced along the way
+
+Direct continuation of §-6 (same two directives: prefer example/pool personas
+over live generation for testing; never accept a placeholder where the spec
+calls for something real). Also user-directed: "see where to integrate the
+ux-ai testing eyeson feeding it the screenshots taken during journeytest
+core... based on the 2 stage implementation of user persona feedback and then
+grounding in ux interest."
+
+**New: stage-2 vision-based UX critique.** `services/eyeson-worker`'s
+`visionCritique.js` sends real JourneyTest screenshots plus journeytest-core's
+own semantic element list to the already-configured vision-capable model
+(verified live before wiring anything: "auto" routes to a real vision model,
+which needs a much larger completion budget than text calls -- hidden
+reasoning consumed a 300-token budget with no visible output in one probe).
+Findings are grounded through the previously-unused `CuratedUXKnowledgeProvider`
+(real WCAG/Nielsen Norman references). New `POST /v1/journey-evidence-analyses`
+endpoint; `apps/api/executor.py` calls it for a bounded, evenly-spaced sample
+of each run's screenshots, pairs each with its semantic snapshot by filename
+stem, and crops the specific element region a finding refers to into the
+report as a data URI. Findings seen on multiple screenshots from the same run
+(the same real bug, confirmed by more than one sample) now collapse into one
+finding instead of listing near-duplicates. See `docs/upstream-sources.md`'s
+Eyeson entry for how this relates to the originally-planned Eyeson migration.
+
+**Live verification found a real bug in the tool, then a real bug on a real
+site.** First live run against a real user-provided site
+(`leon4gr45-nova-right-nav.hf.space`) came back `passed` with zero pain
+points from stage 1 alone -- unsurprising, since task-completion verdicts
+can't see design problems. Stage 2 caught what stage 1 structurally cannot:
+a page heading clipped under a sticky header, low-contrast form labels
+(independently confirmed by inspecting the actual screenshot), and -- most
+notably -- a severe rendering bug where the entire hero/header section
+repeats recursively down the page, flagged independently on two different
+screenshots and, on manual review, corrected an earlier (wrong) call in this
+same doc: a similar duplicated-content full-page screenshot was previously
+guessed to be a capture-tool artifact (identical height across two temporally
+separate captures). A fresh vision model with no knowledge of that guess
+looked at the same kind of evidence and called it a real frontend rendering
+bug -- the more likely explanation in hindsight, since Chromium's full-page
+capture renders exactly what's in the DOM.
+
+**Live testing surfaced three more real, fixed bugs while verifying this:**
+1. **PersonaPool had the exact same gap Example Persona had before it was
+   fixed**: `generate_persona_from_deeppersona` (the external DeepPersona-Space
+   stand-in) returned a bare `{name, minibio, persona}` dict with no
+   `behavior`/`abilities`, so any real journey test against a PersonaPool
+   persona would fail. Now compiled through the same `PersonaCompiler` as
+   every other source. Also fixed: a partial PersonaPool result (some
+   DeepPersona calls failed) was being silently discarded, falling through
+   into an unrelated generic fallback path instead of returning what
+   `force_method="PersonaPool"` had actually, successfully produced.
+2. **`/api/v1/workflows/usability` returned a bare, undiagnosable 500** when
+   persona generation/compilation failed upstream (e.g. the shared model
+   router rate-limiting under this session's own heavy testing load) --
+   FastAPI's default handler for an unwrapped exception. Now a 502 with the
+   real error message.
+3. **The persona `compile()` client had a hardcoded 60s timeout** shorter
+   than the server's own legitimate internal retry/backoff (up to
+   `SEMANTIC_ENGINE_MAX_ATTEMPTS` attempts with growing backoff, for two
+   concurrent calls) can take under router load -- found from the newly
+   readable error message in fix (2) immediately after deploying it. Now a
+   generous, overridable 180s default (`PERSONA_COMPILE_TIMEOUT`), matching
+   `generate()`'s existing pattern.
+
+All of the above verified via passing unit/integration tests (Python +
+Node) and, for the vision critique and PersonaPool fixes, live runs against
+real target sites and a local functional check against a running
+persona-runtime.
+
 ## -6. Example-persona journey testing, real pain-points, real UI generation,
 ## and the first live end-to-end verdicts against real target sites
 
