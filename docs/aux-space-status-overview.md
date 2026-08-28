@@ -76,6 +76,20 @@ fixed a real crash the dead code was hiding: the pool-judging loop read
   file, so it always ran on an empty list. Left as-is (a separate,
   differently-scoped feature) rather than silently repurposed.
 
+**Multi-persona Example Persona identity-collapse fix.** Both
+`select_or_create_personas` and the `/api/v1/workflows/usability` API
+endpoint built N-persona example-persona runs with
+`[load_example_persona(...)] * count` -- N references to the exact same
+compiled dict, sharing one persona id. This silently defeated the
+cross-persona synthesis just described: `aggregateCohort` groups
+`affectedUsers` in a Set keyed by persona id, so "5 personas" from one
+example file would always collapse into "1 affected user" and never
+exercise real cohort aggregation. Fixed on both paths: compile the example
+persona once per requested persona, each with its own seed (1..N), giving
+each its own id and seed-varied behavior/ability sample. The cheap
+identical-copy shortcut is kept only where identity doesn't matter (the
+no-network dropdown preview).
+
 ## -7. Stage-2 vision critique, the PersonaPool gap, and infra fixes live
 ## testing surfaced along the way
 
