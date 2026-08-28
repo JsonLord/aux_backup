@@ -1664,21 +1664,27 @@ if __name__ == "__main__":
                                workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
         session_client, personas_client = api_clients(authorization, workspace_id)
         example_persona = payload.get("example_persona")
-        if example_persona:
-            # Skip live TinyTroupe generation and use a bundled example persona
-            # (e.g. "Friedrich_Wolf.agent.json") instead -- the recommended default
-            # for exercising the rest of the pipeline (journey run, report) without
-            # paying live generation latency/cost each time.
-            try:
+        try:
+            if example_persona:
+                # Skip live TinyTroupe generation and use a bundled example persona
+                # (e.g. "Friedrich_Wolf.agent.json") instead -- the recommended
+                # default for exercising the rest of the pipeline (journey run,
+                # report) without paying live generation latency/cost each time.
                 personas = [load_example_persona(example_persona, personas_client)] * int(payload.get("persona_count", 1))
-            except FileNotFoundError as error:
-                raise HTTPException(404, str(error))
-        else:
-            personas = personas_client.generate(payload["theme"], payload["customer_profile"],
-                                                int(payload.get("persona_count", 5)),
-                                                scenario=payload.get("scenario") or f"Test {payload['url']}",
-                                                seed=int(payload.get("seed", 1)),
-                                                allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
+            else:
+                personas = personas_client.generate(payload["theme"], payload["customer_profile"],
+                                                    int(payload.get("persona_count", 5)),
+                                                    scenario=payload.get("scenario") or f"Test {payload['url']}",
+                                                    seed=int(payload.get("seed", 1)),
+                                                    allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
+        except FileNotFoundError as error:
+            raise HTTPException(404, str(error))
+        except requests.exceptions.RequestException as error:
+            # Surface the real upstream failure (e.g. the model router itself
+            # rate-limiting or erroring, propagated as an HTTPError from
+            # personas_client.compile()/generate()) instead of a bare "Internal
+            # Server Error" with no detail.
+            raise HTTPException(502, f"persona generation/compilation failed: {error}")
         session = session_client.create_session({"name": payload.get("name") or payload.get("theme") or example_persona,
                                                  "target_url": payload["url"], "source": "api"})
         persona_artifacts = [session_client.create_artifact(
