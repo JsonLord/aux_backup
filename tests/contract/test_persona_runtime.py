@@ -18,10 +18,11 @@ def test_root_tinytroupe_config_uses_registered_openai_client():
     config.read(Path(__file__).parents[2] / "config.ini")
 
     assert config["OpenAI"]["API_TYPE"] == "openai"
-    assert config["OpenAI"]["BASE_URL"] == "https://api.helmholtz-blablador.fz-juelich.de/v1"
+    assert config["OpenAI"]["BASE_URL"] == "https://debian-devil.tail3f341b.ts.net/v1"
 
 
-def test_personas_are_distinct_complete_reproducible_and_editable():
+def test_personas_are_distinct_complete_reproducible_and_editable(monkeypatch):
+    monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
     profiles.clear()
     api = TestClient(app)
     payload = {"theme": "checkout", "customer_profile": "busy customers", "scenario": "Buy an item", "count": 2, "seed": 42}
@@ -31,7 +32,11 @@ def test_personas_are_distinct_complete_reproducible_and_editable():
     assert first["id"] != second["id"]
     assert set(first) == {"id", "source", "persona", "abilities", "behavior", "generation"}
     assert all(0 <= first["behavior"][trait] <= 1 for trait in ("patience", "persistence", "riskTolerance"))
-    assert first["abilities"]["vision"]["colorVision"] == "typical"
+    # Abilities are persona-varied (not a fixed static default); assert schema/bounds, not an exact value.
+    assert first["abilities"]["vision"]["colorVision"] in {"typical", "protanopia", "deuteranopia", "tritanopia"}
+    assert 0 <= first["abilities"]["vision"]["acuity"] <= 1
+    assert 1 <= first["abilities"]["cognition"]["workingMemoryItems"] <= 12
+    assert first["abilities"] != second["abilities"], "abilities should vary between distinct personas"
 
     first["behavior"]["patience"] = .91
     saved = api.patch(f"/v1/personas/{first['id']}", json={"persona": first})
@@ -64,7 +69,8 @@ def test_persona_store_survives_reopening(tmp_path):
     reopened.close()
 
 
-def test_persona_endpoints_are_workspace_scoped():
+def test_persona_endpoints_are_workspace_scoped(monkeypatch):
+    monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
     profiles.clear()
     api = TestClient(app)
     alpha = {"X-Workspace-ID": "alpha", "X-User-ID": "user-a"}
@@ -150,6 +156,49 @@ def test_compiled_profile_validates_exact_behavior_schema(monkeypatch):
     assert validated.seed == 9
     with pytest.raises(ValidationError):
         BehaviorProfile.model_validate({**compiled, "unversionedTrait": .5})
+
+
+def test_compiled_abilities_are_persona_varied_and_bounded(monkeypatch):
+    monkeypatch.setenv("SEMANTIC_ENGINE", "mock")
+    compiler = PersonaCompiler()
+    ada = compiler.compile_abilities_with_metadata({"name": "Ada"}, "checkout", 9)
+    bob = compiler.compile_abilities_with_metadata({"name": "Bob"}, "checkout", 10)
+
+    assert ada.compiler_version == "mock-v1"
+    assert ada.profile.vision.colorVision in {"typical", "protanopia", "deuteranopia", "tritanopia"}
+    assert 0 <= ada.profile.vision.acuity <= 1
+    assert 1 <= ada.profile.cognition.workingMemoryItems <= 12
+    assert 60 <= ada.profile.reading.wordsPerMinute <= 500
+    assert ada.profile != bob.profile, "different persona/seed should produce different abilities"
+
+    # Same persona/seed is reproducible.
+    ada_again = compiler.compile_abilities_with_metadata({"name": "Ada"}, "checkout", 9)
+    assert ada.profile == ada_again.profile
+
+    # Sampling must not systematically correlate with age (no stereotyping): with the
+    # persona otherwise held fixed, mean acuity across many seeds should not trend
+    # down as age increases. (MockSemanticEngine's RNG draws never branch on any
+    # persona field by construction; this is a statistical sanity check of that.)
+    from services.persona_service.semantic import MockSemanticEngine
+    engine = MockSemanticEngine()
+
+    def mean_acuity(age):
+        values = [engine.compile_abilities({"name": "P", "age": age}, "checkout", seed)["acuity"] for seed in range(200)]
+        return sum(values) / len(values)
+
+    young_mean, old_mean = mean_acuity(22), mean_acuity(81)
+    assert abs(young_mean - old_mean) < 0.05, (
+        f"mean acuity should not vary meaningfully with age alone (young={young_mean}, old={old_mean})")
+
+
+def test_dspy_ability_signature_matches_flat_ability_fields():
+    dspy = pytest.importorskip("dspy")
+    from services.persona_service.compiler import ABILITY_FIELDS, _ABILITY_KEY_MAP
+    from services.persona_service.dspy_program import CompileAbilityProfile
+
+    output_names = set(CompileAbilityProfile.output_fields.keys())
+    expected = {_ABILITY_KEY_MAP.get(field, field) for field in ABILITY_FIELDS}
+    assert output_names == expected
 
 
 def test_generation_compiles_and_persists_once(monkeypatch):

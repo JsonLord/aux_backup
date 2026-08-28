@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures
 import importlib.util
 import importlib
 import inspect
@@ -217,8 +218,16 @@ class TinyTroupeGenerator:
     def _profile(self, persona, scenario, seed, model):
         # Compilation happens exactly once for this new synthetic user. The validated
         # result is embedded in the durable profile rather than recomputed per run.
-        compilation = self.compiler.compile_with_metadata(persona, scenario, seed)
+        # Behavior and ability compilation are independent calls for the same
+        # persona/scenario/seed; run them concurrently so adding ability
+        # compilation doesn't double this method's latency.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
+            behavior_future = executor.submit(self.compiler.compile_with_metadata, persona, scenario, seed)
+            abilities_future = executor.submit(self.compiler.compile_abilities_with_metadata, persona, scenario, seed)
+            compilation = behavior_future.result()
+            ability_compilation = abilities_future.result()
         return {"id": f"persona_{uuid4().hex}", "source": "tinytroupe", "persona": persona,
-                "abilities": default_abilities(), "behavior": compilation.profile.model_dump(),
+                "abilities": ability_compilation.profile.model_dump(), "behavior": compilation.profile.model_dump(),
                 "generation": {"seed": seed, "model": model,
-                               "compilerVersion": f"{self.compiler.version}/{compilation.compiler_version}"}}
+                               "compilerVersion": f"{self.compiler.version}/{compilation.compiler_version}",
+                               "abilityCompilerVersion": f"{self.compiler.version}/{ability_compilation.compiler_version}"}}

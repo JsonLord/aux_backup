@@ -16,3 +16,11 @@ pyjwt[crypto]>=2.10,<3
 llama-index-core>=0.14,<0.15
 llama-index-embeddings-openai>=0.6,<0.7
 llama-index-readers-web>=0.6,<0.7
+# Pinned to match services/persona_service/dspy-artifact.lock's reviewed wheel
+# (sha256:358cbfb15d13246dc4a289bb2350c0ee602260c8a3869f7f63a48a9d2233e48c). Installed
+# with full dependency resolution (not --no-deps like the TinyTroupe install below)
+# since DSPy's litellm-based LM backend needs its real transitive dependency tree
+# to function at runtime, not just to import. DSPy itself stays an explicit
+# PERSONA_COMPILER=dspy opt-in (see docs/stage-4-audit.md); this only makes it
+# available to select.
+dspy==3.3.0
