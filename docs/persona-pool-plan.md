@@ -1,20 +1,21 @@
 # Persona Pool — section plan
 
-Status: **all three components implemented (2026-08-29)**.
+Status: **components A and C implemented and live (2026-08-29); component B
+implemented as an inert template, deliberately not wired to run**.
 The "PersonaPool" generation method in the Gradio UI (`app.py`'s
 `persona_method` Radio) now calls a real GitHub-backed pool lookup
 (`services/persona_service/github_pool.py`, `POST /v1/personas/pool-lookup`)
 instead of the external DeepPersona experience Space stand-in described
 below (`generate_persona_from_deeppersona` has been deleted). The pool repo
 is [JsonLord/PersonaPool](https://github.com/JsonLord/PersonaPool), seeded
-with 6 compiled bundled-example personas, and `.github/workflows/
-persona-pool-generate.yml` (component B, `scripts/
-generate_persona_pool_batch.py`) is wired to add live-generated diversity
-on a daily schedule once its two required secrets are configured -- see
-docs/aux-space-status-overview.md section -10 for what shipped, what was
-verified live, and exactly which secrets remain the user's to add (I
-cannot provision GitHub push credentials or copy a live model-router API
-key into Actions secrets on anyone's behalf). The rest of this document is
+with 6 compiled bundled-example personas. Component B's generation logic
+(`scripts/generate_persona_pool_batch.py`) is real and tested, but its
+GitHub Actions workflow lives at `scripts/persona-pool-generate.yml.template`
+-- outside `.github/workflows/`, at the user's explicit request, so it
+cannot fire in this repo -- rather than as an active scheduled workflow.
+See docs/aux-space-status-overview.md section -10 for what shipped, what
+was verified live, and how to activate the template in a repo where
+scheduled generation is actually wanted. The rest of this document is
 kept as the original design record.
 
 ## 1. Motivation

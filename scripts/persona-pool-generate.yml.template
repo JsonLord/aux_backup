@@ -1,5 +1,14 @@
 name: Generate persona pool batch
 
+# TEMPLATE -- deliberately NOT an active GitHub Actions workflow. Kept here
+# (outside .github/workflows/, where GitHub Actions only ever looks) rather
+# than deleted, so it cannot fire in this repo -- no schedule, no
+# workflow_dispatch, nothing -- while the working code stays available to
+# copy in later. To activate it in a repo where PersonaPool generation
+# should actually run automatically: copy this file to
+# .github/workflows/persona-pool-generate.yml (dropping the .yml.template
+# suffix) in that repo, then add the two secrets below.
+#
 # docs/persona-pool-plan.md component B: runs the same TinyTroupeGenerator/
 # PersonaCompiler pipeline the live Space uses, against a rotating set of
 # theme/customer-profile archetypes, and commits the results to the

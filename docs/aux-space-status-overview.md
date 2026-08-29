@@ -46,10 +46,18 @@ finish -- both routes hold one HTTP connection open synchronously for the
 whole generation, unlike the job-queued journey-run path. Solved properly
 via component B rather than worked around here (see below).
 
-**Component B -- scheduled generation, now implemented.**
-`.github/workflows/persona-pool-generate.yml` runs
-`scripts/generate_persona_pool_batch.py` daily (`workflow_dispatch` also
-available for an on-demand run). It calls `TinyTroupeGenerator` directly
+**Component B -- scheduled generation, implemented as an inert template
+(not wired to run in this repo, at the user's explicit request).**
+Its generation logic runs daily via `scripts/generate_persona_pool_batch.py`
+in the workflow (`workflow_dispatch` also available for an on-demand run)
+when active, but the workflow file itself lives at
+`scripts/persona-pool-generate.yml.template` -- deliberately kept outside
+`.github/workflows/`, the only directory GitHub Actions scans for
+workflows, so it cannot fire on a schedule or be manually dispatched in
+this repo. To activate it elsewhere: copy the file into
+`.github/workflows/persona-pool-generate.yml` (dropping the `.template`
+suffix) in the target repo and add the two secrets below there. The
+script itself calls `TinyTroupeGenerator` directly
 in-process (no HTTP round-trip to time out) against 6 rotating theme/
 customer-profile archetypes (checkout, SaaS onboarding, support, content
 discovery, healthcare scheduling, banking) -- each archetype's
@@ -66,16 +74,16 @@ covers the theme-tag/summary derivation, per-archetype failure isolation
 logic (9 tests, using the generator's deterministic offline-fallback path
 so no live credentials are needed to test it).
 
-**Not yet live-verified -- needs the user's own credentials.** The workflow
-requires two repository secrets neither I nor the Space can supply:
-`BLABLADOR_API_KEY` (the same model-router credential the Space already
-uses, added to *this* repo's Actions secrets) and `PERSONA_POOL_WRITE_TOKEN`
-(a GitHub PAT scoped to `contents:write` on `JsonLord/PersonaPool` only --
-deliberately a different, more-privileged credential than the Space's own
-read-only `PERSONA_POOL_GITHUB_TOKEN`, so a compromised Space credential
-still can't write to the pool repo). Once both are added under this repo's
-Settings -> Secrets and variables -> Actions, a manual `workflow_dispatch`
-run is the way to verify it end-to-end before trusting the daily schedule.
+**Not live-verified -- deliberately deactivated.** Even once copied into an
+active `.github/workflows/` location, it needs two repository secrets
+neither I nor the Space can supply: `BLABLADOR_API_KEY` (the same
+model-router credential the Space already uses) and
+`PERSONA_POOL_WRITE_TOKEN` (a GitHub PAT scoped to `contents:write` on
+`JsonLord/PersonaPool` only -- deliberately a different, more-privileged
+credential than the Space's own read-only `PERSONA_POOL_GITHUB_TOKEN`, so a
+compromised Space credential still can't write to the pool repo). The pool
+stays at its 6-persona hand-seeded state until this is activated somewhere
+and those secrets are added.
 
 Live-verified end-to-end after deploy: `POST /api/v1/personas/pool-lookup`
 for "Architecture and modular housing design" correctly matched Oscar (an architect) as the closest
