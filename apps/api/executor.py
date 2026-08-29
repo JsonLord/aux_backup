@@ -702,12 +702,36 @@ class JobExecutor:
                                    for ref in references) + '</p>') if references else ""
             badge = escape(str(item.get("severity", "")).upper())
             category = escape(str(item.get("category", "")))
+            # The persona's own reasoning from the run that produced this finding --
+            # what makes it demonstrated rather than asserted.
+            quotes = "".join(
+                f'<blockquote style="margin:.4rem 0;padding:.4rem .8rem;border-left:3px solid #38bdf8;opacity:.9">'
+                f'{escape(str(evidence.get("quote", ""))[:400])}'
+                f'<br><span style="opacity:.6;font-size:.8em">— {escape(str(evidence.get("personaName") or "Synthetic user"))}</span>'
+                f'</blockquote>' for evidence in (item.get("personaEvidence") or [])[:2])
             return (f'<li><strong>[{badge}] {escape(item["title"])}</strong> '
                     f'<span style="opacity:.6">({category})</span><br>'
-                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{grounding}{image}</li>')
+                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{grounding}{quotes}{image}</li>')
 
         findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
-        return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1.5rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section><section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
+        preserve_items = "".join(
+            f'<li><strong>{escape(str(item.get("title", "")))}</strong>'
+            + (f' <span style="opacity:.6">(noted by {item["observedByPersonas"]} persona(s))</span>'
+               if item.get("observedByPersonas") else "")
+            + f'<br>{escape(str(item.get("description") or ""))}</li>'
+            for item in (report.get("elements_to_preserve") or []))
+        preserve_section = (f'<section><h2>Elements to preserve</h2><p style="opacity:.7">Design decisions that are '
+                            f'working and should survive a redesign.</p><ul>{preserve_items}</ul></section>'
+                            if preserve_items else "")
+        impact = report.get("impact_analysis") or {}
+        priority_rows = "".join(
+            f'<li><strong>{position}. {escape(str(entry.get("title") or ""))}</strong> '
+            f'<span style="opacity:.6">({escape(str(entry.get("severity") or ""))}'
+            + (f', {entry["affectedPersonas"]} persona(s)' if entry.get("affectedPersonas") else "") + ')</span></li>'
+            for position, entry in enumerate(impact.get("priorityOrder") or [], start=1))
+        impact_section = (f'<section><h2>What to fix first</h2><ol>{priority_rows}</ol></section>'
+                          if priority_rows else "")
+        return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1.5rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section>{impact_section}{preserve_section}<section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
 
     @classmethod
     def _slide_deck(cls, report: dict[str, Any]) -> str:

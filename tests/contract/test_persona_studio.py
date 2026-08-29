@@ -209,3 +209,44 @@ def test_thought_log_renders_real_reasoning_not_the_placeholder_summary():
     assert "Clicked #buy-button" in rendered
     assert "provider timeout" in rendered
     assert "Captured snapshot" not in rendered  # plumbing event filtered out
+
+
+def test_report_viewer_renders_review_structure_not_raw_json():
+    """The Report Viewer tab dumped raw JSON while every other tab rendered its
+    artifact; a ux.report must read as the review it is."""
+    app_module = load_root_app()
+    report = json.dumps({
+        "url": "https://example.com", "evidence_language": "observed",
+        "executive_summary": "1 synthetic user attempted 1 task.",
+        "impact_analysis": {"priorityOrder": [{"title": "Hidden nav", "severity": "high", "affectedPersonas": 2}]},
+        "critical_pain_points": [{
+            "title": "Hidden nav", "severity": "high", "category": "navigation", "affectedPersonas": 2,
+            "summary": "Primary navigation is inside a dropdown.",
+            "rootCause": "The nav collapses at every viewport width.",
+            "alternatives": [{"proposedChange": "Expose the top-level sections inline."}],
+            "personaEvidence": [{"personaName": "Ada", "quote": "I cannot find the sections."}],
+            "grounding": {"references": [{"source": "Nielsen Norman Group", "principle": "Heuristic 6"}]},
+        }],
+        "elements_to_preserve": [{"title": "Consistent buttons", "description": "One control style.",
+                                  "observedByPersonas": 2}],
+        "limitations": ["Observed on a single run."],
+    })
+
+    rendered = app_module.format_ux_report(report)
+
+    assert "# Usability review" in rendered
+    assert "## What to fix first" in rendered
+    assert "02.1 Hidden nav" in rendered
+    assert "**Observed user issue**" in rendered
+    assert "**Root cause analysis**" in rendered
+    assert "Expose the top-level sections inline." in rendered
+    assert "I cannot find the sections." in rendered and "Ada" in rendered
+    assert "Nielsen Norman Group" in rendered
+    assert "## Elements to preserve" in rendered and "Consistent buttons" in rendered
+    assert "## Limitations" in rendered
+
+
+def test_report_viewer_falls_back_for_non_report_json():
+    app_module = load_root_app()
+    assert "```json" in app_module.format_ux_report('{"something": "else"}')
+    assert "Could not parse" in app_module.format_ux_report("not json")

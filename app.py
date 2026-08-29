@@ -915,6 +915,69 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 save_persona_btn = gr.Button("Save manual profile", variant="primary")
             persona_studio_status = gr.Markdown()
 
+        def format_ux_report(content_json: str) -> str:
+            """Render a ux.report as the usability review it is, rather than the raw
+            JSON dump this tab previously showed: findings stated as issue -> root
+            cause -> recommendation, each with the persona reasoning that produced
+            it, then what to fix first and what to preserve."""
+            try:
+                report = json.loads(content_json)
+            except (json.JSONDecodeError, TypeError):
+                return "_Could not parse this artifact as JSON._"
+            if not isinstance(report, dict) or "critical_pain_points" not in report:
+                return f"```json\n{content_json[:4000]}\n```"
+            observed = (report.get("evidence_language") or "") == "observed"
+            lines = [f"# Usability review — {report.get('url', 'target site')}",
+                     f"_{report.get('executive_summary') or ''}_", ""]
+            impact = report.get("impact_analysis") or {}
+            if impact.get("priorityOrder"):
+                lines.append("## What to fix first")
+                for position, entry in enumerate(impact["priorityOrder"], start=1):
+                    reach = f" · {entry['affectedPersonas']} persona(s)" if entry.get("affectedPersonas") else ""
+                    lines.append(f"{position}. **{entry.get('title', '')}** — {entry.get('severity', '')}{reach}")
+                lines.append("")
+            findings = [item for item in report.get("critical_pain_points", [])
+                        if item.get("title") != "No pain points detected"]
+            if findings:
+                lines.append(f"## {'Observed' if observed else 'Predicted'} user issues")
+                for index, item in enumerate(findings, start=1):
+                    severity = str(item.get("severity", "")).upper()
+                    lines.append(f"\n### 02.{index} {item.get('title', 'Finding')}  \n"
+                                 f"`{severity}` · {item.get('category', 'usability')}"
+                                 + (f" · reproduced by {item['affectedPersonas']} persona(s)"
+                                    if item.get("affectedPersonas") else ""))
+                    lines.append(f"\n**{'Observed' if observed else 'Predicted'} user issue** — "
+                                 f"{item.get('summary') or item.get('evidence') or ''}")
+                    root_cause = item.get("rootCause") or item.get("mechanism")
+                    if root_cause:
+                        lines.append(f"\n**Root cause analysis** — {root_cause}")
+                    alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
+                                                                 if item.get("recommendation") else [])
+                    changes = [alt.get("proposedChange") for alt in alternatives if alt.get("proposedChange")]
+                    if changes:
+                        lines.append("\n**Recommendations: design solutions**")
+                        lines.extend(f"- {change}" for change in changes)
+                    for evidence in (item.get("personaEvidence") or [])[:2]:
+                        lines.append(f"\n> 💭 {str(evidence.get('quote', ''))[:400]}\n>\n"
+                                     f"> — _{evidence.get('personaName') or 'Synthetic user'}_")
+                    references = (item.get("grounding") or {}).get("references") or []
+                    if references:
+                        grounded = "; ".join(f"{ref.get('source', '')} — {ref.get('principle') or ref.get('title') or ''}"
+                                             for ref in references)
+                        lines.append(f"\n_Grounded in: {grounded}_")
+            preserve = report.get("elements_to_preserve") or []
+            if preserve:
+                lines.append("\n## Elements to preserve")
+                lines.append("_Design decisions that are working and should survive a redesign._\n")
+                for item in preserve:
+                    seen = (f" _(noted by {item['observedByPersonas']} persona(s))_"
+                            if item.get("observedByPersonas") else "")
+                    lines.append(f"- **{item.get('title', '')}**{seen} — {item.get('description', '')}")
+            if report.get("limitations"):
+                lines.append("\n## Limitations")
+                lines.extend(f"- {limitation}" for limitation in report["limitations"])
+            return "\n".join(lines)
+
         def format_persona_thought_log(content_json: str) -> str:
             """Render a journey.log or persona.profile artifact as readable
             Markdown instead of a wall of raw JSON -- persona identity, the
@@ -1073,10 +1136,21 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 report_artifact = gr.Dropdown(label="Report", choices=[], interactive=True, allow_custom_value=True)
                 report_load = gr.Button("Load report", variant="primary")
                 report_download = gr.DownloadButton("Download report")
-            rv_report_viewer = gr.Code(label="Report content", language="json", lines=28)
+            report_summary = gr.Markdown(label="Report")
+            with gr.Accordion("Raw JSON", open=False):
+                rv_report_viewer = gr.Code(label="Report content", language="json", lines=28)
+
+            def load_and_format_report(session_id, artifact_id, workspace_id,
+                                        oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
+                if not artifact_id:
+                    return content, "", download
+                return format_ux_report(content), content, download
+
             report_refresh.click(workspace_session_choices, [workspace_selector], [report_session, report_status], api_name="list_report_sessions")
             report_session.change(report_choices, [report_session, workspace_selector], [report_artifact], api_name="list_session_reports")
-            report_load.click(load_workspace_artifact, [report_session, report_artifact, workspace_selector], [rv_report_viewer, report_download], api_name="load_session_report")
+            report_load.click(load_and_format_report, [report_session, report_artifact, workspace_selector],
+                              [report_summary, rv_report_viewer, report_download], api_name="load_session_report")
 
         with gr.Tab("Persona Thought Logs"):
             gr.Markdown("### Persisted journey and persona logs")
