@@ -441,6 +441,31 @@ class JobExecutor:
         except (KeyError, TypeError, ValueError, OSError):
             return None
 
+    @staticmethod
+    def _screenshot_data_uri(image_bytes: bytes, max_width: int = 900) -> str | None:
+        """The whole screenshot a finding was critiqued from, downscaled for a slide.
+
+        A vision finding about the page as a whole ("the layout repeats", "footer
+        contrast is too low") legitimately has no single element to point at, so
+        there is no region to crop -- and on a live run against example.com every
+        finding was page-wide, leaving the deck's "Current design" panel empty.
+        Showing the page the issue is about is far better than showing nothing.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        try:
+            with Image.open(BytesIO(image_bytes)) as image:
+                if image.width > max_width:
+                    ratio = max_width / float(image.width)
+                    image = image.resize((max_width, max(1, int(image.height * ratio))))
+                buffer = BytesIO()
+                image.convert("RGB").save(buffer, format="PNG")
+                return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+        except (OSError, ValueError):
+            return None
+
     _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
     @classmethod
@@ -637,10 +662,15 @@ class JobExecutor:
                            key=lambda value: cls._SEVERITY_RANK.get(value, 1))
             affected = len(root_cause["affectedUsers"])
             impact = root_cause["averageStateImpact"]
-            crop = None
+            crop, crop_is_region = None, False
             element = (representative.get("elements") or [{}])[0]
-            if element.get("box") and representative.get("screenshotRef") in screenshot_bytes:
-                crop = cls._crop_element_data_uri(screenshot_bytes[representative["screenshotRef"]], element["box"])
+            screenshot = screenshot_bytes.get(representative.get("screenshotRef"))
+            if element.get("box") and screenshot:
+                crop = cls._crop_element_data_uri(screenshot, element["box"])
+                crop_is_region = crop is not None
+            if crop is None and screenshot:
+                # Page-wide finding (no element to point at): show the page itself.
+                crop = cls._screenshot_data_uri(screenshot)
             alternatives = root_cause.get("alternatives") or []
             recommendation = alternatives[0]["proposedChange"] if alternatives else None
             susceptible_traits = [trait for trait, correlation in (root_cause.get("personaSusceptibility") or {}).items()
@@ -672,6 +702,7 @@ class JobExecutor:
             }
             if crop:
                 finding["screenshotCrop"] = crop
+                finding["screenshotIsRegion"] = crop_is_region
             findings.append(finding)
         return findings
 
@@ -969,8 +1000,9 @@ show(0);
         # Current design | Re-design, the pairing a redesign proposal is read in.
         shots = ""
         if item.get("screenshotCrop"):
-            panels = [f'<figure class="shot"><figcaption>Current design</figcaption>'
-                      f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="The region of the page this issue is about"></figure>']
+            caption = "Current design" if item.get("screenshotIsRegion", True) else "Current design (full page)"
+            panels = [f'<figure class="shot"><figcaption>{caption}</figcaption>'
+                      f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="The part of the page this issue is about"></figure>']
             if item.get("redesignImage"):
                 panels.append(f'<figure class="shot"><figcaption>Re-design</figcaption>'
                               f'<img src="{escape(item["redesignImage"], quote=True)}" alt="Proposed redesign of this region"></figure>')

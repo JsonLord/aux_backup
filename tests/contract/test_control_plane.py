@@ -811,3 +811,35 @@ def test_persona_thoughts_prefer_live_reasoning_over_the_verdict_fallback():
 
     assert [item["text"] for item in thoughts] == ["I cannot see a checkout button anywhere."]
     assert thoughts[0]["source"] == "timeline"
+
+
+def test_page_wide_finding_falls_back_to_the_full_screenshot():
+    """A vision finding about the page as a whole has no element to crop, which
+    left the deck's "Current design" panel empty on a real run where every
+    finding was page-wide. Showing the page itself beats showing nothing."""
+    from io import BytesIO
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1400, 400), color="white").save(buffer, format="PNG")
+
+    uri = JobExecutor._screenshot_data_uri(buffer.getvalue(), max_width=700)
+
+    assert uri.startswith("data:image/png;base64,")
+    import base64 as b64
+    with Image.open(BytesIO(b64.b64decode(uri.split(",", 1)[1]))) as scaled:
+        assert scaled.width == 700  # downscaled for a slide
+
+    assert JobExecutor._screenshot_data_uri(b"not an image") is None
+
+
+def test_finding_slide_labels_a_full_page_shot_distinctly_from_a_region_crop():
+    region = JobExecutor._finding_slide(
+        {"title": "Bad button", "summary": "s", "screenshotCrop": "data:image/png;base64,Zm9v",
+         "screenshotIsRegion": True}, 1, "Observed user issue")
+    full = JobExecutor._finding_slide(
+        {"title": "Layout repeats", "summary": "s", "screenshotCrop": "data:image/png;base64,Zm9v",
+         "screenshotIsRegion": False}, 1, "Observed user issue")
+
+    assert ">Current design<" in region and "full page" not in region
+    assert "Current design (full page)" in full
