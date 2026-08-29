@@ -1,6 +1,79 @@
 # AUX Synthetic UX Demo — Space status overview
 
-Date: 2026-08-27, updated 2026-08-28 (multiple passes)
+Date: 2026-08-27, updated 2026-08-28 (multiple passes), 2026-08-29
+
+## -10. GitHub re-enabled, deliberately scoped two ways
+
+`gh`/GitHub-write flows were removed in section -8 in favor of workspace-scoped
+control-plane storage. Re-enabled here, but narrower and more intentional than
+before -- two separate integrations, not one broad one:
+
+**1. Persona pool -- read-only, "always-connected" service credential.**
+Implements persona-pool-plan.md components A and C (component B, the
+scheduled Actions generation workflow, is explicitly deferred).
+`services/persona_service/github_pool.py`'s `GitHubPersonaPoolClient` reads
+`index.json` and persona files from a dedicated pool repo
+([JsonLord/PersonaPool](https://github.com/JsonLord/PersonaPool)) via the
+GitHub Contents API, TTL-cached (default 300s), using
+`PERSONA_POOL_GITHUB_TOKEN` -- a read-only, contents:read credential
+distinct from any individual user's own GitHub PAT (set as an HF Space
+secret, never baked into the Dockerfile; the client also works
+unauthenticated against a public repo, just under GitHub's lower rate
+limit -- confirmed live, since no token is set yet). Selection uses
+keyword/tag textual distance plus behavior-trait-range distance, picking a
+diversified "closest-ranged group" (farthest-point sampling over the
+nearest candidates) rather than the naively-closest matches, which can
+cluster. New `POST /v1/personas/pool-lookup` (persona-runtime) mints a
+fresh workspace-local persona id per adopted match -- `PersonaStore.save()`
+keys rows globally by persona id, so re-saving a pool file's own id under
+two different workspaces would silently steal it from whichever workspace
+saved it first. `app.py`'s "PersonaPool" generation method now calls this
+lookup and falls back to live TinyTroupe generation for any shortfall,
+replacing the external `THzva/deeppersona-experience` Space call
+(`generate_persona_from_deeppersona`) entirely -- that whole function is
+deleted, not just unreferenced.
+
+Seeded live: `POST /api/v1/personas/compile-example` (new, also generally
+useful standalone) was called once per bundled TinyTroupe example persona
+(Friedrich_Wolf, Lila, Lisa, Marcos, Oscar, Sophie_Lefevre) against the
+deployed Space, producing 6 real compiled `SyntheticUserProfile` records,
+written to the pool repo with a generated `index.json` and README. Directly
+calling `POST /api/v1/personas/generate` (new) or
+`/api/v1/workflows/usability` for live TinyTroupe-generated personas across
+theme archetypes (persona-pool-plan.md section 3's originally planned
+diversity source) was attempted but consistently cut off by an intermediate
+proxy's idle-connection timeout before a multi-minute generation could
+finish -- both routes hold one HTTP connection open synchronously for the
+whole generation, unlike the job-queued journey-run path. Left for the
+deferred GitHub Actions workflow (server-side, no HTTP round-trip to hold
+open) rather than worked around here. Live-verified end-to-end after
+deploy: `POST /api/v1/personas/pool-lookup` for "Architecture and modular
+housing design" correctly matched Oscar (an architect) as the closest
+textual match and picked Sophie Lefevre (unrelated occupation, but a
+behaviorally distant second pick) rather than the second architect in the
+pool, Friedrich_Wolf -- real evidence the diversification pass is doing
+its job, not just returning the K nearest.
+
+**2. Per-user backup -- bring-your-own PAT, session-only.** A new "GitHub
+Backup" tab lets a signed-in user paste their own fine-grained PAT, lists
+repos it can push to via the GitHub API (`GET /user/repos`, filtered to
+`permissions.push`), and syncs the current workspace session's
+ux.report/ux.presentation/ux.slides/journey.log/persona.profile artifacts
+to their chosen repo under `sessions/<session_id>/...` via the Contents API
+(sha-aware create-or-update). `apps/gradio/github_backup.py` holds the
+logic; the PAT lives only in a Gradio browser-session `gr.State` and is
+never written to the control-plane's persistent store -- re-entering it
+after a page reload is the accepted cost of that choice. Live-verified the
+failure path end-to-end (`POST .../gradio_api/call/connect_github` with a
+fake token correctly surfaced "GitHub rejected this token"); the success
+path needs a real user-supplied PAT to verify, which only the signed-in
+user can provide.
+
+Both features' unit/integration tests (`tests/contract/test_persona_pool.py`,
+`tests/contract/test_github_backup.py`) mock all GitHub HTTP calls; the pool
+lookup and the connect-github failure path were additionally verified live
+against the real deployed Space and the real (public) JsonLord/PersonaPool
+repo, as described above.
 
 ## -9. Persistent local storage for sessions/reports/artifacts across restarts
 

@@ -1,10 +1,16 @@
 # Persona Pool — section plan
 
-Status: **planned, not yet implemented**. This document specifies the work behind
-the "PersonaPool" generation method label in the Gradio UI (`app.py`'s
-`persona_method` Radio), which currently still calls the external DeepPersona
-experience Space as a stand-in (`generate_persona_from_deeppersona`). This plan
-describes what should replace that stand-in.
+Status: **components A and C implemented (2026-08-29); component B deferred**.
+The "PersonaPool" generation method in the Gradio UI (`app.py`'s
+`persona_method` Radio) now calls a real GitHub-backed pool lookup
+(`services/persona_service/github_pool.py`, `POST /v1/personas/pool-lookup`)
+instead of the external DeepPersona experience Space stand-in described
+below (`generate_persona_from_deeppersona` has been deleted). The pool repo
+is [JsonLord/PersonaPool](https://github.com/JsonLord/PersonaPool), seeded
+with 6 compiled bundled-example personas -- see
+docs/aux-space-status-overview.md section -10 for what shipped, what was
+verified live, and why component B (below) is still just a plan. The rest
+of this document is kept as the original design record.
 
 ## 1. Motivation
 
