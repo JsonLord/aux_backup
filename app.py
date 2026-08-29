@@ -944,10 +944,15 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             except (json.JSONDecodeError, TypeError):
                 return "_Could not parse this snapshot as JSON._", ""
             elements = snapshot.get("elements") or []
-            stem = (artifact.get("metadata") or {}).get("capture_stem")
+            metadata = artifact.get("metadata") or {}
+            stem, run_id = metadata.get("capture_stem"), metadata.get("run_id")
+            # Match on the run as well as the stem: every persona's run produces
+            # captures with the same stems ("after-click"), so stem alone would
+            # happily pair one persona's snapshot with another's screenshot.
             screenshot = next((item for item in artifacts
                                if item["kind"] == "browser.screenshot"
-                               and (item.get("metadata") or {}).get("capture_stem") == stem), None)
+                               and (item.get("metadata") or {}).get("capture_stem") == stem
+                               and (item.get("metadata") or {}).get("run_id") == run_id), None)
             caption = (f"**Snapshot** — {len(elements)} element(s) on `{snapshot.get('url', '')}`"
                        + (f" · `{stem}`" if stem else ""))
             if screenshot is None:

@@ -250,3 +250,65 @@ def test_report_viewer_falls_back_for_non_report_json():
     app_module = load_root_app()
     assert "```json" in app_module.format_ux_report('{"something": "else"}')
     assert "Could not parse" in app_module.format_ux_report("not json")
+
+
+class FakeArtifactClient:
+    def __init__(self, path): self.path = path
+    def download_artifact(self, artifact): return self.path
+
+
+def test_snapshot_overlay_pairs_with_the_screenshot_from_its_own_run(tmp_path):
+    """Every persona's run produces captures with the same stems ("after-click"),
+    so pairing on the stem alone would show one persona's snapshot over another
+    persona's screenshot."""
+    from PIL import Image
+    app_module = load_root_app()
+    right = tmp_path / "right.png"
+    Image.new("RGB", (300, 200), color="white").save(right)
+
+    snapshot_artifact = {"artifact_id": "art_snap", "kind": "browser.snapshot",
+                         "metadata": {"capture_stem": "after-click", "run_id": "run_B"}}
+    artifacts = [
+        {"artifact_id": "art_a", "kind": "browser.screenshot",
+         "metadata": {"capture_stem": "after-click", "run_id": "run_A"}},
+        {"artifact_id": "art_b", "kind": "browser.screenshot",
+         "metadata": {"capture_stem": "after-click", "run_id": "run_B"}},
+        snapshot_artifact,
+    ]
+    content = json.dumps({"url": "https://example.com", "elements": [
+        {"selector": "#buy", "role": "button", "text": "Buy",
+         "boundingBox": {"x": 10, "y": 20, "width": 80, "height": 30}}]})
+
+    picked = {}
+
+    class Client(FakeArtifactClient):
+        def download_artifact(self, artifact):
+            picked["artifact_id"] = artifact["artifact_id"]
+            return str(right)
+
+    caption, html = app_module.render_snapshot_overlay(content, snapshot_artifact, artifacts, Client(str(right)))
+
+    assert picked["artifact_id"] == "art_b"  # the screenshot from the same run
+    assert "1 element(s)" in caption
+    assert "data:image/png;base64," in html
+    assert "left:10.0px" in html and "width:80.0px" in html  # real box drawn
+    assert "#buy" in html
+
+
+def test_snapshot_overlay_falls_back_to_an_element_list_without_a_screenshot():
+    app_module = load_root_app()
+    snapshot_artifact = {"artifact_id": "art_snap", "kind": "browser.snapshot",
+                         "metadata": {"capture_stem": "lonely", "run_id": "run_A"}}
+    content = json.dumps({"url": "https://example.com",
+                          "elements": [{"selector": "#buy", "role": "button", "text": "Buy"}]})
+
+    caption, html = app_module.render_snapshot_overlay(content, snapshot_artifact, [snapshot_artifact], None)
+
+    assert "No matching screenshot" in caption
+    assert "#buy" in html and "<ul" in html
+
+
+def test_snapshot_overlay_reports_unparseable_json():
+    app_module = load_root_app()
+    caption, html = app_module.render_snapshot_overlay("not json", {"metadata": {}}, [], None)
+    assert "Could not parse" in caption and html == ""
