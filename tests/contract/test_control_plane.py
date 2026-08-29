@@ -381,6 +381,12 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     assert "2 observation(s) across 2 persona(s)" in finding["evidence"]
     assert finding["recommendation"] == "Use 'Complete purchase'."
     assert finding["screenshotCrop"].startswith("data:image/png;base64,")
+    # Real knowledge grounding (WCAG/Nielsen-Norman references) is computed per
+    # observation in visionCritique.js but aggregateCohort's root-cause groups
+    # don't carry it -- must survive synthesis onto the report finding, not get
+    # silently dropped at this step.
+    assert finding["grounding"] == {"status": "completed",
+        "references": [{"source": "Nielsen Norman Group", "principle": "Usability heuristic 1"}]}
     # Not a per-persona citation list -- one synthesized finding, not two.
     assert len([item for item in report["critical_pain_points"] if "Ambiguous button label" in item["title"]]) == 1
     assert not any(item["title"] == "No pain points detected" for item in report["critical_pain_points"])
@@ -388,6 +394,10 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     presentation = store.read_artifact(completed["output_artifacts"][1]).decode("utf-8")
     assert "Ambiguous button label" in presentation
     assert '<img src="data:image/png;base64,' in presentation
+    assert "Grounded in:" in presentation and "Nielsen Norman Group" in presentation
+
+    slides = store.read_artifact(completed["output_artifacts"][2]).decode("utf-8")
+    assert "Grounded in:" in slides and "Nielsen Norman Group" in slides
 
 
 def test_slide_deck_renders_one_navigable_slide_per_synthesized_finding():

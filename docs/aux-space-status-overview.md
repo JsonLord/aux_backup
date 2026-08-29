@@ -1,6 +1,76 @@
 # AUX Synthetic UX Demo — Space status overview
 
-Date: 2026-08-27, updated 2026-08-28 (multiple passes), 2026-08-29
+Date: 2026-08-27, updated 2026-08-28 (multiple passes), 2026-08-29 (multiple passes)
+
+## -11. Live-observed Persona Studio crashes, example personas in the Studio,
+knowledge-grounding synthesis bug, and a stale-doc correction pass
+
+Two real production stack traces surfaced from the deployed Space's own logs:
+
+- **`load_persona` `IndexError: list index out of range`.** Selecting a
+  `persona_index` value with no matching entry in `persona_display` (e.g. a
+  stale dropdown value left over from before a page reload, or before any
+  persona had been loaded) crashed the event handler outright. `load_persona`
+  now falls back to the first available profile for an out-of-range index,
+  and to blank defaults for an empty list, instead of raising.
+- **`monitor_and_log` `401 Unauthorized`, from the Live Monitoring tab's 60s
+  background timer.** That timer fires for every open tab regardless of
+  sign-in state; an expired HF OAuth session (a long-idle tab) or an
+  anonymous visitor without `ADMIN_API_TOKEN` configured produced an
+  unhandled `HTTPError`/`PermissionError` every minute, spamming the server
+  log. Now caught and surfaced as a status message in the tab instead.
+
+**Example personas enabled directly in Persona Studio**, per explicit
+request: previously the 6 bundled example personas (Friedrich_Wolf, Lila,
+Lisa, Marcos, Oscar, Sophie_Lefevre) were only reachable through the
+Analysis Orchestrator's Generate flow (`persona_method = "Example Persona"`).
+A new "Bundled example persona" dropdown + "Load into Studio" button in
+Persona Studio compiles one directly (real behavior/abilities through the
+same `PersonaCompiler` every other source uses) and appends it to whatever's
+already loaded, selecting it immediately for editing -- no Generate run
+required. This is very likely what the crashing `persona_index` selection
+above was actually reaching for.
+
+**Blablador naming retired from app.py.** We no longer use Helmholtz
+Blablador -- the self-hosted freellmapi router has been primary since
+section -1. `app.py`'s own module-level config resolution still read
+`BLABLADOR_API_KEY`/`BLABLADOR_BASE_URL` *before* `OPENAI_*`, inverted from
+the comment above it describing the intended precedence (and from
+`start-live.sh`'s own resolution order). Renamed to `LLM_API_KEY`/
+`LLM_BASE_URL`/`get_llm_client()`/`llm_chat_adaptation`, with `OPENAI_*` read
+first and `BLABLADOR_*` kept only as a legacy env-var fallback (the actual
+env var names, not the internal identifiers, since `start-live.sh` and
+anything else in the deployed container may still reference them).
+
+**Real knowledge grounding was silently lost during cross-persona
+synthesis** -- found while correcting section 7's now-very-stale phase
+table below. `visionCritique.js` calls `groundPainPoint` against a curated
+WCAG/Nielsen-Norman corpus for every finding and sets a real `grounding`
+field on each `UXPainPoint`, but `aggregate.js`'s `aggregateCohort` never
+carries that field into its root-cause groups, and `apps/api/executor.py`'s
+`_synthesize_pain_points` never read it off the representative pain point
+either -- so `critical_pain_points[].grounding` was `None` on every real
+report, presentation, and slide deck this session ever produced, despite
+the underlying references being real and correctly computed. Fixed
+entirely in Python (no JS change needed: `_synthesize_pain_points` already
+has the full original pain points via `pain_point_by_id`, grounding
+included) -- `representative.get("grounding")` is now copied onto the
+report finding, and both `_presentation` and `_slide_deck` render a
+"Grounded in: <source> — <principle>" line when references are present.
+`test_vision_critique_synthesizes_across_personas_with_element_crop` now
+asserts grounding survives into the report, the presentation HTML, and the
+slide deck HTML.
+
+Section 7 below ("Open spec stages / phases") was still describing a
+2026-08-27 snapshot -- a Blablador 502 blocking live generation, "no
+observed live run yet" -- that every later section of this document had
+already resolved with real, live evidence. Corrected in place rather than
+left to mislead a future reader.
+
+Verified: full Python suite 89 passed / 4 skipped (8 new tests in
+`tests/contract/test_persona_studio.py`); `services/eyeson-worker/node`'s
+18-test suite unaffected (no JS changed); `app.py` imports cleanly
+standalone.
 
 ## -10. GitHub re-enabled, deliberately scoped two ways
 
@@ -819,23 +889,27 @@ endpoint returned correct data, not merely a 200.
 ## 7. Open spec stages / phases
 
 The migration plan in `spec.md` §41 (Phases 0–12) and the Definition-of-complete-v1
-(§48). Status synthesized from the code, the stage-1…20 audits, and live behavior:
+(§48). **This table was last accurate around 2026-08-27 and had gone stale** --
+most rows below describe blockers (a Blablador 502, "no observed live run yet")
+that sections -2 through -10 of this document since resolved with real, live
+evidence. Corrected 2026-08-29 against that later work and one gap it surfaced
+(see the grounding note under phase 12):
 
 | Phase | Area | Status |
 | --- | --- | --- |
 | 0 | Dependency baselines, persona-runtime service, shared IDs | ✅ done |
-| 1 | One JourneyTest run inside host | ⚠️ wired; **no observed live run yet** (model 502) |
-| 2 | TinyTroupe persona generation | ⚠️ wired + offline fallback; **live batch unverified** (this change targets it) |
+| 1 | One JourneyTest run inside host | ✅ done -- proven live repeatedly (section -2's first completed batch run, section -10's multi-persona live verification) |
+| 2 | TinyTroupe persona generation | ✅ done -- live generation confirmed working (section -2), plus lightweight `/api/v1/personas/generate`/`compile-example` routes (section -10) |
 | 3 | BehaviorController MVP | ✅ native controller present (readiness `behaviorController:true`) |
-| 4 | DSPy persona compiler | ⚠️ compiler works; **DSPy disabled** on the live image (`dspyAvailable:false`) — deterministic compiler in use |
-| 5 | Evidence bus / screenshot streaming to Eyeson | ⚠️ workers ready; **not proven end to end** (no live screenshots) |
-| 6 | Pain-point resolver | 🚧 present in code slices; unproven without observed runs |
-| 7 | Two-mode report UI | 🚧 partial |
-| 8 | Alternative generation | 🚧 partial (model-gated) |
-| 9 | RAG placeholder | ✅ placeholder ships (`not_configured`) |
+| 4 | DSPy persona compiler | ⚠️ available but not selected by default: `dspyAvailable:true` in readiness means the package imports, but `PERSONA_COMPILER` defaults to `native` -- the deterministic compiler is what's actually active in production, not DSPy |
+| 5 | Evidence bus / screenshot streaming to Eyeson | ✅ done -- proven end to end repeatedly (section -7's live vision critique, section -10's live crop/finding evidence) |
+| 6 | Pain-point resolver | ✅ done for the active path (vision-critique -> `toPainPoint` -> `aggregateCohort`, section -8); `services/eyeson-worker/node/src/painResolver.js` (the native-fixture-engine path) remains an explicit, deliberate placeholder for a path this deployment doesn't use |
+| 7 | Two-mode report UI | ✅ done -- stage 1 (JourneyTest's own AgentVerdict) and stage 2 (independent vision critique) both live in `critical_pain_points` |
+| 8 | Alternative generation | ✅ done for the active path -- vision findings get real, structured LLM-proposed alternatives (section -8); `alternatives.js`'s template system remains an explicit placeholder for the native-fixture-engine path |
+| 9 | RAG placeholder | ✅ real for the active path -- `CuratedUXKnowledgeProvider` (WCAG/Nielsen-Norman references) grounds every vision-critique finding (section -7), though until 2026-08-29 that grounding was silently dropped during cross-persona synthesis and never reached the report/presentation/slides (fixed today, see phase 12) |
 | 10 | Physical/perceptual profiles | ✅ ability compilation works (verified via `apply_persona_tweaks`) |
-| 11 | Cohort aggregation | 🚧 open |
-| 12 | Real knowledge grounding | ⛔ future roadmap, not started |
+| 11 | Cohort aggregation | ✅ done -- `aggregateCohort` wired to the live evidence path and verified live (section -10: correctly matched and diversified real pool personas) |
+| 12 | Real knowledge grounding | ⚠️ real but narrow: a 3-source curated WCAG/Nielsen-Norman corpus (`services/eyeson-worker/node/src/knowledge.js`), not the fuller corpus spec.md §51 envisions (peer-reviewed UX/HCI literature, internal design system, past studies, support tickets, analytics, A/B tests -- none of that is started). **Bug fixed 2026-08-29**: `apps/api/executor.py`'s `_synthesize_pain_points` built its report finding without ever reading the representative pain point's `grounding` field, so real references computed per observation never survived cross-persona synthesis into the user-facing report, presentation, or slide deck -- silently `None` in every report despite being real upstream. Now copied through to all three, with a new test asserting it end to end. |
 
 Cross-cutting open items:
 - **Production topology**: the Space is a single-container preview. Production

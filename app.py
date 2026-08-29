@@ -27,13 +27,15 @@ import logging
 # Configuration from environment variables
 GITHUB_TOKEN = os.environ.get("GITHUB_TOKEN") or os.environ.get("GITHUB_API_TOKEN") or os.environ.get("GITHUB_API_KEY")
 # Primary provider is the self-hosted freellmapi router (Tailscale Funnel; see
-# spaces/aux-live/start-live.sh). BLABLADOR_* names remain supported as legacy
-# aliases for the same OPENAI_* settings.
-BLABLADOR_API_KEY = os.environ.get("BLABLADOR_API_KEY") or os.environ.get("OPENAI_API_KEY")
-BLABLADOR_BASE_URL = (
-    os.environ.get("BLABLADOR_BASE_URL")
-    or os.environ.get("OPENAI_COMPATIBLE_ENDPOINT")
+# spaces/aux-live/start-live.sh). We no longer use Helmholtz Blablador -- the
+# OPENAI_* names take priority here; BLABLADOR_* names are read only as a
+# legacy fallback (start-live.sh still mirrors them for anything else that
+# might read them), never preferred over the current OPENAI_* configuration.
+LLM_API_KEY = os.environ.get("OPENAI_API_KEY") or os.environ.get("BLABLADOR_API_KEY")
+LLM_BASE_URL = (
+    os.environ.get("OPENAI_COMPATIBLE_ENDPOINT")
     or os.environ.get("OPENAI_BASE_URL")
+    or os.environ.get("BLABLADOR_BASE_URL")
     or "https://debian-devil.tail3f341b.ts.net/v1"
 )
 # The freellmapi router requires the literal model id "auto" (its router picks the
@@ -163,13 +165,14 @@ def call_llm_parallel(client, model_names, messages, **kwargs):
 
     return Exception("All parallel calls failed")
 
-# BLABLADOR Client for task generation
-def get_blablador_client():
-    if not BLABLADOR_API_KEY:
+# OpenAI-compatible client for the self-hosted freellmapi router, used for
+# task generation and the UI-adaptation chat.
+def get_llm_client():
+    if not LLM_API_KEY:
         return None
     return OpenAI(
-        api_key=BLABLADOR_API_KEY,
-        base_url=BLABLADOR_BASE_URL
+        api_key=LLM_API_KEY,
+        base_url=LLM_BASE_URL
     )
 
 def _example_persona_dirs():
@@ -317,7 +320,7 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
         add_log("Forcing TinyTroupe generation...")
         return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
 
-    client = get_blablador_client()
+    client = get_llm_client()
     if not client:
         return generate_personas(theme, customer_profile, num_personas, persona_client)
 
@@ -404,9 +407,9 @@ def generate_personas(theme, customer_profile, num_personas, persona_client=None
     return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
 
 def generate_tasks(theme, customer_profile, url):
-    client = get_blablador_client()
+    client = get_llm_client()
     if not client:
-        return [f"Task {i+1} for {theme} (BLABLADOR_API_KEY not set)" for i in range(10)]
+        return [f"Task {i+1} for {theme} (OPENAI_API_KEY not set)" for i in range(10)]
 
     prompt = f"""
     Generate EXACTLY 10 sequential tasks for a user to perform on the website: {url}
@@ -684,7 +687,7 @@ def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfi
     except Exception as error:
         return f"Unable to load the saved UI artifact: {error}"
 
-def blablador_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+def llm_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not jules_uuid:
         return history + [("System", "Error: Analysis job ID missing.")], ""
     try:
@@ -867,6 +870,12 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             with gr.Row():
                 persona_index = gr.Dropdown(label="Persona", choices=[], interactive=True, allow_custom_value=True)
                 refresh_personas_btn = gr.Button("Refresh generated personas")
+            with gr.Row():
+                studio_example_persona_select = gr.Dropdown(
+                    label="Bundled example persona", choices=get_example_personas(),
+                    value=(get_example_personas()[0] if get_example_personas() else None),
+                    interactive=True)
+                load_example_into_studio_btn = gr.Button("Load into Studio", variant="secondary")
             persona_view = gr.JSON(label="Complete synthetic-user profile")
             persona_editor = gr.Code(label="Manual JSON editor", language="json", interactive=True, lines=24)
             with gr.Accordion("Behavior characteristics (0–1)", open=True):
@@ -1171,7 +1180,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
             generate_full_ui_btn.click(fn=generate_full_ui_call, inputs=[jules_uuid_ui, selected_solutions_json_state, url_input, workspace_selector], outputs=[full_ui_iframe])
             refresh_ui_btn.click(fn=poll_for_generated_ui, inputs=[jules_uuid_ui, workspace_selector], outputs=[full_ui_iframe])
-            ui_chat_send.click(fn=blablador_chat_adaptation, inputs=[ui_chat_msg, ui_chatbot, jules_uuid_ui, workspace_selector], outputs=[ui_chatbot, ui_chat_msg])
+            ui_chat_send.click(fn=llm_chat_adaptation, inputs=[ui_chat_msg, ui_chatbot, jules_uuid_ui, workspace_selector], outputs=[ui_chatbot, ui_chat_msg])
 
 
         with gr.Tab("System"):
@@ -1201,8 +1210,22 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             global_feed = gr.Markdown(value="Waiting for new reports...")
             
             def monitor_and_log(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                sessions = session_client.list_sessions()
+                # This fires on a 60s background timer for every open tab, signed
+                # in or not, so an expired HF OAuth token (a long-idle browser tab)
+                # or an anonymous visitor without ADMIN_API_TOKEN configured must
+                # not raise an unhandled exception here -- that would spam the
+                # server log every minute per stale tab. Show a clear status
+                # instead of crashing.
+                try:
+                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    sessions = session_client.list_sessions()
+                except PermissionError as error:
+                    return f"_{error}_", ""
+                except requests.exceptions.HTTPError as error:
+                    status = error.response.status_code if error.response is not None else "?"
+                    return f"_Could not refresh (HTTP {status}) -- sign in again if this persists._", ""
+                except requests.exceptions.RequestException as error:
+                    return f"_Could not reach the control plane: {error}_", ""
                 rows, logs, snapshots = [], [], []
                 for session in sessions[:20]:
                     jobs = session_client.list_jobs(session["session_id"])
@@ -1252,11 +1275,42 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
     def load_persona(personas, index):
-        profile = normalize_personas(personas)[int(index or 0)]
+        normalized = normalize_personas(personas)
+        try:
+            position = int(index or 0)
+            profile = normalized[position] if 0 <= position < len(normalized) else normalized[0]
+        except (IndexError, ValueError):
+            # Nothing to load (empty list, or a stale index left over from a
+            # previous persona_display that no longer matches) -- return the
+            # same defaults load_persona would derive from an empty profile,
+            # instead of crashing the event handler.
+            return [None, "", *[.5 for _ in behavior_sliders], "typical", 1, 1, .9, .8, 5, 220]
         behavior, abilities = profile.get("behavior", {}), profile.get("abilities", {})
         vision, motor = abilities.get("vision", {}), abilities.get("motor", {})
         cognition, reading = abilities.get("cognition", {}), abilities.get("reading", {})
         return [profile, json.dumps(profile, indent=2), *[behavior.get(trait, .5) for trait in behavior_sliders], vision.get("colorVision", "typical"), vision.get("acuity", 1), vision.get("contrastSensitivity", 1), motor.get("pointerPrecision", .9), cognition.get("processingSpeed", .8), cognition.get("workingMemoryItems", 5), reading.get("wordsPerMinute", 220)]
+
+    def load_example_persona_into_studio(example_file, personas, workspace_id,
+                                         oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+        # Direct path into the Studio for the bundled example personas
+        # (Friedrich_Wolf, Lila, Lisa, Marcos, Oscar, Sophie_Lefevre), instead of
+        # only reaching them through the Analysis Orchestrator's Generate flow.
+        # Compiled through the same PersonaCompiler as every other persona
+        # source (real behavior/abilities, not a bare display-only stub) and
+        # appended to whatever's already loaded, so it doesn't clobber personas
+        # from an earlier Generate run.
+        if not example_file:
+            return personas, gr.update(), "Choose a bundled example persona first."
+        try:
+            _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+            compiled = load_example_persona(example_file, personas_client, compile_behavior=True, seed=1)
+        except requests.exceptions.RequestException as error:
+            return personas, gr.update(), f"Failed to load {example_file}: {error}"
+        updated = normalize_personas(personas) + [compiled]
+        choices = [(item.get("persona", {}).get("name", item.get("name", item.get("id", "Persona"))), str(index))
+                   for index, item in enumerate(updated)]
+        new_index = str(len(updated) - 1)
+        return updated, gr.update(choices=choices, value=new_index), f"Loaded **{compiled.get('name', example_file)}** into the Studio."
 
     def apply_persona_tweaks(profile_json, *values):
         profile = json.loads(profile_json)
@@ -1284,6 +1338,13 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         outputs=[status_output, task_list_display, persona_display, last_generated_tasks_state],
         api_name="generate_personas",
     ).then(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
+
+    load_example_into_studio_btn.click(
+        fn=load_example_persona_into_studio,
+        inputs=[studio_example_persona_select, persona_display, workspace_selector],
+        outputs=[persona_display, persona_index, persona_studio_status],
+        api_name="load_example_persona_into_studio",
+    ).then(fn=load_persona, inputs=[persona_display, persona_index], outputs=studio_outputs)
 
     refresh_personas_btn.click(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
     persona_index.change(fn=load_persona, inputs=[persona_display, persona_index], outputs=studio_outputs)

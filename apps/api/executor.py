@@ -402,6 +402,12 @@ class JobExecutor:
                 "recommendation": recommendation,
                 "alternatives": [{"proposedChange": alt["proposedChange"], "rationale": alt.get("rationale"),
                                   "effort": alt.get("effort")} for alt in alternatives],
+                # aggregateCohort's root-cause groups don't carry grounding (it isn't
+                # part of the JS aggregation output); every member pain point shares
+                # the same diagnosis.category as the group signature, so the curated
+                # UX-heuristics references are identical across them -- take it from
+                # the representative rather than losing it at this synthesis step.
+                "grounding": representative.get("grounding"),
                 "evidence": f"synthesized from {len(member_points)} observation(s) across {affected} persona(s); "
                             f"estimated impact: frustration {impact['frustration']:.2f}, "
                             f"confusion {impact['confusion']:.2f}, trust erosion {-impact['trust']:.2f}",
@@ -477,11 +483,15 @@ class JobExecutor:
                      if item.get("screenshotCrop") else "")
             recommendation = (f'<p style="opacity:.85"><strong>Recommendation:</strong> {escape(item["recommendation"])}</p>'
                               if item.get("recommendation") else "")
+            references = (item.get("grounding") or {}).get("references") or []
+            grounding = (f'<p style="opacity:.6;font-size:.85em"><strong>Grounded in:</strong> ' +
+                         "; ".join(f'{escape(ref.get("source", ""))} — {escape(ref.get("principle") or ref.get("title") or "")}'
+                                   for ref in references) + '</p>') if references else ""
             badge = escape(str(item.get("severity", "")).upper())
             category = escape(str(item.get("category", "")))
             return (f'<li><strong>[{badge}] {escape(item["title"])}</strong> '
                     f'<span style="opacity:.6">({category})</span><br>'
-                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{image}</li>')
+                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{grounding}{image}</li>')
 
         findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
         return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1.5rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section><section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
@@ -510,11 +520,15 @@ class JobExecutor:
                                                           if item.get("recommendation") else [])
             changes = "".join(f"<li>{escape(alt.get('proposedChange', ''))}</li>" for alt in alternatives if alt.get("proposedChange"))
             affected = f'<p class="affected">Observed across {item["affectedPersonas"]} tested persona(s)</p>' if item.get("affectedPersonas") else ""
+            references = (item.get("grounding") or {}).get("references") or []
+            grounding = (f'<p class="grounding"><strong>Grounded in:</strong> ' +
+                         "; ".join(f'{escape(ref.get("source", ""))} — {escape(ref.get("principle") or ref.get("title") or "")}'
+                                   for ref in references) + '</p>') if references else ""
             return (f'<section class="slide" data-severity="{escape(str(item.get("severity", "")))}">'
                     f'<span class="badge">{escape(str(item.get("severity", "")).upper())} &middot; {escape(str(item.get("category", "")))}</span>'
                     f'<h2>{index}. {escape(item.get("title", "Finding"))}</h2>{affected}'
                     f'<p class="summary">{escape(item.get("summary") or item.get("evidence") or "")}</p>'
-                    f'{image}{f"<h3>What to change</h3><ul>{changes}</ul>" if changes else ""}</section>')
+                    f'{image}{f"<h3>What to change</h3><ul>{changes}</ul>" if changes else ""}{grounding}</section>')
 
         slides = "".join(render_slide(index, item) for index, item in enumerate(findings, start=1)) or \
             '<section class="slide"><h2>No findings</h2><p>No pain points were reported for this run.</p></section>'
@@ -537,6 +551,7 @@ body{{margin:0;font:20px/1.5 system-ui,sans-serif;background:#0b1220;color:#f1f5
 .url{{opacity:.7}}
 .summary{{max-width:60rem}}
 .affected{{opacity:.75;font-size:.95rem}}
+.grounding{{opacity:.6;font-size:.85rem;max-width:60rem}}
 img{{max-width:min(90%,640px);border-radius:.75rem;border:1px solid #334155}}
 .nav{{position:fixed;bottom:1.5rem;right:1.5rem;display:flex;gap:.5rem;z-index:10}}
 .nav button{{background:#1e293b;color:#f1f5f9;border:1px solid #334155;border-radius:.5rem;padding:.5rem 1rem;cursor:pointer;font-size:1rem}}
