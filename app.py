@@ -541,7 +541,7 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
         yield f"Error during generation: {str(e)}", None, None, None
 
 
-def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+def start_and_monitor_sessions(personas, tasks, url, allow_irreversible_actions, session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     if not personas or not tasks:
         yield "Error: Personas or Tasks missing. Please generate them first.", "", "", ""
         return
@@ -558,7 +558,15 @@ def start_and_monitor_sessions(personas, tasks, url, session_id, workspace_id, o
                 metadata={"schema_version": "1.0", "persona_id": profile["id"], "immutable_run_snapshot": True},
             )
             persona_artifacts.append(artifact["artifact_id"])
-        job = session_client.create_job({"session_id": session["session_id"], "type": "combined_test", "input_artifacts": persona_artifacts, "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": url}})
+        # journey-worker's safety.js blocks any task whose text matches a
+        # destructive-action pattern (purchase, delete account, deploy
+        # production, ...) unless browserSafety.allowIrreversibleActions is
+        # explicitly set (spec.md section 36: "require explicit configuration
+        # for purchases, submissions or irreversible operations"). Off by
+        # default; this is the opt-in the UI exposes for it.
+        job = session_client.create_job({"session_id": session["session_id"], "type": "combined_test", "input_artifacts": persona_artifacts,
+            "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": url,
+                        "browserSafety": {"allowIrreversibleActions": bool(allow_irreversible_actions)}}})
         yield f"Analysis queued: {job['job_id']}", "", session["session_id"], job["job_id"]
         job = session_client.wait_for_job(job["job_id"])
         if job["status"] != "succeeded":
@@ -771,6 +779,12 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     profile_input = gr.Textbox(label="Customer Profile Description", placeholder="Describe the target customer...")
                     num_personas_input = gr.Number(label="Number of Personas", value=1, precision=0, minimum=1, maximum=TINYTROUPE_MAX_PERSONAS)
                     url_input = gr.Textbox(label="Target URL", value="https://example.com")
+                    allow_irreversible_actions_input = gr.Checkbox(
+                        label="Allow potentially irreversible actions (purchases, submissions, deletions, deploys)",
+                        value=False,
+                        info="Off by default (spec.md section 36): the journey worker blocks any task whose text "
+                             "mentions a destructive action (e.g. \"place order\", \"delete account\", \"deploy "
+                             "production\") against the real target URL unless explicitly allowed here.")
                     persona_method = gr.Radio(["Example Persona", "TinyTroupe", "PersonaPool"], label="Persona Generation Method", value="TinyTroupe")
                     tinytroupe_warning = gr.Markdown(
                         f"⏳ **Live TinyTroupe generation is capped at {TINYTROUPE_MAX_PERSONAS} personas per run "
@@ -1353,7 +1367,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
     start_session_btn.click(
         fn=start_and_monitor_sessions,
-        inputs=[persona_display, last_generated_tasks_state, url_input, session_id_orch, workspace_selector],
+        inputs=[persona_display, last_generated_tasks_state, url_input, allow_irreversible_actions_input, session_id_orch, workspace_selector],
         outputs=[status_output, report_output, active_session_state, active_jules_uuid_state]
     ).then(
         fn=lambda x: [x] * len(session_id_sync_list),
@@ -1521,9 +1535,15 @@ if __name__ == "__main__":
             "Identify pricing or usage constraints",
             "Locate support or contact information",
         ]
+        # journey-worker's safety.js blocks any task whose text matches a
+        # destructive-action pattern (purchase, delete account, deploy
+        # production, ...) unless browserSafety.allowIrreversibleActions is
+        # explicitly set (spec.md section 36). Off by default; callers opt in
+        # explicitly the same way the Gradio UI does.
         job = session_client.create_job({"session_id": session["session_id"], "type": "combined_test",
             "input_artifacts": persona_artifacts,
-            "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": payload["url"]}})
+            "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": payload["url"],
+                        "browserSafety": {"allowIrreversibleActions": bool(payload.get("allow_irreversible_actions", False))}}})
         completed = (session_client.wait_for_job(job["job_id"], timeout=int(payload.get("timeout", 900)))
                      if payload.get("wait") else job)
         return {"session": session, "personas": personas, "job": completed,

@@ -119,9 +119,20 @@ class JobExecutor:
             raise ValueError("combined_test requires persona profile artifacts and non-empty metadata.tasks")
         journeys = []
         worker_url = os.getenv("JOURNEY_WORKER_URL")
+        # services/journey-worker/node/src/safety.js blocks any task whose text
+        # matches a destructive-action pattern (purchase, delete account, deploy
+        # production, ...) against the real target URL unless
+        # browserSafety.allowIrreversibleActions is explicitly set (spec.md
+        # section 36: "require explicit configuration for purchases,
+        # submissions or irreversible operations"). Read the caller's opt-in
+        # from job metadata rather than never sending it -- previously this
+        # field was never included, so any such task failed unconditionally
+        # with no way to opt in.
+        browser_safety = data.get("browserSafety") or {}
         if worker_url:
             for persona in personas:
-                payload = json.dumps({"runId": f"{job['job_id']}_{persona.get('id', len(journeys))}", "url": data.get("url"), "tasks": tasks, "profile": persona}).encode()
+                payload = json.dumps({"runId": f"{job['job_id']}_{persona.get('id', len(journeys))}", "url": data.get("url"),
+                    "tasks": tasks, "profile": persona, "browserSafety": browser_safety}).encode()
                 call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
                 try:
                     with request.urlopen(call, timeout=float(os.getenv("JOURNEY_RUN_TIMEOUT", "600"))) as response:
@@ -132,6 +143,14 @@ class JobExecutor:
                         journeys.append(journey)
                 except request.HTTPError as error:
                     detail = error.read().decode("utf-8", errors="replace")[:2000]
+                    if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
+                        raise RuntimeError(
+                            "Journey worker rejected run (422): one of the configured tasks reads as a "
+                            "potentially irreversible action (purchase, account deletion, submission, "
+                            "production deploy, ...). This run did not opt in to allow it -- re-run with "
+                            "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
+                            "allow_irreversible_actions: true (API) if the task is genuinely meant to "
+                            f"perform it. Raw detail: {detail}") from error
                     raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)

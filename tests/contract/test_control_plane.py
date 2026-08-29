@@ -75,6 +75,89 @@ def test_combined_test_executes_and_exposes_result_and_attempt(tmp_path):
     assert api.get(f"/v1/jobs/{job['job_id']}/attempts").json()["items"][0]["status"] == "succeeded"
 
 
+def test_combined_test_forwards_browser_safety_opt_in_to_journey_worker(tmp_path, monkeypatch):
+    """services/journey-worker/node/src/safety.js blocks any task whose text
+    matches a destructive-action pattern (purchase, delete account, deploy
+    production, ...) unless browserSafety.allowIrreversibleActions is
+    explicitly set (spec.md section 36). The control plane must actually
+    forward a caller's opt-in to the /v1/runs payload -- previously this key
+    was never included at all, so no caller had any way to opt in."""
+    import json as json_module
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
+        "metadata": {}})
+    received = []
+
+    class WorkerResponse:
+        def __init__(self, request): self.request = request
+        def __enter__(self):
+            payload = json_module.loads(self.request.data)
+            received.append(payload.get("browserSafety"))
+            self.payload = json_module.dumps({"runId": payload["runId"], "simulationProfile": payload["profile"], "steps": []}).encode()
+            return self
+        def __exit__(self, *args): pass
+        def read(self): return self.payload
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", lambda request, timeout: WorkerResponse(request))
+    ids = [persona["artifact_id"]]
+
+    no_opt_in, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(no_opt_in["job_id"])
+    assert store.get_job(no_opt_in["job_id"])["status"] == "succeeded"
+    assert received[-1] == {}
+
+    opted_in, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"],
+                    "browserSafety": {"allowIrreversibleActions": True}},
+        "idempotency_key": None})
+    JobExecutor(store).run(opted_in["job_id"])
+    assert store.get_job(opted_in["job_id"])["status"] == "succeeded"
+    assert received[-1] == {"allowIrreversibleActions": True}
+
+
+def test_combined_test_surfaces_actionable_message_for_irreversible_action_rejection(tmp_path, monkeypatch):
+    """When journey-worker rejects a run with the specific 422 safety.js raises
+    for an un-opted-in destructive-action task, the job's error must tell the
+    caller how to opt in -- not just relay the raw 422 body."""
+    import io
+    import json as json_module
+    from urllib.error import HTTPError
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
+        "metadata": {}})
+
+    def raise_rejection(request, timeout):
+        body = json_module.dumps({"error": "invalid_run",
+            "message": "potentially irreversible task requires allowIrreversibleActions=true"}).encode()
+        raise HTTPError(request.full_url, 422, "Unprocessable Entity", {}, io.BytesIO(body))
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", raise_rejection)
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Delete your account"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "failed"
+    assert "did not opt in" in completed["error"]["message"]
+    assert "allow_irreversible_actions" in completed["error"]["message"]
+
+
 def test_failure_is_structured_and_session_deletion_removes_records(tmp_path):
     api, _ = client(tmp_path)
     session_id = api.post("/v1/sessions", json={}).json()["session_id"]

@@ -132,6 +132,46 @@ def test_monitor_and_log_reports_http_error_instead_of_crashing(monkeypatch):
     assert log == ""
 
 
+class FakeSessionClient:
+    def __init__(self):
+        self.job_calls = []
+
+    def create_session(self, payload):
+        return {"session_id": "ses_1"}
+
+    def create_artifact(self, session_id, kind, content, metadata=None):
+        return {"artifact_id": f"art_{content['id']}"}
+
+    def create_job(self, payload):
+        self.job_calls.append(payload)
+        return {"job_id": "job_1"}
+
+    def wait_for_job(self, job_id):
+        return {"job_id": job_id, "status": "succeeded", "output_artifacts": []}
+
+
+def test_start_and_monitor_sessions_defaults_irreversible_actions_off(monkeypatch):
+    app_module = load_root_app()
+    fake = FakeSessionClient()
+    monkeypatch.setattr(app_module, "authenticated_clients", lambda *a, **k: (fake, None))
+
+    list(app_module.start_and_monitor_sessions([PROFILE], ["Buy an item"], "https://example.com", False,
+                                                "ses", "local", None, None))
+
+    assert fake.job_calls[0]["metadata"]["browserSafety"] == {"allowIrreversibleActions": False}
+
+
+def test_start_and_monitor_sessions_forwards_explicit_opt_in(monkeypatch):
+    app_module = load_root_app()
+    fake = FakeSessionClient()
+    monkeypatch.setattr(app_module, "authenticated_clients", lambda *a, **k: (fake, None))
+
+    list(app_module.start_and_monitor_sessions([PROFILE], ["Buy an item"], "https://example.com", True,
+                                                "ses", "local", None, None))
+
+    assert fake.job_calls[0]["metadata"]["browserSafety"] == {"allowIrreversibleActions": True}
+
+
 def _find_event_fn(app_module, name):
     for dependency in app_module.demo.fns.values():
         if getattr(dependency.fn, "__name__", None) == name:
