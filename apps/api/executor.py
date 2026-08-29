@@ -209,6 +209,15 @@ class JobExecutor:
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
+        if any(item.get("source", "").startswith("verdict")
+               for thoughts in thoughts_by_persona.values() for item in thoughts):
+            limitations.append(
+                "Persona quotes on these findings come from each agent's own end-of-run verdict prose, "
+                "not its live per-step reasoning: journeytest-core records only assistant `text` content "
+                "blocks into the timeline, and the configured model returns its reasoning in `thinking` "
+                "blocks, which are dropped before the event is written. The quotes are the agent's own "
+                "words about what it hit; they are just written at the end of the run rather than during it."
+            )
         return {"schema_version": "1.1", "mode": "user_journey", "url": data.get("url"),
                 "executive_summary": self._executive_summary(data.get("url"), tasks, personas, findings, preserve),
                 "synthetic_users": personas, "persona_artifacts": persona_artifacts,
@@ -521,18 +530,25 @@ class JobExecutor:
             entry["observedByPersonas"] = len(entry["personaIds"])
         return sorted(merged.values(), key=lambda item: -item["observedByPersonas"])
 
-    @staticmethod
-    def _persona_thoughts(journey: dict[str, Any], limit: int = 12) -> list[dict[str, Any]]:
-        """The persona's own words while driving the browser.
+    @classmethod
+    def _persona_thoughts(cls, journey: dict[str, Any], limit: int = 12) -> list[dict[str, Any]]:
+        """The persona's own account of driving the browser.
 
         journeytest-core records every assistant turn as an `agent.message.end`
-        timeline event whose `data.text` holds the model's actual reasoning (up to
-        6000 chars, secrets already redacted by its EventRecorder). That text is
-        the only place the *why* behind a step exists -- the event's own `summary`
-        is the fixed literal "Assistant message ended", so anything rendering
-        `summary` alone (as every view here previously did) showed none of it.
-        Browser actions keep their `summary`, which is genuinely descriptive
-        ("Clicked #buy-button"), giving an interleaved thought/action narration.
+        timeline event, whose own `summary` is the fixed literal "Assistant message
+        ended" -- so anything rendering `summary` alone (as every view here
+        previously did) shows no thinking at all. The reasoning, when it is
+        recorded, is in `data.text`.
+
+        It is often not recorded. Its `piSdkDirector` builds that text from only
+        the assistant message's `content.type === "text"` blocks; a reasoning model
+        returns its thinking in `thinking` blocks instead, which are dropped before
+        the event is written. Verified against a live two-persona run: 12 `thinking`
+        blocks across the run, and zero events carrying `data.text`. So this reads
+        `data.text` when the provider does emit text blocks, and otherwise falls
+        back to the agent's own prose that *is* recorded -- its verdict summary and
+        the descriptions it wrote for each finding -- rather than reporting that the
+        persona thought nothing. Every item says which of the two it came from.
         """
         thoughts: list[dict[str, Any]] = []
         for event in journey.get("timeline") or []:
@@ -541,16 +557,21 @@ class JobExecutor:
             if event_type == "agent.message.end":
                 text = str(data.get("text") or "").strip()
                 if text:
-                    thoughts.append({"kind": "reasoning", "text": text, "elapsedMs": elapsed, "taskId": task_id,
+                    thoughts.append({"kind": "reasoning", "source": "timeline", "text": text,
+                                     "elapsedMs": elapsed, "taskId": task_id,
                                      "toolCalls": data.get("toolCalls") or []})
             elif event_type == "agent.message.error":
                 text = str(data.get("errorMessage") or "").strip()
                 if text:
-                    thoughts.append({"kind": "error", "text": text, "elapsedMs": elapsed, "taskId": task_id})
+                    thoughts.append({"kind": "error", "source": "timeline", "text": text,
+                                     "elapsedMs": elapsed, "taskId": task_id})
             elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENTS:
                 summary = str(event.get("summary") or "").strip()
                 if summary:
-                    thoughts.append({"kind": "action", "text": summary, "elapsedMs": elapsed, "taskId": task_id})
+                    thoughts.append({"kind": "action", "source": "timeline", "text": summary,
+                                     "elapsedMs": elapsed, "taskId": task_id})
+        if not any(item["kind"] == "reasoning" for item in thoughts):
+            thoughts.extend(cls._verdict_thoughts(journey))
         if len(thoughts) <= limit:
             return thoughts
         # Keep the reasoning: it is what makes a finding legible to a designer.
@@ -560,6 +581,29 @@ class JobExecutor:
         actions = [item for item in thoughts if item["kind"] == "action"]
         kept = reasoning + actions[: limit - len(reasoning)]
         return sorted(kept, key=lambda item: item.get("elapsedMs") or 0)
+
+    @staticmethod
+    def _verdict_thoughts(journey: dict[str, Any]) -> list[dict[str, Any]]:
+        """The agent's own prose about the run, from the verdict it wrote.
+
+        Used when the provider's reasoning never reached the timeline (see
+        `_persona_thoughts`). This is still the agent's account in its own words --
+        it is simply written at the end of the run rather than during it, and is
+        labelled `source="verdict"` so a reader is never told a retrospective
+        summary was a live thought.
+        """
+        verdict = journey.get("verdict") or {}
+        thoughts: list[dict[str, Any]] = []
+        summary = str(verdict.get("summary") or "").strip()
+        if summary:
+            thoughts.append({"kind": "reasoning", "source": "verdict", "text": summary, "elapsedMs": None})
+        for bucket in ("blockers", "uxFindings"):
+            for finding in verdict.get(bucket) or []:
+                description = str(finding.get("description") or "").strip()
+                if description:
+                    thoughts.append({"kind": "reasoning", "source": f"verdict.{bucket}",
+                                     "text": description, "elapsedMs": None})
+        return thoughts
 
     @classmethod
     def _synthesize_pain_points(cls, cohort_runs: list[dict[str, Any]], screenshot_bytes: dict[str, bytes]) -> list[dict[str, Any]]:

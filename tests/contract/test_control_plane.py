@@ -767,3 +767,47 @@ def test_executive_summary_reports_what_was_found_not_what_was_prepared():
     empty = JobExecutor._executive_summary("https://example.com", ["Buy"], [{"id": "p1"}],
                                            [{"title": "No pain points detected", "severity": "low"}], [])
     assert "0 usability issue(s) were identified" in empty
+
+
+def test_persona_thoughts_fall_back_to_verdict_prose_when_provider_hides_reasoning():
+    """journeytest-core writes only assistant `text` content blocks into
+    agent.message.end's data.text. A reasoning model returns its thinking in
+    `thinking` blocks, which are dropped -- verified live: 12 thinking blocks in
+    a run, zero events carrying data.text. Rather than report that the persona
+    thought nothing, fall back to the agent's own verdict prose, labelled as
+    such."""
+    journey = {
+        "timeline": [
+            {"type": "agent.message.end", "summary": "Assistant message ended", "elapsedMs": 100,
+             "data": {"contentTypes": ["thinking", "toolCall"], "toolCalls": ["browser_open"]}},
+            {"type": "browser.open", "summary": "Opened https://example.com", "elapsedMs": 200},
+        ],
+        "verdict": {"status": "failed", "summary": "The application is inaccessible due to an HTTP error.",
+                    "uxFindings": [{"title": "Error page", "description": "The error page offers no guidance."}],
+                    "blockers": [{"title": "503", "description": "The site returned Service Unavailable."}]},
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+
+    reasoning = [item for item in thoughts if item["kind"] == "reasoning"]
+    assert [item["source"] for item in reasoning] == ["verdict", "verdict.blockers", "verdict.uxFindings"]
+    assert reasoning[0]["text"] == "The application is inaccessible due to an HTTP error."
+    assert any("Service Unavailable" in item["text"] for item in reasoning)
+    # The real action is still narrated, and still labelled as coming from the timeline.
+    assert [item["text"] for item in thoughts if item["kind"] == "action"] == ["Opened https://example.com"]
+    assert all(item["source"] == "timeline" for item in thoughts if item["kind"] == "action")
+
+
+def test_persona_thoughts_prefer_live_reasoning_over_the_verdict_fallback():
+    """When the provider does emit text blocks, the live per-step reasoning is
+    used and the verdict fallback must not fire."""
+    journey = {
+        "timeline": [{"type": "agent.message.end", "summary": "Assistant message ended", "elapsedMs": 100,
+                      "data": {"text": "I cannot see a checkout button anywhere."}}],
+        "verdict": {"summary": "Task could not be completed."},
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+
+    assert [item["text"] for item in thoughts] == ["I cannot see a checkout button anywhere."]
+    assert thoughts[0]["source"] == "timeline"
