@@ -18,6 +18,15 @@ class PersonaPatchRequest(BaseModel):
     persona: dict[str, Any]
 
 
+class PersonaPoolLookupRequest(BaseModel):
+    """Ranged-match lookup against the GitHub-backed persona pool (docs/persona-pool-plan.md section 4)."""
+
+    theme: str
+    customer_profile: str
+    count: int = Field(default=1, ge=1, le=50)
+    behavior_targets: dict[str, float] | None = None
+
+
 class PersonaCompileRequest(BaseModel):
     """Compile behavior/ability profiles for an already-built persona (e.g. a
     bundled TinyTroupe example agent), skipping live TinyTroupe generation."""

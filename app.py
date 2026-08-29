@@ -10,10 +10,10 @@ import concurrent.futures
 import threading
 import uuid
 import shutil
-from gradio_client import Client
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
+from apps.gradio.github_backup import GitHubAuthError, push_session_to_github, validate_and_list_repos
 
 import gradio as gr
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -286,38 +286,33 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
             add_log(f"Failed to load example persona: {e}")
 
     if force_method == "PersonaPool":
-        # Current stand-in implementation calls the external DeepPersona experience
-        # Space for instant generation. Planned replacement: a maintained GitHub
-        # persona pool refreshed daily via GitHub Actions -- see
-        # docs/persona-pool-plan.md.
-        add_log("Forcing PersonaPool (DeepPersona-backed) generation...")
-        personas = []
-        for i in range(int(num_personas)):
-            p = generate_persona_from_deeppersona(theme, customer_profile)
-            if not p:
-                continue
-            if compile_behavior:
-                # DeepPersona's own result has no behavior/abilities -- journey
-                # testing requires profile.behavior (same gap Example Persona had
-                # before it was fixed to always compile). Compile it through the
-                # same PersonaCompiler as every other persona source.
-                try:
-                    compiled = (persona_client or persona_runtime).compile(
-                        p["persona"], scenario=f"PersonaPool: {theme}", seed=i + 1)
-                    compiled["name"], compiled["minibio"] = p["name"], p["minibio"]
-                    p = compiled
-                except Exception as e:
-                    add_log(f"Failed to compile PersonaPool persona: {e}")
-                    continue
-            personas.append(p)
-        if len(personas) >= int(num_personas): return personas[:int(num_personas)]
-        if personas:
-            # Partial success: force_method="PersonaPool" was an explicit choice,
-            # so return what it actually produced rather than silently falling
-            # through into the unrelated generic LLM-judged-pool path below,
-            # which would previously discard these already-generated personas.
-            add_log(f"PersonaPool produced {len(personas)}/{num_personas} requested personas; returning the partial result.")
-            return personas
+        # Real GitHub-backed pool lookup (docs/persona-pool-plan.md components A/C):
+        # a ranged-match query against a pre-generated pool repo (ARTIFACT_ROOT
+        # index.json + persona files, read via a read-only "always-connected"
+        # PERSONA_POOL_GITHUB_TOKEN service credential -- see services/
+        # persona_service/github_pool.py), instead of a live per-request call to
+        # an external stand-in Space. Falls back to live TinyTroupe generation for
+        # any shortfall (pool unconfigured, empty, or too few close matches),
+        # exactly as section 4 point 4 of that plan specifies.
+        add_log("Looking up personas from the GitHub-backed persona pool...")
+        try:
+            result = (persona_client or persona_runtime).pool_lookup(theme, customer_profile, int(num_personas))
+        except requests.exceptions.RequestException as e:
+            add_log(f"Persona pool lookup failed: {e}")
+            result = {"poolConfigured": False, "personas": []}
+        personas = result.get("personas", [])
+        if not result.get("poolConfigured"):
+            add_log("Persona pool is not configured (PERSONA_POOL_GITHUB_REPO unset); generating instead.")
+        elif personas:
+            add_log(f"Matched {len(personas)} persona(s) from the GitHub pool.")
+        if result.get("skipped"):
+            add_log(f"Skipped {len(result['skipped'])} pool entr{'y' if len(result['skipped']) == 1 else 'ies'} that failed to fetch/validate.")
+        shortfall = int(num_personas) - len(personas)
+        if shortfall > 0:
+            if personas:
+                add_log(f"Pool covered {len(personas)}/{num_personas} requested personas; generating {shortfall} more.")
+            personas.extend(generate_personas(theme, customer_profile, shortfall, persona_client))
+        return personas[:int(num_personas)]
     elif force_method == "TinyTroupe":
         add_log("Forcing TinyTroupe generation...")
         return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
@@ -399,74 +394,6 @@ def select_or_create_personas(theme, customer_profile, num_personas, force_metho
         final_personas.extend(generate_personas(theme, customer_profile, to_create_count, persona_client))
 
     return final_personas
-
-def generate_persona_from_deeppersona(theme, customer_profile):
-    add_log("Attempting persona generation from THzva/deeppersona-experience...")
-    client = get_blablador_client()
-    if not client:
-        return None
-
-    # Step 1: Breakdown profile into parameters using the configured OPENAI_MODEL
-    prompt = f"""
-    You are an expert in persona creation. 
-    Break down the following business theme and customer profile into detailed attributes for a persona.
-    Business Theme: {theme}
-    Target Customer Profile: {customer_profile}
-
-    Return a JSON object with exactly these fields:
-    - age (int)
-    - gender (string)
-    - occupation (string)
-    - city (string)
-    - country (string)
-    - custom_values (string, e.g., "Sustainability, Innovation")
-    - custom_life_attitude (string, e.g., "Optimistic and forward-thinking")
-    - life_story (string, a brief background)
-    - interests_hobbies (string, comma separated)
-    - name (string, full name)
-
-    CRITICAL: Return ONLY the JSON object.
-    """
-
-    try:
-        response = client.chat.completions.create(
-            model=OPENAI_MODEL,
-            messages=[{"role": "user", "content": prompt}],
-            response_format={"type": "json_object"},
-            max_tokens=OPENAI_MAX_COMPLETION_TOKENS,
-        )
-        params = json.loads(response.choices[0].message.content)
-        add_log(f"Profile breakdown complete for {params.get('name')}")
-
-        # Step 2: Call the DeepPersona generation endpoint
-        gr_client = Client("THzva/deeppersona-experience")
-        result = gr_client.predict(
-                age=float(params.get("age", 30)),
-                gender=params.get("gender", "Unknown"),
-                occupation=params.get("occupation", theme),
-                city=params.get("city", "Unknown"),
-                country=params.get("country", "Unknown"),
-                custom_values=params.get("custom_values", "Efficiency"),
-                custom_life_attitude=params.get("custom_life_attitude", "Neutral"),
-                life_story=params.get("life_story", "A brief life story."),
-                interests_hobbies=params.get("interests_hobbies", "None"),
-                attribute_count=200,
-                api_name="/generate_persona"
-        )
-
-        name = params.get("name")
-        if not name:
-            name_match = re.search(r"I am ([^,\.]+)", result)
-            name = name_match.group(1) if name_match else f"User_{uuid.uuid4().hex[:4]}"
-        
-        return {
-            "name": name,
-            "minibio": result,
-            "persona": params
-        }
-    except Exception as e:
-        add_log(f"DeepPersona generation failed: {e}")
-        return None
 
 def generate_personas_from_tiny_factory(theme, customer_profile, num_personas):
     """Compatibility wrapper; persona generation belongs to persona-runtime."""
@@ -845,7 +772,8 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     tinytroupe_warning = gr.Markdown(
                         f"⏳ **Live TinyTroupe generation is capped at {TINYTROUPE_MAX_PERSONAS} personas per run "
                         "and can take up to ~10 minutes** (each persona is a real model-generated profile). "
-                        "For more personas or an instant result, use **PersonaPool**.",
+                        "For more personas, try **PersonaPool** first -- it matches against a pre-generated "
+                        "GitHub-backed pool and only falls back to live generation for any shortfall.",
                         visible=True,
                     )
 
@@ -1147,6 +1075,60 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             evidence_session.change(evidence_choices, [evidence_session, workspace_selector], [evidence_artifact], api_name="list_session_evidence")
             evidence_load.click(load_workspace_artifact, [evidence_session, evidence_artifact, workspace_selector], [evidence_viewer, evidence_download], api_name="load_session_evidence")
 
+        with gr.Tab("GitHub Backup"):
+            gr.Markdown("### Back up workspace session artifacts to your own GitHub repo\n"
+                       "Bring your own [fine-grained personal access token](https://github.com/settings/tokens?type=beta) "
+                       "with **Contents: Read and write** on the repo you choose. Your token is used live for each "
+                       "sync only -- it is **never stored** on the server, so you'll need to re-enter it after a page reload.")
+            with gr.Row():
+                github_pat_input = gr.Textbox(label="GitHub Personal Access Token", type="password", placeholder="github_pat_... or ghp_...")
+                github_connect_btn = gr.Button("Connect", variant="primary")
+            github_connect_status = gr.Markdown()
+            github_repo_select = gr.Dropdown(label="Repository", choices=[], interactive=True)
+            github_pat_state = gr.State("")
+            with gr.Row():
+                github_backup_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
+                github_backup_refresh = gr.Button("Refresh sessions")
+            github_sync_btn = gr.Button("Sync session to GitHub", variant="primary")
+            github_sync_status = gr.Markdown()
+
+            def connect_github(pat):
+                try:
+                    username, repos = validate_and_list_repos(pat)
+                except GitHubAuthError as e:
+                    return gr.update(choices=[], value=None), f"Connection failed: {e}", ""
+                except requests.exceptions.RequestException as e:
+                    return gr.update(choices=[], value=None), f"GitHub request failed: {e}", ""
+                if not repos:
+                    return gr.update(choices=[], value=None), f"Connected as **{username}**, but no repos with push access were found.", pat
+                return gr.update(choices=repos, value=repos[0]), f"Connected as **{username}** -- {len(repos)} repo(s) with push access.", pat
+
+            github_connect_btn.click(connect_github, [github_pat_input], [github_repo_select, github_connect_status, github_pat_state])
+            github_backup_refresh.click(workspace_session_choices, [workspace_selector], [github_backup_session, github_connect_status], api_name="list_github_backup_sessions")
+
+            def sync_session_to_github(pat, repo, session_id, workspace_id,
+                                       oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                if not pat:
+                    return "Connect to GitHub first."
+                if not repo:
+                    return "Choose a repository first."
+                if not session_id:
+                    return "Choose a workspace session first."
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                result = push_session_to_github(pat, repo, session_id, session_client)
+                lines = [f"Pushed {len(result['pushed'])} file(s) to `{repo}`."]
+                lines.extend(f"- `{path}`" for path in result["pushed"])
+                if result["errors"]:
+                    lines.append("**Errors:**")
+                    lines.extend(f"- {error}" for error in result["errors"])
+                if not result["pushed"] and not result["errors"]:
+                    lines.append("No backupable artifacts (ux.report/ux.presentation/ux.slides/journey.log/persona.profile) found on this session yet.")
+                return "\n".join(lines)
+
+            github_sync_btn.click(sync_session_to_github,
+                                  [github_pat_state, github_repo_select, github_backup_session, workspace_selector],
+                                  [github_sync_status], api_name="sync_session_to_github")
+
         with gr.Tab("Agents.txt"):
             gr.Markdown("### Agent instructions")
             with gr.Row():
@@ -1384,6 +1366,42 @@ if __name__ == "__main__":
                 workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
         session_client, _ = api_clients(authorization, workspace_id)
         return session_client.get_job(job_id)
+
+    @fastapi_app.post("/api/v1/personas/generate")
+    def api_generate_personas(payload: dict, authorization: str | None = Header(None),
+                              workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        # Persona generation without a full usability-workflow session/job --
+        # useful standalone (e.g. building a persona to inspect or reuse later)
+        # and used to seed the GitHub-backed persona pool with real, live-generated
+        # profiles rather than placeholder data.
+        _, personas_client = api_clients(authorization, workspace_id)
+        try:
+            personas = personas_client.generate(payload["theme"], payload["customer_profile"],
+                                                 int(payload.get("persona_count", 1)),
+                                                 scenario=payload.get("scenario") or payload["theme"],
+                                                 seed=int(payload.get("seed", 1)),
+                                                 allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
+        except requests.exceptions.RequestException as error:
+            raise HTTPException(502, f"persona generation failed: {error}")
+        return {"personas": personas}
+
+    @fastapi_app.post("/api/v1/personas/compile-example")
+    def api_compile_example_persona(payload: dict, authorization: str | None = Header(None),
+                                    workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        # Compile a bundled example persona's behavior/abilities without spinning
+        # up a full usability-workflow session/job -- same use as above.
+        _, personas_client = api_clients(authorization, workspace_id)
+        example_persona = payload.get("example_persona")
+        if not example_persona:
+            raise HTTPException(400, "example_persona is required")
+        try:
+            compiled = load_example_persona(example_persona, personas_client, compile_behavior=True,
+                                            seed=int(payload.get("seed", 1)))
+        except FileNotFoundError as error:
+            raise HTTPException(404, str(error))
+        except requests.exceptions.RequestException as error:
+            raise HTTPException(502, f"persona compilation failed: {error}")
+        return {"persona": compiled}
 
     @fastapi_app.post("/api/v1/workflows/usability")
     def api_usability_workflow(payload: dict, authorization: str | None = Header(None),

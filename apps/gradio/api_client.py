@@ -152,6 +152,11 @@ class PersonaRuntimeClient:
         response.raise_for_status()
         return response.json()
 
+    def pool_lookup(self, theme, customer_profile, count, behavior_targets=None):
+        response = requests.post(f"{self.base_url}/v1/personas/pool-lookup", headers=self.headers, json={"theme": theme, "customer_profile": customer_profile, "count": int(count), "behavior_targets": behavior_targets}, timeout=30)
+        response.raise_for_status()
+        return response.json()
+
     def list(self, limit=50):
         response = requests.get(f"{self.base_url}/v1/personas", headers=self.headers, params={"limit": int(limit)}, timeout=30)
         response.raise_for_status()
