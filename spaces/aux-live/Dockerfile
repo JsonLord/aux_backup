@@ -54,6 +54,7 @@ ENV PATH="/home/user/app/services/journey-worker/node/node_modules/.bin:${PATH}"
     AUTH_MODE="hf_token" \
     PORT="8080" \
     JOURNEY_ARTIFACT_ROOT="/home/user/artifacts/journeys" \
+    EYESON_REDESIGN_LIMIT="3" \
     PERSONA_POOL_GITHUB_REPO="JsonLord/PersonaPool"
 # PERSONA_POOL_GITHUB_TOKEN (read-only, contents:read on the pool repo above) is
 # deliberately not set here -- add it as an HF Space secret so it never lands in

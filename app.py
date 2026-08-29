@@ -1,11 +1,14 @@
 import os
 import sys
 
+import base64
 import subprocess
 import importlib.util
 import re
 import time
 import json
+from html import escape
+from pathlib import Path
 import concurrent.futures
 import threading
 import uuid
@@ -915,6 +918,72 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 save_persona_btn = gr.Button("Save manual profile", variant="primary")
             persona_studio_status = gr.Markdown()
 
+        def _image_file_data_uri(path: str | None) -> str:
+            """Inline a downloaded image so gr.HTML can show it. Gradio only serves
+            files from its own allowed paths, and these live in a per-request temp
+            directory, so a plain file:// src would not load."""
+            if not path:
+                return ""
+            try:
+                return "data:image/png;base64," + base64.b64encode(Path(path).read_bytes()).decode("ascii")
+            except OSError:
+                return ""
+
+        def render_snapshot_overlay(content_json: str, artifact: dict, artifacts: list, session_client):
+            """Show a semantic snapshot as the screenshot it describes, with its real
+            element boxes drawn on top.
+
+            A snapshot is journeytest-core's element inventory for one captured
+            moment -- selector, role, text and bounding box per element. As raw JSON
+            it is unreadable; over its own screenshot it becomes exactly what it is,
+            a map of what the agent could see and act on. The two share a capture
+            stem, which is how the vision stage already pairs them.
+            """
+            try:
+                snapshot = json.loads(content_json)
+            except (json.JSONDecodeError, TypeError):
+                return "_Could not parse this snapshot as JSON._", ""
+            elements = snapshot.get("elements") or []
+            stem = (artifact.get("metadata") or {}).get("capture_stem")
+            screenshot = next((item for item in artifacts
+                               if item["kind"] == "browser.screenshot"
+                               and (item.get("metadata") or {}).get("capture_stem") == stem), None)
+            caption = (f"**Snapshot** — {len(elements)} element(s) on `{snapshot.get('url', '')}`"
+                       + (f" · `{stem}`" if stem else ""))
+            if screenshot is None:
+                # Still better than raw JSON: list what the agent could actually see.
+                rows = "".join(
+                    f'<li><code>{escape(str(element.get("selector", "")))}</code> '
+                    f'<span style="opacity:.6">{escape(str(element.get("role") or element.get("tag") or ""))}</span>'
+                    + (f' — {escape(str(element.get("text"))[:80])}' if element.get("text") else "") + "</li>"
+                    for element in elements[:40])
+                return (caption + "\n\n_No matching screenshot was captured for this snapshot._",
+                        f'<ul style="font-size:.9em;line-height:1.6">{rows}</ul>')
+            data_uri = _image_file_data_uri(session_client.download_artifact(screenshot))
+            boxes = []
+            for index, element in enumerate(elements):
+                box = element.get("boundingBox") or {}
+                try:
+                    left, top = float(box["x"]), float(box["y"])
+                    width, height = float(box["width"]), float(box["height"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if width <= 0 or height <= 0:
+                    continue
+                label = escape(str(element.get("selector", ""))[:60])
+                boxes.append(
+                    f'<div title="{label}" style="position:absolute;left:{left}px;top:{top}px;'
+                    f'width:{width}px;height:{height}px;border:2px solid rgba(56,189,248,.9);'
+                    f'background:rgba(56,189,248,.10);box-sizing:border-box">'
+                    f'<span style="position:absolute;top:-1.15em;left:0;font:10px/1.1 monospace;'
+                    f'background:#0ea5e9;color:#04121f;padding:1px 3px;border-radius:2px">{index}</span></div>')
+            # The overlay is positioned in the screenshot's own CSS pixel space, so
+            # the wrapper is scaled as a unit to keep the boxes aligned at any width.
+            return caption + f"\n\n_{len(boxes)} element box(es) drawn over the capture._", (
+                '<div style="overflow:auto;max-height:70vh;border:1px solid #334155;border-radius:.5rem">'
+                f'<div style="position:relative;display:inline-block">'
+                f'<img src="{data_uri}" style="display:block;max-width:none">{"".join(boxes)}</div></div>')
+
         def format_ux_report(content_json: str) -> str:
             """Render a ux.report as the usability review it is, rather than the raw
             JSON dump this tab previously showed: findings stated as issue -> root
@@ -1187,10 +1256,49 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 evidence_artifact = gr.Dropdown(label="Evidence artifact", choices=[], interactive=True, allow_custom_value=True)
                 evidence_load = gr.Button("Load evidence", variant="primary")
                 evidence_download = gr.DownloadButton("Download evidence")
-            evidence_viewer = gr.Code(label="Evidence content", lines=24)
+            evidence_caption = gr.Markdown()
+            evidence_image = gr.HTML(visible=False)
+            evidence_video = gr.Video(label="Session recording", visible=False)
+            with gr.Accordion("Raw content", open=False):
+                evidence_viewer = gr.Code(label="Evidence content", lines=24)
+
+            def load_evidence(session_id, artifact_id, workspace_id,
+                              oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                """Render evidence as the medium it is.
+
+                Previously every artifact went through get_artifact_content(), which
+                decodes the body as text, into a gr.Code box -- so a PNG screenshot
+                rendered as mojibake and a snapshot as a wall of JSON. Screenshots
+                are now shown as images, the recording as a video, and a snapshot as
+                the screenshot it describes with its real element boxes drawn on.
+                """
+                if not session_id or not artifact_id:
+                    return "Select a saved artifact.", gr.update(visible=False), gr.update(visible=False), "", None
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                artifacts = session_client.list_artifacts(session_id)
+                artifact = next((item for item in artifacts if item["artifact_id"] == artifact_id), None)
+                if artifact is None:
+                    return "Artifact not found.", gr.update(visible=False), gr.update(visible=False), "", None
+                kind = artifact["kind"]
+                download = session_client.download_artifact(artifact)
+                if kind == "browser.screenshot":
+                    data_uri = _image_file_data_uri(download)
+                    return (f"**Screenshot** — `{artifact.get('metadata', {}).get('capture_stem', artifact_id)}`",
+                            gr.update(visible=True, value=f'<img src="{data_uri}" style="max-width:100%;border-radius:.5rem;border:1px solid #334155">'),
+                            gr.update(visible=False), "", download)
+                if kind == "browser.video":
+                    return "**Session recording**", gr.update(visible=False), gr.update(visible=True, value=download), "", download
+                content = session_client.get_artifact_content(artifact_id)
+                if kind == "browser.snapshot":
+                    caption, html = render_snapshot_overlay(content, artifact, artifacts, session_client)
+                    return caption, gr.update(visible=True, value=html), gr.update(visible=False), content, download
+                return f"**{kind}**", gr.update(visible=False), gr.update(visible=False), content, download
+
             evidence_refresh.click(workspace_session_choices, [workspace_selector], [evidence_session, evidence_status], api_name="list_evidence_sessions")
             evidence_session.change(evidence_choices, [evidence_session, workspace_selector], [evidence_artifact], api_name="list_session_evidence")
-            evidence_load.click(load_workspace_artifact, [evidence_session, evidence_artifact, workspace_selector], [evidence_viewer, evidence_download], api_name="load_session_evidence")
+            evidence_load.click(load_evidence, [evidence_session, evidence_artifact, workspace_selector],
+                                [evidence_caption, evidence_image, evidence_video, evidence_viewer, evidence_download],
+                                api_name="load_session_evidence")
 
         with gr.Tab("GitHub Backup"):
             gr.Markdown("### Back up workspace session artifacts to your own GitHub repo\n"

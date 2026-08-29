@@ -843,3 +843,80 @@ def test_finding_slide_labels_a_full_page_shot_distinctly_from_a_region_crop():
 
     assert ">Current design<" in region and "full page" not in region
     assert "Current design (full page)" in full
+
+
+def test_redesign_is_rendered_as_live_html_beside_the_current_screenshot():
+    """The reference deck pairs a photo of the current design with a mockup of the
+    proposed one. The proposed half is real, inspectable HTML here -- rendered in a
+    sandboxed iframe so its CSS cannot leak into the deck, with the markup shown
+    underneath so it can be read and lifted."""
+    html = JobExecutor._finding_slide({
+        "title": "Generic link text", "summary": "The link says only 'Learn more'.",
+        "screenshotCrop": "data:image/png;base64,Zm9v", "screenshotIsRegion": True,
+        "redesignHtml": '<div class="fix"><style>.fix a{font-weight:600}</style>'
+                        '<a href="#">Read the IANA domain policy</a></div>',
+    }, 1, "Observed user issue")
+
+    assert "Current design" in html
+    assert "Re-design (live HTML)" in html
+    assert "<iframe" in html and 'sandbox="allow-same-origin"' in html
+    assert "srcdoc=" in html
+    # The fragment is escaped into srcdoc, not injected raw into the deck.
+    assert '<div class="fix">' not in html.split("<details")[0]
+    assert "Re-design markup" in html
+    assert "Read the IANA domain policy" in html  # readable in the code block
+
+
+def test_redesign_generation_is_skipped_without_credentials(monkeypatch):
+    """No model configured means no redesign -- never a canned template that
+    ignores the finding."""
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.delenv("BLABLADOR_API_KEY", raising=False)
+    findings = [{"title": "Broken thing", "severity": "critical"}]
+
+    JobExecutor._attach_redesigns(findings, "https://example.com")
+
+    assert "redesignHtml" not in findings[0]
+
+
+def test_redesign_generation_is_bounded_and_targets_the_worst_findings(monkeypatch):
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    monkeypatch.setenv("EYESON_REDESIGN_LIMIT", "2")  # opt back in (conftest disables it)
+    asked = []
+
+    def fake_fragment(finding, url):
+        asked.append(finding["title"])
+        return f'<div>fix for {finding["title"]}</div>'
+
+    monkeypatch.setattr(JobExecutor, "_generate_redesign_fragment", staticmethod(fake_fragment))
+    findings = [
+        {"title": "low one", "severity": "low"},
+        {"title": "critical one", "severity": "critical"},
+        {"title": "high one", "severity": "high"},
+        {"title": "No pain points detected", "severity": "low"},
+    ]
+
+    JobExecutor._attach_redesigns(findings, "https://example.com")
+
+    assert asked == ["critical one", "high one"]  # bounded, worst first
+    assert findings[1]["redesignHtml"] == "<div>fix for critical one</div>"
+    assert "redesignHtml" not in findings[0]
+
+
+def test_redesign_fragment_rejects_a_full_document_or_prose(monkeypatch):
+    """A fragment is what the slide can embed; a whole page or a paragraph of
+    explanation is not, and silently rendering either would be worse than none."""
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    monkeypatch.setenv("EYESON_REDESIGN_LIMIT", "3")  # opt back in (conftest disables it)
+
+    class Engine:
+        def __init__(self, reply): self.reply = reply
+        def complete_text(self, system, user): return self.reply
+
+    import services.persona_service.semantic as semantic
+
+    for reply, expected in [("<html><body>whole page</body></html>", None),
+                            ("Sorry, I cannot do that.", None),
+                            ("```html\n<div>ok</div>\n```", "<div>ok</div>")]:
+        monkeypatch.setattr(semantic, "DirectLLMSemanticEngine", lambda r=reply: Engine(r))
+        assert JobExecutor._generate_redesign_fragment({"title": "t"}, "https://example.com") == expected

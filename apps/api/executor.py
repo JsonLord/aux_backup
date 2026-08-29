@@ -89,10 +89,14 @@ class JobExecutor:
                 outputs = [("ui.prototype", "text/html", result)]
             else:
                 raise ValueError(f"unsupported job type: {job['type']}")
-            artifacts = [self.store.create_artifact({"session_id": job["session_id"], "kind": kind,
-                "content_type": content_type, "content": content,
-                "metadata": {"job_id": job_id, "schema_version": "1.0", "download_name": self._download_name(kind, job_id)}})
-                for kind, content_type, content in outputs]
+            artifacts = []
+            for output in outputs:
+                kind, content_type, content = output[0], output[1], output[2]
+                extra = output[3] if len(output) > 3 else {}
+                artifacts.append(self.store.create_artifact({"session_id": job["session_id"], "kind": kind,
+                    "content_type": content_type, "content": content,
+                    "metadata": {"job_id": job_id, "schema_version": "1.0", **extra,
+                                 "download_name": self._download_name(kind, job_id, extra.get("capture_stem"))}}))
             artifact_ids = [artifact["artifact_id"] for artifact in artifacts]
             self.store.update_job(job_id, "running", output_artifacts=artifact_ids)
             for artifact in artifacts:
@@ -209,6 +213,7 @@ class JobExecutor:
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
+        self._attach_redesigns(findings, data.get("url"))
         if any(item.get("source", "").startswith("verdict")
                for thoughts in thoughts_by_persona.values() for item in thoughts):
             limitations.append(
@@ -699,6 +704,10 @@ class JobExecutor:
                             f"confusion {impact['confusion']:.2f}, trust erosion {-impact['trust']:.2f}",
                 "affectedPersonas": affected, "affectedPersonaIds": list(root_cause["affectedUsers"]),
                 "susceptibleTraits": susceptible_traits, "source": "eyeson-vision-synthesis",
+                # Real element semantics (selector/role/text/box) from the snapshot the
+                # critique referenced -- what grounds a redesign in the actual DOM
+                # rather than in a guess at it.
+                "elements": representative.get("elements") or [],
             }
             if crop:
                 finding["screenshotCrop"] = crop
@@ -716,6 +725,87 @@ class JobExecutor:
         # configured, or the LLM call failed): a real generation was attempted
         # and could not be produced, not a claim of a designed prototype.
         return f"""<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><style>body{{font:16px system-ui;margin:auto;max-width:72rem;padding:clamp(1rem,4vw,4rem);color:#18202a}}main{{display:grid;gap:1rem}}section{{padding:1.5rem;border:1px solid #ccd5df;border-radius:1rem}}@media(min-width:48rem){{main{{grid-template-columns:2fr 1fr}}}}</style></head><body><h1>{escape(title)}</h1><main><section><h2>Adaptation request</h2><p>{escape(request)}</p></section><section><h2>Offline fallback</h2><p>No LLM credentials are configured (or generation failed), so this is a static placeholder rather than a generated prototype.</p></section></main></body></html>"""
+
+    @classmethod
+    def _attach_redesigns(cls, findings: list[dict[str, Any]], url: str | None) -> None:
+        """Generate the "Re-design" half of each finding as real, inspectable HTML.
+
+        The reference review deck pairs a photo of the current design with a mockup
+        of the proposed one. The current half is ground truth here (a real cropped
+        screenshot); this produces the other half as an actual HTML/CSS fragment
+        rather than another image, so a designer or engineer can read and lift the
+        markup instead of eyeballing a picture.
+
+        It is grounded in what the run genuinely observed -- the real element
+        selectors, roles, text and geometry captured in journeytest-core's semantic
+        snapshot, plus the finding's own diagnosis and proposed changes -- not in a
+        vision model's reconstruction of the pixels. Bounded to the worst findings
+        (EYESON_REDESIGN_LIMIT, default 3) because each one is a live model call.
+        """
+        try:
+            limit = int(os.getenv("EYESON_REDESIGN_LIMIT", "3"))
+        except (TypeError, ValueError):
+            limit = 3
+        if limit <= 0:
+            return
+        ranked = sorted(findings, key=lambda item: -cls._SEVERITY_RANK.get(str(item.get("severity")), 1))
+        for finding in ranked[:limit]:
+            if finding.get("title") == "No pain points detected":
+                continue
+            fragment = cls._generate_redesign_fragment(finding, url)
+            if fragment:
+                finding["redesignHtml"] = fragment
+
+    @staticmethod
+    def _generate_redesign_fragment(finding: dict[str, Any], url: str | None) -> str | None:
+        """One finding -> a self-contained HTML fragment implementing its fix.
+
+        Returns None when no model is configured or the call fails: an absent
+        redesign is honest, a templated one that ignores the finding is not.
+        """
+        if not (os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")):
+            return None
+        try:
+            from services.persona_service.semantic import DirectLLMSemanticEngine
+            engine = DirectLLMSemanticEngine()
+        except (ImportError, ValueError):
+            return None
+        elements = "\n".join(
+            f'- selector="{element.get("elementId") or element.get("elementSelector", "")}" '
+            f'role={element.get("role", "")} box={json.dumps(element.get("box") or {})}'
+            for element in (finding.get("elements") or [])[:8]) or "(no specific element; page-wide finding)"
+        changes = "\n".join(f"- {alternative.get('proposedChange')}"
+                            for alternative in (finding.get("alternatives") or [])
+                            if alternative.get("proposedChange")) or (finding.get("recommendation") or "")
+        system_prompt = (
+            "You are a senior frontend engineer producing the corrected version of ONE UI component "
+            "for a usability review slide. Respond with ONLY an HTML fragment: a single root <div> "
+            "containing an inline <style> scoped by a wrapper class, and the corrected markup. "
+            "No <html>, <head> or <body>, no markdown fences, no commentary, no external requests "
+            "or fonts. It must be self-contained, accessible (semantic elements, labelled controls, "
+            "sufficient contrast) and must visibly implement the fix, not describe it. Keep it "
+            "compact -- this is one component on a slide, not a whole page.")
+        user_prompt = "\n\n".join([
+            f"Target site: {url or 'unknown'}",
+            f"Usability issue: {finding.get('title', '')}",
+            f"What the user hit: {finding.get('summary') or finding.get('evidence') or ''}",
+            f"Root cause: {finding.get('rootCause') or finding.get('mechanism') or 'not stated'}",
+            f"Real elements observed in the page (from the browser's own semantic snapshot):\n{elements}",
+            f"Changes to implement:\n{changes}",
+            "Produce the corrected component implementing those changes.",
+        ])
+        try:
+            content = engine.complete_text(system_prompt, user_prompt)
+        except RuntimeError:
+            return None
+        stripped = content.strip()
+        if stripped.startswith("```"):
+            stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
+            stripped = re.sub(r"\n?```\s*$", "", stripped).strip()
+        # A fragment, not a document: reject a full page, and reject prose.
+        if "<html" in stripped.lower() or "<" not in stripped:
+            return None
+        return stripped or None
 
     @staticmethod
     def _generate_ui_html(title: str, request: str, url: str | None, previous_html: str | None) -> str | None:
@@ -757,11 +847,15 @@ class JobExecutor:
         return stripped if "<html" in stripped.lower() else None
 
     @staticmethod
-    def _download_name(kind: str, job_id: str) -> str:
+    def _download_name(kind: str, job_id: str, capture_stem: str | None = None) -> str:
         extension = {"ux.report": "json", "ux.presentation": "html", "ux.slides": "html", "journey.log": "json",
                      "ui.prototype": "html", "browser.screenshot": "png", "browser.snapshot": "json",
                      "browser.ui-change": "json", "browser.video": "webm"}[kind]
-        return f"{kind.replace('.', '-')}-{job_id}.{extension}"
+        # A run captures many screenshots; naming them all after the job alone made
+        # them indistinguishable. The capture's own stem is what tells them apart
+        # (and pairs a snapshot with its screenshot).
+        suffix = f"-{re.sub(r'[^A-Za-z0-9_.-]', '_', capture_stem)}" if capture_stem else ""
+        return f"{kind.replace('.', '-')}-{job_id}{suffix}.{extension}"
 
     @staticmethod
     def _presentation(report: dict[str, Any]) -> str:
@@ -949,6 +1043,10 @@ body{{margin:0;font:20px/1.5 system-ui,sans-serif;background:#0b1220;color:#f1f5
 .shots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:1rem;margin-top:.4rem}}
 .shot figcaption{{font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;opacity:.6;margin-bottom:.3rem}}
 .shot img{{width:100%;border-radius:.6rem;border:1px solid #334155;display:block}}
+.shot iframe.redesign{{width:100%;height:16rem;border-radius:.6rem;border:1px solid #334155;background:#fff;display:block}}
+details.code{{margin-top:.6rem;font-size:.8rem;opacity:.85}}
+details.code summary{{cursor:pointer;opacity:.7;letter-spacing:.05em;text-transform:uppercase;font-size:.72rem}}
+details.code pre{{max-height:14rem;overflow:auto;background:#0f1b30;border:1px solid #1e293b;border-radius:.5rem;padding:.7rem;margin:.4rem 0 0}}
 figure{{margin:0}}
 blockquote{{margin:.3rem 0;padding:.5rem .9rem;border-left:3px solid #38bdf8;background:#0f1b30;border-radius:.35rem;font-size:.93rem}}
 blockquote cite{{display:block;opacity:.6;font-size:.78rem;font-style:normal;margin-top:.3rem}}
@@ -998,15 +1096,27 @@ show(0);
             for ref in references) + "</p>") if references else ""
 
         # Current design | Re-design, the pairing a redesign proposal is read in.
-        shots = ""
+        panels = []
         if item.get("screenshotCrop"):
             caption = "Current design" if item.get("screenshotIsRegion", True) else "Current design (full page)"
-            panels = [f'<figure class="shot"><figcaption>{caption}</figcaption>'
-                      f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="The part of the page this issue is about"></figure>']
-            if item.get("redesignImage"):
-                panels.append(f'<figure class="shot"><figcaption>Re-design</figcaption>'
-                              f'<img src="{escape(item["redesignImage"], quote=True)}" alt="Proposed redesign of this region"></figure>')
-            shots = f'<div class="shots">{"".join(panels)}</div>'
+            panels.append(f'<figure class="shot"><figcaption>{caption}</figcaption>'
+                          f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="The part of the page this issue is about"></figure>')
+        # The re-design is real, running HTML rather than a picture of one: rendered
+        # in an iframe so its own CSS cannot leak into the deck, with the markup
+        # itself shown underneath so it can be read and lifted.
+        if item.get("redesignHtml"):
+            fragment = item["redesignHtml"]
+            document = ("<!doctype html><meta charset=utf-8>"
+                        "<style>body{margin:0;padding:12px;font:14px/1.5 system-ui,sans-serif;background:#fff;color:#111}</style>"
+                        + fragment)
+            panels.append('<figure class="shot"><figcaption>Re-design (live HTML)</figcaption>'
+                          f'<iframe class="redesign" sandbox="allow-same-origin" '
+                          f'srcdoc="{escape(document, quote=True)}" title="Proposed redesign of this component"></iframe>'
+                          '</figure>')
+        shots = f'<div class="shots">{"".join(panels)}</div>' if panels else ""
+        if item.get("redesignHtml"):
+            shots += (f'<details class="code"><summary>Re-design markup</summary>'
+                      f'<pre><code>{escape(item["redesignHtml"])}</code></pre></details>')
 
         # The persona's own words -- what makes this observed rather than predicted.
         quotes = "".join(
@@ -1045,5 +1155,13 @@ show(0);
                 for value in values:
                     path = Path(value)
                     if path.is_file():
-                        outputs.append((kind, content_type, path.read_bytes()))
+                        # Carry the capture's own stem and run id. Without them every
+                        # screenshot in a run was stored under the identical
+                        # download_name, so they were indistinguishable in the UI and
+                        # a snapshot could not be paired with the screenshot it
+                        # describes (they share a stem, which is how the vision stage
+                        # matches them).
+                        outputs.append((kind, content_type, path.read_bytes(),
+                                        {"source_path": str(path), "capture_stem": path.stem,
+                                         "run_id": run.get("runId")}))
         return outputs
