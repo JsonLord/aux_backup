@@ -1,16 +1,21 @@
 # Persona Pool — section plan
 
-Status: **components A and C implemented (2026-08-29); component B deferred**.
+Status: **all three components implemented (2026-08-29)**.
 The "PersonaPool" generation method in the Gradio UI (`app.py`'s
 `persona_method` Radio) now calls a real GitHub-backed pool lookup
 (`services/persona_service/github_pool.py`, `POST /v1/personas/pool-lookup`)
 instead of the external DeepPersona experience Space stand-in described
 below (`generate_persona_from_deeppersona` has been deleted). The pool repo
 is [JsonLord/PersonaPool](https://github.com/JsonLord/PersonaPool), seeded
-with 6 compiled bundled-example personas -- see
+with 6 compiled bundled-example personas, and `.github/workflows/
+persona-pool-generate.yml` (component B, `scripts/
+generate_persona_pool_batch.py`) is wired to add live-generated diversity
+on a daily schedule once its two required secrets are configured -- see
 docs/aux-space-status-overview.md section -10 for what shipped, what was
-verified live, and why component B (below) is still just a plan. The rest
-of this document is kept as the original design record.
+verified live, and exactly which secrets remain the user's to add (I
+cannot provision GitHub push credentials or copy a live model-router API
+key into Actions secrets on anyone's behalf). The rest of this document is
+kept as the original design record.
 
 ## 1. Motivation
 

@@ -9,8 +9,7 @@ control-plane storage. Re-enabled here, but narrower and more intentional than
 before -- two separate integrations, not one broad one:
 
 **1. Persona pool -- read-only, "always-connected" service credential.**
-Implements persona-pool-plan.md components A and C (component B, the
-scheduled Actions generation workflow, is explicitly deferred).
+Implements all three persona-pool-plan.md components (A, B, C).
 `services/persona_service/github_pool.py`'s `GitHubPersonaPoolClient` reads
 `index.json` and persona files from a dedicated pool repo
 ([JsonLord/PersonaPool](https://github.com/JsonLord/PersonaPool)) via the
@@ -44,11 +43,42 @@ theme archetypes (persona-pool-plan.md section 3's originally planned
 diversity source) was attempted but consistently cut off by an intermediate
 proxy's idle-connection timeout before a multi-minute generation could
 finish -- both routes hold one HTTP connection open synchronously for the
-whole generation, unlike the job-queued journey-run path. Left for the
-deferred GitHub Actions workflow (server-side, no HTTP round-trip to hold
-open) rather than worked around here. Live-verified end-to-end after
-deploy: `POST /api/v1/personas/pool-lookup` for "Architecture and modular
-housing design" correctly matched Oscar (an architect) as the closest
+whole generation, unlike the job-queued journey-run path. Solved properly
+via component B rather than worked around here (see below).
+
+**Component B -- scheduled generation, now implemented.**
+`.github/workflows/persona-pool-generate.yml` runs
+`scripts/generate_persona_pool_batch.py` daily (`workflow_dispatch` also
+available for an on-demand run). It calls `TinyTroupeGenerator` directly
+in-process (no HTTP round-trip to time out) against 6 rotating theme/
+customer-profile archetypes (checkout, SaaS onboarding, support, content
+discovery, healthcare scheduling, banking) -- each archetype's
+`customer_profile` text is written to lean the generated persona toward a
+different behavioral flavor (patience, digital confidence, verification
+tendency, ...), since `TinyTroupeGenerator` has no direct numeric
+trait-target input; behavior is compiled from the generated persona's
+description, not set by hand. Writes new persona files plus a regenerated
+`index.json`, prunes entries older than 90 days (deleting their files, never
+an entry whose date can't be parsed), and commits/pushes only when there is
+an actual diff. `tests/contract/test_persona_pool_batch_generation.py`
+covers the theme-tag/summary derivation, per-archetype failure isolation
+(one archetype erroring doesn't abort the run), file writing, and pruning
+logic (9 tests, using the generator's deterministic offline-fallback path
+so no live credentials are needed to test it).
+
+**Not yet live-verified -- needs the user's own credentials.** The workflow
+requires two repository secrets neither I nor the Space can supply:
+`BLABLADOR_API_KEY` (the same model-router credential the Space already
+uses, added to *this* repo's Actions secrets) and `PERSONA_POOL_WRITE_TOKEN`
+(a GitHub PAT scoped to `contents:write` on `JsonLord/PersonaPool` only --
+deliberately a different, more-privileged credential than the Space's own
+read-only `PERSONA_POOL_GITHUB_TOKEN`, so a compromised Space credential
+still can't write to the pool repo). Once both are added under this repo's
+Settings -> Secrets and variables -> Actions, a manual `workflow_dispatch`
+run is the way to verify it end-to-end before trusting the daily schedule.
+
+Live-verified end-to-end after deploy: `POST /api/v1/personas/pool-lookup`
+for "Architecture and modular housing design" correctly matched Oscar (an architect) as the closest
 textual match and picked Sophie Lefevre (unrelated occupation, but a
 behaviorally distant second pick) rather than the second architect in the
 pool, Friedrich_Wolf -- real evidence the diversification pass is doing
