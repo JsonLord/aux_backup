@@ -2,6 +2,72 @@
 
 Date: 2026-08-27, updated 2026-08-28 (multiple passes), 2026-08-29 (multiple passes)
 
+## -12. The report becomes a usability review
+
+Prompted by a real hand-made UX review deck supplied as a reference (a 24-slide
+"Usability Test Rapport"), and the observation that the pipeline produced one
+flat findings list rendered three ways while the tabs promise materially
+different content.
+
+**What the reference deck does that we did not.** Its anatomy is: title,
+contents, `01 Introduction` (who ran it, on what basis, over which flows),
+`02 Predicted User Issues` -- each issue getting a numbered sub-divider
+(`02.1 Signing up` / *Sign up page*) then a slide stating **Predicted User
+Issue** -> **Root Cause Analysis** -> **Recommendations: Design Solutions**
+beside a *Current design* | *Re-design* image pair -- then
+`03 Elements to preserve` (three slides of what already works), then credits.
+Almost all of that maps onto data we already had: `diagnosis.rootCause`,
+`alternatives[].proposedChange`, `grounding` (the deck's "knowledge about human
+cognition"), `screenshotCrop`. Three things did not.
+
+**1. Persona thoughts were being thrown away.** journeytest-core records every
+assistant turn as an `agent.message.end` timeline event whose `data.text` holds
+the model's actual reasoning while it drove the browser (up to 6000 chars,
+secrets already redacted by its `EventRecorder`). That event's `summary` is the
+fixed literal string `"Assistant message ended"` -- and every view here
+rendered `summary` alone. The Persona Thought Logs tab therefore showed that
+placeholder once per turn and none of the thinking it exists for, while the
+richest evidence in the whole pipeline sat unused one key away. Now
+`executor.py`'s `_persona_thoughts()` interleaves reasoning with real browser
+actions (dropping plumbing events like `browser.snapshot`), and when it has to
+cap the narration it keeps the reasoning, because that is the part that
+explains a finding. `_attach_persona_evidence()` puts those quotes on the
+findings: stage-1 findings name their one persona, synthesized stage-2 findings
+name every persona the aggregation grouped (new `affectedPersonaIds`).
+
+**2. Nothing produced positive findings**, so the deck's entire third section
+had no source. `visionCritique.js` now asks the *same* critique call for
+`strengths` alongside `issues` -- design decisions that work and should survive
+a redesign -- so they cost no extra model call and come from the same real
+screenshot. `parseCritique()` accepts both the new `{issues, strengths}` object
+and a bare legacy array, since a model that ignores the wrapper still returned
+a usable critique. Met pass criteria contribute too
+(`_preserved_from_verdicts`), and the fail criterion is explicitly excluded --
+`tasks-blocked` being *met* is the run failing, never something to praise.
+
+**3. Evidence class was never stated.** The reference deck must say "**Predicted**
+User Issue" because a heuristic walkthrough has no users. We actually ran
+synthetic users through a real browser, so the deck now says "**Observed** user
+issue" when `evidence_language == "observed"` and falls back to "Predicted"
+when it does not -- the one claim this pipeline can make that a design review
+cannot, made only when it is true.
+
+Also added: `flow_groups` (the numbered `02.N` sections), `impact_analysis`
+(severity x reach ordering, susceptible traits, a "what to fix first" table),
+and an `executive_summary` that states what was *found* rather than the
+previous "Prepared N task scenarios for M synthetic users", which described
+only the setup. `ux.report` is now `schema_version` 1.1.
+
+**Tab coverage.** Report Viewer was the last tab still dumping raw JSON while
+every other tab rendered its artifact; it now renders the review structure
+above a collapsed raw-JSON accordion, matching the Persona Thought Logs
+pattern. `ux.presentation` and `ux.slides` carry the same new material.
+
+**Still open.** The *Re-design* half of the reference deck's image pair is
+generated (`ui.prototype`, the Full New UI tab) but is a separate job that is
+never linked back to the finding it fixes -- the deck renders a `redesignImage`
+when a finding carries one, and nothing populates that field yet.
+
 ## -11. Live-observed Persona Studio crashes, example personas in the Studio,
 knowledge-grounding synthesis bug, and a stale-doc correction pass
 
