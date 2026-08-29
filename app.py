@@ -1281,7 +1281,8 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     generate_btn.click(
         fn=handle_generate,
         inputs=[theme_input, profile_input, num_personas_input, persona_method, example_persona_select, url_input, workspace_selector],
-        outputs=[status_output, task_list_display, persona_display, last_generated_tasks_state]
+        outputs=[status_output, task_list_display, persona_display, last_generated_tasks_state],
+        api_name="generate_personas",
     ).then(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
 
     refresh_personas_btn.click(fn=persona_choices, inputs=[persona_display], outputs=[persona_index])
@@ -1402,6 +1403,21 @@ if __name__ == "__main__":
         except requests.exceptions.RequestException as error:
             raise HTTPException(502, f"persona compilation failed: {error}")
         return {"persona": compiled}
+
+    @fastapi_app.post("/api/v1/personas/pool-lookup")
+    def api_pool_lookup_personas(payload: dict, authorization: str | None = Header(None),
+                                 workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
+        # Ranged-match lookup against the GitHub-backed persona pool (docs/
+        # persona-pool-plan.md), exposed directly for inspection/tooling --
+        # select_or_create_personas' "PersonaPool" method calls the same
+        # persona-runtime route internally as part of a full generation flow.
+        _, personas_client = api_clients(authorization, workspace_id)
+        try:
+            result = personas_client.pool_lookup(payload["theme"], payload["customer_profile"],
+                                                  int(payload.get("count", 1)), payload.get("behavior_targets"))
+        except requests.exceptions.RequestException as error:
+            raise HTTPException(502, f"persona pool lookup failed: {error}")
+        return result
 
     @fastapi_app.post("/api/v1/workflows/usability")
     def api_usability_workflow(payload: dict, authorization: str | None = Header(None),
