@@ -1,3 +1,4 @@
+import json
 import importlib.util
 from functools import lru_cache
 from pathlib import Path
@@ -177,3 +178,34 @@ def _find_event_fn(app_module, name):
         if getattr(dependency.fn, "__name__", None) == name:
             return dependency.fn
     raise AssertionError(f"no event handler named {name} found")
+
+
+TIMELINE = [
+    {"type": "journey.started", "summary": "Started journey j1", "elapsedMs": 0},
+    {"type": "browser.open", "summary": "Opened https://example.com", "elapsedMs": 500},
+    {"type": "agent.message.end", "summary": "Assistant message ended", "elapsedMs": 1200,
+     "data": {"text": "I expected a Buy button near the price, but I only see a grey box.",
+              "toolCalls": ["browser_click"]}},
+    {"type": "browser.snapshot", "summary": "Captured snapshot", "elapsedMs": 1300},
+    {"type": "browser.click", "summary": "Clicked #buy-button", "elapsedMs": 1500},
+    {"type": "agent.message.error", "summary": "Assistant error: boom", "elapsedMs": 1600,
+     "data": {"errorMessage": "provider timeout"}},
+]
+
+
+def test_thought_log_renders_real_reasoning_not_the_placeholder_summary():
+    """journeytest-core's agent.message.end events carry the model's actual
+    reasoning in data.text; their `summary` is always the fixed literal
+    "Assistant message ended". Rendering summary alone showed none of the
+    thinking this tab exists for."""
+    app_module = load_root_app()
+    log = json.dumps({"runs": [{"runId": "run_1", "verdict": {"status": "failed", "summary": "Blocked."},
+                                "simulationProfile": {"persona": {"name": "Ada"}}, "timeline": TIMELINE}]})
+
+    rendered = app_module.format_persona_thought_log(log)
+
+    assert "I expected a Buy button near the price" in rendered
+    assert "Assistant message ended" not in rendered
+    assert "Clicked #buy-button" in rendered
+    assert "provider timeout" in rendered
+    assert "Captured snapshot" not in rendered  # plumbing event filtered out

@@ -613,6 +613,12 @@ You are an expert Frontend Developer. Your task is to implement the following "L
     return prompt
 
 _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
+# Bookkeeping browser events whose summaries are plumbing rather than something a
+# reader would recognise as the persona acting. Mirrors apps/api/executor.py's
+# _QUIET_BROWSER_EVENTS (this module must not import the control-plane package).
+_QUIET_BROWSER_EVENT_TYPES = {"browser.snapshot", "browser.screenshot", "browser.get_url", "browser.get_title",
+                              "browser.console_evidence", "browser.network_evidence",
+                              "browser.network_har.start", "browser.network_har.stop"}
 
 
 def generate_design_agent_brief(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
@@ -930,12 +936,26 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                               f"\n{verdict.get('summary', '_No summary recorded._')}\n"]
                     timeline = run.get("timeline") or []
                     if timeline:
-                        lines.append("**What happened:**")
+                        lines.append("**What happened, in the persona's own words:**\n")
                         for event in timeline:
-                            summary = event.get("summary") or event.get("type", "event")
+                            event_type, event_data = event.get("type", ""), event.get("data") or {}
                             elapsed = event.get("elapsedMs")
                             when = f" _(+{elapsed / 1000:.1f}s)_" if isinstance(elapsed, (int, float)) else ""
-                            lines.append(f"- {summary}{when}")
+                            # journeytest-core records each assistant turn as
+                            # agent.message.end, whose `summary` is the fixed literal
+                            # "Assistant message ended" -- the model's actual reasoning
+                            # lives in data.text. Rendering `summary` alone (as this
+                            # did) showed none of the thinking the tab exists for.
+                            if event_type == "agent.message.end" and str(event_data.get("text") or "").strip():
+                                thought = str(event_data["text"]).strip()
+                                lines.append(f"> 💭 {thought}\n>\n> — _thinking{when}_\n")
+                            elif event_type == "agent.message.error" and event_data.get("errorMessage"):
+                                lines.append(f"- ⚠️ **Model error:** {event_data['errorMessage']}{when}")
+                            elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENT_TYPES:
+                                summary = event.get("summary") or event_type
+                                lines.append(f"- 🖱️ {summary}{when}")
+                            elif event_type in {"journey.started", "journey.completed", "journey.verdict"}:
+                                lines.append(f"- **{event.get('summary') or event_type}**{when}")
                     for bucket, label in (("blockers", "🚫 Blockers"), ("uxFindings", "⚠️ UX findings")):
                         items = verdict.get(bucket) or []
                         if items:

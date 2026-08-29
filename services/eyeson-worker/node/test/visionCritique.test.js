@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings } = require("../src/visionCritique");
+const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique } = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
 
 test("buildPrompt includes the real element list so findings can reference actual selectors", () => {
@@ -50,7 +50,7 @@ test("critiqueScreenshot resolves elements to their real boundingBox and grounds
     ]) } }] }),
   }));
 
-  const findings = await critiqueScreenshot({
+  const { findings } = await critiqueScreenshot({
     imageBase64: "Zm9v", url: "https://example.com", task: "Buy an item",
     elements: [{ selector: "#buy-button", role: "button", text: "Buy", boundingBox: { x: 10, y: 20, width: 80, height: 30 } }],
     options: { apiKey: "test-key", baseUrl: "https://router.invalid/v1", model: "auto" },
@@ -73,7 +73,7 @@ test("critiqueScreenshot retries once on a transient failure then succeeds", asy
     if (calls === 1) throw new Error("ECONNRESET");
     return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
   });
-  const findings = await critiqueScreenshot({
+  const { findings } = await critiqueScreenshot({
     imageBase64: "Zm9v", url: "https://example.com", task: "Buy an item", elements: [],
     options: { apiKey: "test-key", baseUrl: "https://router.invalid/v1", model: "auto", retryWaitMs: 1 },
   });
@@ -153,4 +153,58 @@ test("vision-critique pain points from different personas aggregate into one syn
   assert.deepEqual(rootCauses[0].affectedUsers.sort(), ["ada", "lin"]);
   assert.equal(rootCauses[0].affectedIterations.length, 2);
   assert.equal(rootCauses[0].averageStateImpact.frustration, 0.5); // (0.3 + 0.7) / 2
+});
+
+test("parseCritique accepts the issues/strengths object and a legacy bare array", () => {
+  const wrapped = parseCritique(JSON.stringify({
+    issues: [{ category: "accessibility", severity: "high", title: "Low contrast",
+      description: "Text is hard to read.", elements: [], estimatedImpact: {}, alternatives: [] }],
+    strengths: [{ title: "Consistent buttons", description: "Every control uses the same rounded rectangle.",
+      elements: [{ elementSelector: "#buy-button", role: "trigger" }] }],
+  }));
+  assert.equal(wrapped.issues.length, 1);
+  assert.equal(wrapped.strengths.length, 1);
+  assert.equal(wrapped.strengths[0].title, "Consistent buttons");
+  assert.equal(wrapped.strengths[0].elements[0].elementSelector, "#buy-button");
+
+  // A model that ignores the wrapper and returns a bare issues array is still usable.
+  const legacy = parseCritique(JSON.stringify([{ category: "usability", severity: "low",
+    title: "Nit", description: "Minor.", elements: [], estimatedImpact: {}, alternatives: [] }]));
+  assert.equal(legacy.issues.length, 1);
+  assert.deepEqual(legacy.strengths, []);
+});
+
+test("parseCritique drops malformed strengths rather than inventing praise", () => {
+  const parsed = parseCritique(JSON.stringify({
+    issues: [],
+    strengths: [{ title: "Good icons" }, { description: "no title" }, null, "nope",
+      { title: "Real one", description: "Actually described." }],
+  }));
+  assert.equal(parsed.strengths.length, 1);
+  assert.equal(parsed.strengths[0].title, "Real one");
+});
+
+test("critiqueScreenshot returns strengths with resolved element boxes", async (t) => {
+  t.mock.method(global, "fetch", async () => ({
+    ok: true,
+    json: async () => ({ choices: [{ message: { content: JSON.stringify({
+      issues: [],
+      strengths: [{ title: "Consistent buttons", description: "Rounded rectangles make clickability obvious.",
+        elements: [{ elementSelector: "#buy-button", role: "trigger" }] }],
+    }) } }] }),
+  }));
+  const { findings, strengths } = await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "Buy an item",
+    elements: [{ selector: "#buy-button", role: "button", text: "Buy", boundingBox: { x: 1, y: 2, width: 3, height: 4 } }],
+    options: { apiKey: "test-key", baseUrl: "https://router.invalid/v1", model: "auto" },
+  });
+  assert.deepEqual(findings, []);
+  assert.equal(strengths.length, 1);
+  assert.deepEqual(strengths[0].elements[0].box, { x: 1, y: 2, width: 3, height: 4 });
+});
+
+test("buildPrompt asks for strengths as well as issues", () => {
+  const { system } = buildPrompt({ url: "https://example.com", task: "Buy", elements: [] });
+  assert.match(system, /"strengths"/);
+  assert.match(system, /preserved/);
 });

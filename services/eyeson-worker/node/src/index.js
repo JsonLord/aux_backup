@@ -66,12 +66,17 @@ const server = http.createServer(async (request, response) => {
       // contract that live JourneyTest runs don't produce.
       const payload = await body(request);
       if (!payload.imageBase64) return json(response, 422, { error: "invalid_request", message: "imageBase64 is required" });
-      const findings = await critiqueScreenshot({ imageBase64: payload.imageBase64, elements: payload.elements,
+      const { findings, strengths } = await critiqueScreenshot({ imageBase64: payload.imageBase64, elements: payload.elements,
         url: payload.url, task: payload.task, personaSummary: payload.personaSummary, options: payload.options });
       const context = { runId: payload.runId, userId: payload.userId, route: payload.url,
         stepId: payload.stepId, screenshotRef: payload.screenshotRef, videoTimestampMs: payload.videoTimestampMs };
       const painPoints = findings.map((finding) => toPainPoint(finding, context));
-      return json(response, 201, { schemaVersion: "1.0", findings, painPoints });
+      // strengths are the "elements to preserve" side of a UX review: design
+      // decisions that already work and must survive a redesign. Same critique
+      // call, so they cost nothing extra and come from the same real screenshot.
+      return json(response, 201, { schemaVersion: "1.0", findings, painPoints,
+        strengths: strengths.map((item) => ({ ...item, route: payload.url, userId: payload.userId,
+          screenshotRef: payload.screenshotRef })) });
     }
     if (request.method === "POST" && request.url === "/v1/cohort-aggregation") {
       // Real cross-persona synthesis (aggregate.js's aggregateCohort, already

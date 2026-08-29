@@ -59,7 +59,15 @@ function buildPrompt({ url, task, personaSummary, elements }) {
       + '-- your honest estimate of how a real user would react, not a fixed value, '
       + '"alternatives": [{"proposedChange": a specific, actionable fix, "rationale": why it would help, '
       + '"effort": "low"|"medium"|"high"}] (1-2 alternatives; omit only if you truly have none)}. '
-      + "Return an empty array [] if you see no real issues -- do not invent problems to fill the array.",
+      + "Respond with ONLY a JSON object (no markdown fences, no commentary) of the form "
+      + '{"issues": [ ...items as described above... ], "strengths": [{"title": short name of the '
+      + 'design decision that works well, "description": why it works and what it does for the user, '
+      + `"elements": [{"elementSelector": exact selector string from the numbered list, "role": one of ${JSON.stringify(ELEMENT_ROLES)}}]}]}. `
+      + "\"strengths\" are design decisions on THIS screenshot that are working and should be preserved "
+      + "in any redesign (consistent control styling, restrained colour use, well-understood icons, clear "
+      + "hierarchy, and so on) -- report only what you can actually see, and return an empty array rather "
+      + "than inventing praise. Likewise return an empty \"issues\" array if you see no real problems -- "
+      + "do not invent problems to fill it.",
     user: `Target URL: ${url}\nTask the synthetic user was attempting: ${task}\n`
       + (personaSummary ? `Synthetic user: ${personaSummary}\n` : "")
       + `\nInteractive elements detected on this screenshot (index, selector, role, visible text, bounding box in CSS pixels):\n${elementList || "(none detected)"}\n\n`
@@ -72,14 +80,48 @@ function clamp01(value, fallback = 0) {
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : fallback;
 }
 
-function parseFindings(content) {
+function parseCritique(content) {
   let stripped = content.trim();
   if (stripped.startsWith("```")) {
     stripped = stripped.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
   }
-  const match = stripped.match(/\[[\s\S]*\]/);
-  const parsed = JSON.parse(match ? match[0] : stripped);
-  if (!Array.isArray(parsed)) throw new Error("vision critique did not return a JSON array");
+  // The prompt asks for {"issues": [...], "strengths": [...]}, but a vision model
+  // that ignores the wrapper and returns a bare issues array is still useful --
+  // accept both rather than throwing away a real critique over its envelope.
+  let parsed;
+  try {
+    parsed = JSON.parse(stripped);
+  } catch {
+    const objectMatch = stripped.match(/\{[\s\S]*\}/);
+    const arrayMatch = stripped.match(/\[[\s\S]*\]/);
+    const candidate = objectMatch && (!arrayMatch || objectMatch.index <= arrayMatch.index) ? objectMatch : arrayMatch;
+    if (!candidate) throw new Error("vision critique did not return JSON");
+    parsed = JSON.parse(candidate[0]);
+  }
+  if (Array.isArray(parsed)) return { issues: normalizeIssues(parsed), strengths: [] };
+  if (!parsed || typeof parsed !== "object") throw new Error("vision critique did not return a JSON object or array");
+  return { issues: normalizeIssues(parsed.issues), strengths: normalizeStrengths(parsed.strengths) };
+}
+
+function normalizeStrengths(value) {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item) => item && typeof item === "object" && item.title && item.description)
+    .map((item) => ({
+      title: String(item.title), description: String(item.description),
+      elements: Array.isArray(item.elements) ? item.elements
+        .filter((element) => element && typeof element.elementSelector === "string")
+        .map((element) => ({ elementSelector: element.elementSelector,
+          role: ELEMENT_ROLES.includes(element.role) ? element.role : "cause" }))
+        : [],
+    }));
+}
+
+function parseFindings(content) {
+  return parseCritique(content).issues;
+}
+
+function normalizeIssues(value) {
+  const parsed = Array.isArray(value) ? value : [];
   return parsed.filter((item) => item && typeof item === "object" && item.title && item.description)
     .map((item) => ({
       category: FINDING_CATEGORIES.includes(item.category) ? item.category : "usability",
@@ -156,19 +198,21 @@ async function critiqueScreenshot({ imageBase64, elements = [], url, task, perso
   const { system, user } = buildPrompt({ url, task, personaSummary, elements });
   const content = await completeVision({ systemPrompt: system, userText: user, imageBase64, model, apiKey, baseUrl,
     maxAttempts: options.maxAttempts, retryWaitMs: options.retryWaitMs, timeoutMs: options.timeoutMs });
-  const findings = parseFindings(content);
+  const { issues, strengths } = parseCritique(content);
   const byId = new Map(elements.map((element) => [element.selector, element]));
+  const resolve = (refs) => refs.map((ref) => {
+    const matched = byId.get(ref.elementSelector);
+    return { elementSelector: ref.elementSelector, role: ref.role, box: matched?.boundingBox || null };
+  });
   const provider = new CuratedUXKnowledgeProvider();
-  return Promise.all(findings.map(async (finding) => {
-    const resolvedElements = finding.elements.map((ref) => {
-      const matched = byId.get(ref.elementSelector);
-      return { elementSelector: ref.elementSelector, role: ref.role, box: matched?.boundingBox || null };
-    });
+  const findings = await Promise.all(issues.map(async (finding) => {
+    const resolvedElements = resolve(finding.elements);
     const primaryRole = resolvedElements.find((element) => element.role === "trigger")?.role;
     const grounding = await groundPainPoint({ diagnosis: { category: GROUNDING_CATEGORY_MAP[finding.category] || finding.category },
       elements: resolvedElements.length ? [{ role: primaryRole || resolvedElements[0].role }] : [] }, provider);
     return { ...finding, elements: resolvedElements, grounding };
   }));
+  return { findings, strengths: strengths.map((item) => ({ ...item, elements: resolve(item.elements) })) };
 }
 
 /**
@@ -208,4 +252,5 @@ function toPainPoint(finding, context) {
   };
 }
 
-module.exports = { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, FINDING_CATEGORIES, ELEMENT_ROLES };
+module.exports = { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
+  FINDING_CATEGORIES, ELEMENT_ROLES };

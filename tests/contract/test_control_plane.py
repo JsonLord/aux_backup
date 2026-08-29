@@ -483,33 +483,74 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     assert "Grounded in:" in slides and "Nielsen Norman Group" in slides
 
 
-def test_slide_deck_renders_one_navigable_slide_per_synthesized_finding():
+def test_slide_deck_follows_usability_review_anatomy():
     """Real local slide generation (no GitHub, no external mkslides binary --
-    see docs/aux-space-status-overview.md): one slide per synthesized finding,
-    with its crop image and combined alternatives, plus working keyboard/click
-    navigation, self-contained in one HTML file."""
+    see docs/aux-space-status-overview.md), shaped like a usability review deck
+    rather than a flat findings list: title, contents, a numbered introduction /
+    issues / elements-to-preserve structure, each issue stated as
+    issue -> root cause -> recommendation beside its evidence, and self-contained
+    keyboard/click navigation in one HTML file."""
     report = {
         "url": "https://example.com", "executive_summary": "Tested with 2 personas.",
+        "evidence_language": "observed",
+        "journey_outcome": {"tasks": ["Buy an item"]},
+        "impact_analysis": {"personasTested": 2, "findingsBySeverity": {"critical": 1, "medium": 1},
+                            "priorityOrder": [{"title": "Infinite repetition of page content",
+                                               "severity": "critical", "affectedPersonas": 2}]},
+        "elements_to_preserve": [
+            {"title": "Consistent buttons", "description": "Every control is the same rounded rectangle.",
+             "observedByPersonas": 2},
+        ],
         "critical_pain_points": [
             {"severity": "critical", "category": "usability", "title": "Infinite repetition of page content",
              "affectedPersonas": 2, "summary": "The hero section repeats down the page.",
+             "rootCause": "The list renderer never terminates.",
              "alternatives": [{"proposedChange": "Fix the render loop."}],
-             "screenshotCrop": "data:image/png;base64,Zm9v"},
+             "screenshotCrop": "data:image/png;base64,Zm9v",
+             "personaEvidence": [{"personaName": "Ada", "quote": "I keep scrolling past the same block."}]},
             {"severity": "medium", "category": "accessibility", "title": "Low contrast form labels",
              "summary": "Labels are hard to read.", "recommendation": "Increase contrast."},
         ],
     }
     html = JobExecutor._slide_deck(report)
-    assert html.count('class="slide') == 3  # title slide + 2 findings
-    assert "Infinite repetition of page content" in html
-    assert "Fix the render loop." in html
+
+    # Review anatomy: numbered sections, not a flat list.
+    assert "Contents" in html
+    assert ">01<" in html and ">02<" in html and ">03<" in html
+    assert "Introduction" in html and "User issues" in html and "Elements to preserve" in html
+    assert "02.1" in html and "02.2" in html  # one numbered sub-divider per issue
+
+    # A real browser run was observed, so the deck must not call the issues "predicted".
+    assert "Observed user issue" in html
+    assert "Predicted user issue" not in html
+
+    # Issue -> root cause -> recommendation, plus the persona's own words as evidence.
+    assert "Root cause analysis" in html and "The list renderer never terminates." in html
+    assert "Recommendations: design solutions" in html and "Fix the render loop." in html
+    assert "In the user's words" in html and "I keep scrolling past the same block." in html
+    assert "Ada" in html
+
     assert "Low contrast form labels" in html
     assert "Increase contrast." in html  # recommendation falls back into "what to change"
-    assert '<img src="data:image/png;base64,Zm9v"' in html
+    assert "Current design" in html and '<img src="data:image/png;base64,Zm9v"' in html
+    assert "Consistent buttons" in html  # elements to preserve section rendered
+    assert "What to fix first" in html  # designer-facing impact ordering
     assert "ArrowRight" in html and "ArrowLeft" in html  # keyboard navigation wired
 
     empty_html = JobExecutor._slide_deck({"url": "https://example.com", "critical_pain_points": []})
     assert "No findings" in empty_html
+
+
+def test_slide_deck_says_predicted_when_no_browser_evidence_was_collected():
+    """Honesty about evidence class: without a live run the deck must claim no more
+    than a heuristic walkthrough does."""
+    html = JobExecutor._slide_deck({
+        "url": "https://example.com", "evidence_language": "inferred",
+        "critical_pain_points": [{"severity": "medium", "category": "ux", "title": "Validate task clarity",
+                                  "summary": "Inferred from the configured task."}],
+    })
+    assert "Predicted user issue" in html
+    assert "Observed user issue" not in html
 
 
 def test_ui_adaptation_calls_the_configured_llm_for_a_real_prototype(tmp_path, monkeypatch):
@@ -608,3 +649,121 @@ def test_artifact_retention_and_pinning(tmp_path):
     assert store.delete_expired_artifacts(future) == 1
     assert store.get_artifact(raw["artifact_id"]) is not None
     assert store.get_artifact(structured["artifact_id"]) is None
+
+
+def test_persona_thoughts_extract_real_reasoning_and_drop_plumbing():
+    """journeytest-core stores the model's reasoning in agent.message.end's
+    data.text; the event's own summary is the fixed literal "Assistant message
+    ended", so a narration built from summaries alone contains no thinking."""
+    journey = {"timeline": [
+        {"type": "journey.started", "summary": "Started journey", "elapsedMs": 0},
+        {"type": "agent.message.end", "summary": "Assistant message ended", "elapsedMs": 100,
+         "data": {"text": "I cannot find the checkout button.", "toolCalls": ["browser_click"]}},
+        {"type": "browser.screenshot", "summary": "Captured screenshot", "elapsedMs": 150},
+        {"type": "browser.click", "summary": "Clicked #cart", "elapsedMs": 200},
+        {"type": "agent.message.end", "summary": "Assistant message ended", "elapsedMs": 250, "data": {"text": "  "}},
+    ]}
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+
+    assert [item["kind"] for item in thoughts] == ["reasoning", "action"]
+    assert thoughts[0]["text"] == "I cannot find the checkout button."
+    assert thoughts[0]["toolCalls"] == ["browser_click"]
+    assert thoughts[1]["text"] == "Clicked #cart"
+    assert all("Captured screenshot" not in item["text"] for item in thoughts)
+
+
+def test_persona_thoughts_keep_reasoning_when_truncating():
+    """Actions are plentiful and reasoning is scarce; a cap must not drop the
+    reasoning, which is the only part that explains a finding."""
+    journey = {"timeline": (
+        [{"type": "browser.click", "summary": f"Clicked #{index}", "elapsedMs": index} for index in range(20)]
+        + [{"type": "agent.message.end", "summary": "Assistant message ended", "elapsedMs": 99,
+            "data": {"text": "This layout confuses me."}}]
+    )}
+
+    thoughts = JobExecutor._persona_thoughts(journey, limit=3)
+
+    assert len(thoughts) == 3
+    assert any(item["kind"] == "reasoning" and item["text"] == "This layout confuses me." for item in thoughts)
+
+
+def test_merge_strengths_collapses_the_same_decision_across_personas():
+    merged = JobExecutor._merge_strengths([
+        {"title": "Consistent buttons", "description": "Rounded rectangles.", "personaId": "p1",
+         "route": "https://example.com", "screenshotRef": "/a.png", "elements": []},
+        {"title": "consistent buttons", "description": "Rounded rectangles.", "personaId": "p2",
+         "route": "https://example.com", "screenshotRef": "/b.png", "elements": []},
+        {"title": "Simple palette", "description": "Few colours.", "personaId": "p1",
+         "route": "https://example.com", "screenshotRef": "/a.png", "elements": []},
+    ])
+
+    assert [item["title"] for item in merged] == ["Consistent buttons", "Simple palette"]
+    assert merged[0]["observedByPersonas"] == 2
+    assert merged[0]["screenshotRefs"] == ["/a.png", "/b.png"]
+    assert merged[1]["observedByPersonas"] == 1
+
+
+def test_preserved_from_verdicts_uses_met_pass_criteria_only():
+    """A met pass criterion is a flow that worked; the fail criterion
+    ("tasks-blocked") being met is the opposite and must never be praised."""
+    preserved = JobExecutor._preserved_from_verdicts([
+        {"profileId": "p1", "verdict": {"criteria": [
+            {"id": "tasks-completed", "result": "met", "explanation": "All tasks completed."},
+            {"id": "tasks-blocked", "result": "met", "explanation": "The run was blocked."},
+            {"id": "nav-usable", "result": "not-met"},
+        ]}},
+        {"profileId": "p2", "verdict": {"criteria": [{"id": "tasks-completed", "result": "met"}]}},
+    ])
+
+    assert [item["title"] for item in preserved] == ["Flow completes: tasks-completed"]
+    assert preserved[0]["observedByPersonas"] == 2
+
+
+def test_impact_analysis_orders_by_severity_then_reach():
+    impact = JobExecutor._impact_analysis([
+        {"title": "Medium wide", "severity": "medium", "affectedPersonas": 5, "category": "ux"},
+        {"title": "Critical narrow", "severity": "critical", "affectedPersonas": 1, "category": "blocker",
+         "susceptibleTraits": ["patience"]},
+        {"title": "High wide", "severity": "high", "affectedPersonas": 4, "category": "ux",
+         "susceptibleTraits": ["patience"]},
+    ], personas=[{"id": "p1"}, {"id": "p2"}])
+
+    assert [entry["title"] for entry in impact["priorityOrder"]] == ["Critical narrow", "High wide", "Medium wide"]
+    assert impact["blockingCount"] == 2
+    assert impact["personasTested"] == 2
+    assert impact["mostSusceptibleTraits"] == ["patience"]
+
+
+def test_attach_persona_evidence_quotes_every_affected_persona():
+    findings = [
+        {"title": "Synthesized", "affectedPersonaIds": ["p1", "p2"]},
+        {"title": "Single persona", "personaId": "p1"},
+        {"title": "No persona"},
+    ]
+    thoughts = {
+        "p1": [{"kind": "action", "text": "Clicked"}, {"kind": "reasoning", "text": "I am lost."}],
+        "p2": [{"kind": "reasoning", "text": "Where is the button?"}],
+    }
+
+    JobExecutor._attach_persona_evidence(findings, thoughts, {"p1": "Ada", "p2": "Lin"})
+
+    assert [item["quote"] for item in findings[0]["personaEvidence"]] == ["I am lost.", "Where is the button?"]
+    assert [item["personaName"] for item in findings[0]["personaEvidence"]] == ["Ada", "Lin"]
+    assert findings[1]["personaEvidence"][0]["quote"] == "I am lost."
+    assert "personaEvidence" not in findings[2]
+
+
+def test_executive_summary_reports_what_was_found_not_what_was_prepared():
+    summary = JobExecutor._executive_summary(
+        "https://example.com", ["Buy"], [{"id": "p1"}],
+        [{"severity": "critical", "title": "Broken"}, {"severity": "low", "title": "Nit"}],
+        [{"title": "Consistent buttons"}])
+
+    assert "2 usability issue(s) were identified" in summary
+    assert "1 of them high-severity or blocking" in summary
+    assert "1 design decision(s) are working" in summary
+
+    empty = JobExecutor._executive_summary("https://example.com", ["Buy"], [{"id": "p1"}],
+                                           [{"title": "No pain points detected", "severity": "low"}], [])
+    assert "0 usability issue(s) were identified" in empty

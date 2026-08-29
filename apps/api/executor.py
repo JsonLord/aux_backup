@@ -24,6 +24,13 @@ _JOURNEYTEST_SEVERITY_MAP = {"info": "low", "minor": "medium", "major": "high", 
 # result == "met" means the failure condition occurred (bad); every other
 # criterion in this codebase is a pass criterion, where "not-met"/"blocked" is bad.
 _FAIL_CRITERION_IDS = {"tasks-blocked"}
+# Bookkeeping browser events whose summaries are pure plumbing ("Captured
+# screenshot") rather than anything a reader would recognise as the persona
+# doing something. Excluded from the narration so the thought log reads as a
+# journey, not a driver trace.
+_QUIET_BROWSER_EVENTS = {"browser.snapshot", "browser.screenshot", "browser.get_url", "browser.get_title",
+                         "browser.console_evidence", "browser.network_evidence",
+                         "browser.network_har.start", "browser.network_har.stop"}
 
 
 def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
@@ -154,9 +161,11 @@ class JobExecutor:
                     raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)
-            cohort_runs, screenshot_bytes, vision_error = self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
+            cohort_runs, screenshot_bytes, raw_strengths, vision_error = self._collect_vision_pain_points(
+                journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             findings.extend(vision_findings)
+            preserve = self._merge_strengths(raw_strengths) + self._preserved_from_verdicts(journeys)
             evidence_language, journey_status = "observed", "completed"
             limitations = [
                 "Findings are JourneyTest's own evidence-grounded verdict (blockers/uxFindings/"
@@ -184,6 +193,7 @@ class JobExecutor:
                 "summary": "", "evidence": "Inferred from the configured task; JOURNEY_WORKER_URL is not "
                            "configured for this deployment, so no live browser evidence was collected.",
                 "source": "task_text"} for task in tasks]
+            preserve = []
             evidence_language, journey_status = "inferred", "configured"
             limitations = ["JOURNEY_WORKER_URL is not configured for this deployment; no live "
                            "browser evidence was collected, so these findings are inferred from "
@@ -194,7 +204,124 @@ class JobExecutor:
                            "any blockers, UX findings, or failed pass criteria for the configured tasks.",
                 "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
                 "source": "verdict"})
-        return {"schema_version": "1.0", "mode": "user_journey", "url": data.get("url"), "executive_summary": f"Prepared {len(tasks)} task scenarios for {len(personas)} synthetic users.", "synthetic_users": personas, "persona_artifacts": persona_artifacts, "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys}, "critical_pain_points": findings, "evidence_language": evidence_language, "limitations": limitations}
+        thoughts_by_persona = {persona.get("id"): self._persona_thoughts(journey)
+                               for journey, persona in zip(journeys, personas) if persona.get("id")}
+        persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
+                         for persona in personas}
+        self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
+        return {"schema_version": "1.1", "mode": "user_journey", "url": data.get("url"),
+                "executive_summary": self._executive_summary(data.get("url"), tasks, personas, findings, preserve),
+                "synthetic_users": personas, "persona_artifacts": persona_artifacts,
+                "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys},
+                "critical_pain_points": findings,
+                "flow_groups": self._flow_groups(findings, tasks),
+                "elements_to_preserve": preserve,
+                "impact_analysis": self._impact_analysis(findings, personas),
+                "persona_narration": [{"personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
+                                       "thoughts": thoughts} for persona_id, thoughts in thoughts_by_persona.items()],
+                "evidence_language": evidence_language, "limitations": limitations}
+
+    @staticmethod
+    def _preserved_from_verdicts(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Pass criteria JourneyTest actually met are the other half of "what works":
+        a flow the agent completed is a design decision worth preserving, stated in
+        the run's own words rather than inferred."""
+        preserved: dict[str, dict[str, Any]] = {}
+        for journey in journeys:
+            for criterion in (journey.get("verdict") or {}).get("criteria", []):
+                criterion_id = criterion.get("id")
+                if criterion_id in _FAIL_CRITERION_IDS or criterion.get("result") != "met":
+                    continue
+                entry = preserved.setdefault(criterion_id, {
+                    "title": f"Flow completes: {criterion_id}",
+                    "description": criterion.get("explanation") or "The agent completed this criterion.",
+                    "elements": [], "personaIds": [], "routes": [], "screenshotRefs": [], "source": "verdict"})
+                persona_id = journey.get("profileId") or journey.get("testerProfileId")
+                if persona_id and persona_id not in entry["personaIds"]:
+                    entry["personaIds"].append(persona_id)
+        for entry in preserved.values():
+            entry["observedByPersonas"] = len(entry["personaIds"])
+        return list(preserved.values())
+
+    @staticmethod
+    def _attach_persona_evidence(findings: list[dict[str, Any]], thoughts_by_persona: dict[str, list[dict[str, Any]]],
+                                 persona_names: dict[str, str]) -> None:
+        """Give every finding the persona reasoning that stands behind it.
+
+        This is what turns a synthesized finding from an assertion into a
+        demonstrated one: the reader sees the persona's own words from the run that
+        produced it. Stage-1 findings name one persona; synthesized stage-2 findings
+        name every persona the aggregation grouped together.
+        """
+        for finding in findings:
+            persona_ids = finding.get("affectedPersonaIds") or (
+                [finding["personaId"]] if finding.get("personaId") else [])
+            evidence = []
+            for persona_id in persona_ids:
+                reasoning = [item for item in thoughts_by_persona.get(persona_id, []) if item["kind"] == "reasoning"]
+                if reasoning:
+                    evidence.append({"personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
+                                     "quote": reasoning[-1]["text"], "elapsedMs": reasoning[-1].get("elapsedMs")})
+            if evidence:
+                finding["personaEvidence"] = evidence
+
+    @staticmethod
+    def _flow_groups(findings: list[dict[str, Any]], tasks: list[str]) -> list[dict[str, Any]]:
+        """Group findings the way a usability report is read -- by the part of the
+        product they belong to -- instead of one flat list. Categories are the only
+        route-independent grouping this pipeline actually has (a single-URL run gives
+        every finding the same route), so they stand in for the reference report's
+        "Introduction flow" / "Landing page" sections."""
+        groups: dict[str, dict[str, Any]] = {}
+        for finding in findings:
+            key = str(finding.get("category") or "usability")
+            group = groups.setdefault(key, {"flow": key.replace("_", " ").title(), "category": key, "findings": []})
+            group["findings"].append(finding.get("title"))
+        ordered = sorted(groups.values(), key=lambda item: -len(item["findings"]))
+        for index, group in enumerate(ordered, start=1):
+            group["section"] = f"02.{index}"
+            group["findingCount"] = len(group["findings"])
+        return ordered
+
+    @classmethod
+    def _impact_analysis(cls, findings: list[dict[str, Any]], personas: list[dict[str, Any]]) -> dict[str, Any]:
+        """A designer-facing read of the findings: how bad, how widespread, and who
+        it hits hardest -- the question "what do I fix first" answered from the run's
+        own numbers rather than left as raw deltas in each finding."""
+        by_severity: dict[str, int] = {}
+        for finding in findings:
+            severity = str(finding.get("severity") or "medium")
+            by_severity[severity] = by_severity.get(severity, 0) + 1
+        ranked = sorted(findings, key=lambda item: (
+            -cls._SEVERITY_RANK.get(str(item.get("severity")), 1), -int(item.get("affectedPersonas") or 0)))
+        traits: dict[str, int] = {}
+        for finding in findings:
+            for trait in finding.get("susceptibleTraits") or []:
+                traits[trait] = traits.get(trait, 0) + 1
+        return {
+            "personasTested": len(personas),
+            "findingsBySeverity": by_severity,
+            "blockingCount": by_severity.get("critical", 0) + by_severity.get("high", 0),
+            "priorityOrder": [{"title": item.get("title"), "severity": item.get("severity"),
+                               "affectedPersonas": item.get("affectedPersonas"),
+                               "category": item.get("category")} for item in ranked[:10]],
+            "mostSusceptibleTraits": sorted(traits, key=lambda trait: -traits[trait])[:5],
+        }
+
+    @staticmethod
+    def _executive_summary(url: str | None, tasks: list[str], personas: list[dict[str, Any]],
+                           findings: list[dict[str, Any]], preserve: list[dict[str, Any]]) -> str:
+        """State what was actually found, not what was merely prepared."""
+        blocking = sum(1 for finding in findings
+                       if str(finding.get("severity")) in {"critical", "high"}
+                       and finding.get("title") != "No pain points detected")
+        real = [finding for finding in findings if finding.get("title") != "No pain points detected"]
+        parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) against {url or 'the target site'}."]
+        parts.append(f"{len(real)} usability issue(s) were identified"
+                     + (f", {blocking} of them high-severity or blocking." if blocking else "."))
+        if preserve:
+            parts.append(f"{len(preserve)} design decision(s) are working and should be preserved.")
+        return " ".join(parts)
 
     @staticmethod
     def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -310,7 +437,7 @@ class JobExecutor:
     @classmethod
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
                                      personas: list[dict[str, Any]], url: str | None
-                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], str | None]:
+                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]], str | None]:
         """Critique a bounded, evenly-spaced sample of each run's real screenshots
         with a real vision model (services/eyeson-worker's /v1/journey-evidence-
         analyses), referenced against journeytest-core's own semantic element
@@ -328,6 +455,7 @@ class JobExecutor:
         task_summary = "; ".join(tasks)
         cohort_runs: list[dict[str, Any]] = []
         screenshot_bytes: dict[str, bytes] = {}
+        strengths: list[dict[str, Any]] = []
         attempted, last_error = False, None
         for journey, persona in zip(journeys, personas):
             artifacts = journey.get("artifacts") or {}
@@ -359,14 +487,79 @@ class JobExecutor:
                         last_error = str(error)
                         continue
                     pain_points.extend(result.get("painPoints", []))
+                    for strength in result.get("strengths", []):
+                        strengths.append({**strength, "personaId": persona.get("id"),
+                                          "personaName": (persona.get("persona") or {}).get("name") or persona.get("name")})
             cohort_runs.append({
                 "runId": journey.get("runId"), "profileId": persona.get("id"),
                 "iterationId": journey.get("runId"), "verdict": (journey.get("verdict") or {}).get("status"),
                 "simulationProfile": {"behavior": persona.get("behavior", {})}, "painPoints": pain_points,
             })
         if not attempted:
-            return [], {}, None
-        return cohort_runs, screenshot_bytes, (last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
+            return [], {}, [], None
+        return (cohort_runs, screenshot_bytes, strengths,
+                last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
+
+    @staticmethod
+    def _merge_strengths(strengths: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Collapse per-screenshot strengths into the report's "elements to preserve"
+        section: the same design decision seen by several personas is one item that
+        names how many of them saw it, not one entry per screenshot."""
+        merged: dict[str, dict[str, Any]] = {}
+        for strength in strengths:
+            key = str(strength.get("title", "")).strip().lower()
+            if not key:
+                continue
+            entry = merged.setdefault(key, {"title": strength.get("title"), "description": strength.get("description"),
+                                            "elements": strength.get("elements") or [], "personaIds": [],
+                                            "routes": [], "screenshotRefs": []})
+            for field, value in (("personaIds", strength.get("personaId")), ("routes", strength.get("route")),
+                                 ("screenshotRefs", strength.get("screenshotRef"))):
+                if value and value not in entry[field]:
+                    entry[field].append(value)
+        for entry in merged.values():
+            entry["observedByPersonas"] = len(entry["personaIds"])
+        return sorted(merged.values(), key=lambda item: -item["observedByPersonas"])
+
+    @staticmethod
+    def _persona_thoughts(journey: dict[str, Any], limit: int = 12) -> list[dict[str, Any]]:
+        """The persona's own words while driving the browser.
+
+        journeytest-core records every assistant turn as an `agent.message.end`
+        timeline event whose `data.text` holds the model's actual reasoning (up to
+        6000 chars, secrets already redacted by its EventRecorder). That text is
+        the only place the *why* behind a step exists -- the event's own `summary`
+        is the fixed literal "Assistant message ended", so anything rendering
+        `summary` alone (as every view here previously did) showed none of it.
+        Browser actions keep their `summary`, which is genuinely descriptive
+        ("Clicked #buy-button"), giving an interleaved thought/action narration.
+        """
+        thoughts: list[dict[str, Any]] = []
+        for event in journey.get("timeline") or []:
+            event_type, data = event.get("type", ""), event.get("data") or {}
+            elapsed, task_id = event.get("elapsedMs"), event.get("taskId")
+            if event_type == "agent.message.end":
+                text = str(data.get("text") or "").strip()
+                if text:
+                    thoughts.append({"kind": "reasoning", "text": text, "elapsedMs": elapsed, "taskId": task_id,
+                                     "toolCalls": data.get("toolCalls") or []})
+            elif event_type == "agent.message.error":
+                text = str(data.get("errorMessage") or "").strip()
+                if text:
+                    thoughts.append({"kind": "error", "text": text, "elapsedMs": elapsed, "taskId": task_id})
+            elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENTS:
+                summary = str(event.get("summary") or "").strip()
+                if summary:
+                    thoughts.append({"kind": "action", "text": summary, "elapsedMs": elapsed, "taskId": task_id})
+        if len(thoughts) <= limit:
+            return thoughts
+        # Keep the reasoning: it is what makes a finding legible to a designer.
+        reasoning = [item for item in thoughts if item["kind"] != "action"]
+        if len(reasoning) >= limit:
+            return reasoning[:limit]
+        actions = [item for item in thoughts if item["kind"] == "action"]
+        kept = reasoning + actions[: limit - len(reasoning)]
+        return sorted(kept, key=lambda item: item.get("elapsedMs") or 0)
 
     @classmethod
     def _synthesize_pain_points(cls, cohort_runs: list[dict[str, Any]], screenshot_bytes: dict[str, bytes]) -> list[dict[str, Any]]:
@@ -430,7 +623,8 @@ class JobExecutor:
                 "evidence": f"synthesized from {len(member_points)} observation(s) across {affected} persona(s); "
                             f"estimated impact: frustration {impact['frustration']:.2f}, "
                             f"confusion {impact['confusion']:.2f}, trust erosion {-impact['trust']:.2f}",
-                "affectedPersonas": affected, "source": "eyeson-vision-synthesis",
+                "affectedPersonas": affected, "affectedPersonaIds": list(root_cause["affectedUsers"]),
+                "susceptibleTraits": susceptible_traits, "source": "eyeson-vision-synthesis",
             }
             if crop:
                 finding["screenshotCrop"] = crop
@@ -515,69 +709,163 @@ class JobExecutor:
         findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
         return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'><title>AUX UX report</title><style>body{{font:18px system-ui;margin:0;background:#101827;color:#f8fafc}}section{{min-height:90vh;padding:5vw;display:grid;align-content:center}}section:nth-child(even){{background:#172554}}h1{{font-size:clamp(2.5rem,7vw,6rem)}}li{{margin:1.5rem 0}}</style></head><body><section><h1>UX analysis</h1><p>{escape(report.get('url') or '')}</p><p>{escape(report.get('executive_summary') or '')}</p></section><section><h2>Critical pain points</h2><ul>{findings}</ul></section><section><h2>Evidence status</h2><p>{escape(report.get('evidence_language') or 'unknown')}</p><p>{escape(' '.join(report.get('limitations', [])))}</p></section></body></html>"""
 
-    @staticmethod
-    def _slide_deck(report: dict[str, Any]) -> str:
-        """A real, navigable, self-contained slide deck built from this run's
-        SYNTHESIZED findings -- not fetched from a GitHub repo (there is no
-        GitHub dependency left in this deployment) and not requiring an external
-        slide-rendering tool: a single portable HTML file, one slide per
-        synthesized finding, arrow-key/click navigation via inline JS. Every
-        finding shown here already reflects cross-persona synthesis
-        (apps.api.executor._synthesize_pain_points), never one persona's
-        individual citation."""
-        findings = report.get("critical_pain_points", [])
-        severity_counts: dict[str, int] = {}
-        for item in findings:
-            severity_counts[item.get("severity", "medium")] = severity_counts.get(item.get("severity", "medium"), 0) + 1
-        counts_line = ", ".join(f"{count} {severity}" for severity, count in
-                                 sorted(severity_counts.items(), key=lambda pair: -pair[1]))
+    @classmethod
+    def _slide_deck(cls, report: dict[str, Any]) -> str:
+        """A real, navigable, self-contained usability-review deck.
 
-        def render_slide(index: int, item: dict[str, Any]) -> str:
-            image = (f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="Screenshot region for this finding">'
-                     if item.get("screenshotCrop") else "")
-            alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
-                                                          if item.get("recommendation") else [])
-            changes = "".join(f"<li>{escape(alt.get('proposedChange', ''))}</li>" for alt in alternatives if alt.get("proposedChange"))
-            affected = f'<p class="affected">Observed across {item["affectedPersonas"]} tested persona(s)</p>' if item.get("affectedPersonas") else ""
-            references = (item.get("grounding") or {}).get("references") or []
-            grounding = (f'<p class="grounding"><strong>Grounded in:</strong> ' +
-                         "; ".join(f'{escape(ref.get("source", ""))} — {escape(ref.get("principle") or ref.get("title") or "")}'
-                                   for ref in references) + '</p>') if references else ""
-            return (f'<section class="slide" data-severity="{escape(str(item.get("severity", "")))}">'
-                    f'<span class="badge">{escape(str(item.get("severity", "")).upper())} &middot; {escape(str(item.get("category", "")))}</span>'
-                    f'<h2>{index}. {escape(item.get("title", "Finding"))}</h2>{affected}'
-                    f'<p class="summary">{escape(item.get("summary") or item.get("evidence") or "")}</p>'
-                    f'{image}{f"<h3>What to change</h3><ul>{changes}</ul>" if changes else ""}{grounding}</section>')
+        Follows the anatomy of a hand-made UX review deck (title, contents, an
+        introduction stating method and scope, numbered per-issue sections, then a
+        closing "elements to preserve" section) rather than dumping findings as a
+        list, because that is the shape a designer or stakeholder actually reads.
 
-        slides = "".join(render_slide(index, item) for index, item in enumerate(findings, start=1)) or \
-            '<section class="slide"><h2>No findings</h2><p>No pain points were reported for this run.</p></section>'
-        title_slide = (f'<section class="slide title"><h1>UX findings</h1><p class="url">{escape(report.get("url") or "")}</p>'
-                        f'<p class="summary">{escape(report.get("executive_summary") or "")}</p>'
-                        f'<p class="affected">{escape(str(len(findings)))} finding(s){f" &mdash; {escape(counts_line)}" if counts_line else ""}</p></section>')
+        Two things this deck can show that a heuristic review cannot, and which are
+        the whole point of the two-stage pipeline:
+          * every issue is *observed* -- a synthetic user really drove a browser
+            through it -- so the section is headed "Observed user issue" rather than
+            the "Predicted user issue" a design walkthrough would have to say;
+          * each one carries the persona's own reasoning from the run that produced
+            it (journeytest-core's `agent.message.end` text), so the claim is
+            demonstrated in the user's words instead of asserted.
+        """
+        findings = [item for item in report.get("critical_pain_points", [])
+                    if item.get("title") != "No pain points detected"]
+        preserve = report.get("elements_to_preserve") or []
+        impact = report.get("impact_analysis") or {}
+        observed = (report.get("evidence_language") or "") == "observed"
+        issue_label = "Observed user issue" if observed else "Predicted user issue"
+        url = report.get("url") or ""
+        tasks = (report.get("journey_outcome") or {}).get("tasks") or []
+        slides: list[str] = []
+
+        def divider(number: str, title: str) -> str:
+            return (f'<section class="slide divider"><p class="secnum">{escape(number)}</p>'
+                    f'<h2>{escape(title)}</h2></section>')
+
+        # --- 01 Title, contents, introduction ---
+        slides.append(
+            f'<section class="slide title"><p class="eyebrow">Usability review</p>'
+            f'<h1>{escape(url) or "UX analysis"}</h1>'
+            f'<p class="summary">{escape(report.get("executive_summary") or "")}</p>'
+            f'<p class="stamp">{"Observed" if observed else "Inferred"} evidence &middot; '
+            f'{escape(str(impact.get("personasTested", len(report.get("synthetic_users") or []))))} synthetic user(s)</p></section>')
+
+        contents = [("01", "Introduction"), ("02", "User issues")]
+        if preserve:
+            contents.append(("03", "Elements to preserve"))
+        contents_items = "".join(f'<li><span class="secnum-inline">{num}</span>{escape(label)}</li>'
+                                 for num, label in contents)
+        slides.append(f'<section class="slide"><h2>Contents</h2><ol class="contents">{contents_items}</ol></section>')
+
+        slides.append(divider("01", "Introduction"))
+        method = ("Synthetic users with compiled behaviour and ability profiles drove a real browser "
+                  "through the tasks below. Each issue below was seen in that run, then critiqued "
+                  "against a curated corpus of WCAG and Nielsen Norman usability heuristics."
+                  if observed else
+                  "No live browser evidence was collected for this run; the issues below are inferred "
+                  "from the configured task text alone.")
+        task_items = "".join(f"<li>{escape(task)}</li>" for task in tasks) or "<li>No tasks configured.</li>"
+        severity_counts = impact.get("findingsBySeverity") or {}
+        counts_line = ", ".join(f"{count} {severity}" for severity, count
+                                in sorted(severity_counts.items(), key=lambda pair: -pair[1]))
+        slides.append(
+            f'<section class="slide"><h2>How this review was made</h2>'
+            f'<p class="summary">{escape(method)}</p>'
+            f'<h3>Tasks attempted</h3><ul>{task_items}</ul>'
+            + (f'<p class="affected">{escape(str(len(findings)))} issue(s) found'
+               + (f" &mdash; {escape(counts_line)}" if counts_line else "") + '</p>' if findings else "")
+            + '</section>')
+
+        # --- 02 Issues: a numbered sub-divider then the finding itself ---
+        slides.append(divider("02", "User issues"))
+        for index, item in enumerate(findings, start=1):
+            category = str(item.get("category") or "usability").replace("_", " ")
+            slides.append(
+                f'<section class="slide divider sub"><p class="secnum">02.{index}</p>'
+                f'<h2>{escape(item.get("title", "Finding"))}</h2>'
+                f'<p class="flow">{escape(category.title())}</p></section>')
+            slides.append(cls._finding_slide(item, index, issue_label))
+
+        # --- 03 Elements to preserve ---
+        if preserve:
+            slides.append(divider("03", "Elements to preserve"))
+            for item in preserve:
+                seen = item.get("observedByPersonas") or 0
+                seen_line = (f'<p class="affected">Noted by {seen} of the tested persona(s)</p>' if seen else "")
+                slides.append(
+                    f'<section class="slide preserve"><span class="badge keep">KEEP</span>'
+                    f'<h2>{escape(item.get("title", "Works well"))}</h2>{seen_line}'
+                    f'<p class="summary">{escape(item.get("description") or "")}</p></section>')
+
+        if not findings and not preserve:
+            slides.append('<section class="slide"><h2>No findings</h2>'
+                          '<p class="summary">No pain points were reported for this run.</p></section>')
+
+        # --- Priorities + credits ---
+        priorities = impact.get("priorityOrder") or []
+        if priorities:
+            rows = "".join(
+                f'<tr><td>{position}</td><td>{escape(str(entry.get("title") or ""))}</td>'
+                f'<td><span class="sev sev-{escape(str(entry.get("severity") or "medium"))}">'
+                f'{escape(str(entry.get("severity") or "")).upper()}</span></td>'
+                f'<td>{escape(str(entry.get("affectedPersonas") or "&mdash;"))}</td></tr>'
+                for position, entry in enumerate(priorities, start=1))
+            slides.append(
+                '<section class="slide"><h2>What to fix first</h2>'
+                '<table class="impact"><thead><tr><th>#</th><th>Issue</th><th>Severity</th>'
+                '<th>Personas</th></tr></thead><tbody>' + rows + '</tbody></table></section>')
+
+        slides.append('<section class="slide title"><h1>Usability review</h1>'
+                      f'<p class="summary">Generated by AUX from a live browser run against '
+                      f'{escape(url) or "the target site"}.</p></section>')
+
+        deck = "".join(slides)
         return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
-<title>UX findings slides</title><style>
+<title>Usability review slides</title><style>
 :root{{color-scheme:dark}}
 *{{box-sizing:border-box}}
 body{{margin:0;font:20px/1.5 system-ui,sans-serif;background:#0b1220;color:#f1f5f9;overflow:hidden}}
 .deck{{height:100vh;width:100vw;position:relative}}
-.slide{{position:absolute;inset:0;padding:6vw;display:none;flex-direction:column;justify-content:center;gap:1rem;overflow-y:auto}}
+.slide{{position:absolute;inset:0;padding:5vw 6vw;display:none;flex-direction:column;justify-content:center;gap:.9rem;overflow-y:auto}}
 .slide.active{{display:flex}}
-.slide.title{{align-items:center;text-align:center}}
-.slide h1{{font-size:clamp(2rem,6vw,4rem);margin:0}}
-.slide h2{{font-size:clamp(1.5rem,4vw,2.75rem);margin:0}}
-.slide h3{{opacity:.8;margin:.5rem 0 0}}
-.badge{{align-self:flex-start;font-size:.85rem;letter-spacing:.05em;padding:.25rem .75rem;border-radius:999px;background:#1e293b;border:1px solid #334155}}
-.url{{opacity:.7}}
-.summary{{max-width:60rem}}
-.affected{{opacity:.75;font-size:.95rem}}
-.grounding{{opacity:.6;font-size:.85rem;max-width:60rem}}
-img{{max-width:min(90%,640px);border-radius:.75rem;border:1px solid #334155}}
+.slide.title{{align-items:center;text-align:center;background:linear-gradient(160deg,#0b1220,#15233d)}}
+.slide.divider{{align-items:flex-start;justify-content:center;background:linear-gradient(160deg,#0f1b30,#0b1220)}}
+.slide.divider.sub{{background:linear-gradient(160deg,#101d33,#0b1220)}}
+.secnum{{font-size:clamp(3rem,10vw,7rem);font-weight:700;color:#38bdf8;opacity:.9;margin:0;line-height:1}}
+.secnum-inline{{display:inline-block;min-width:2.5rem;color:#38bdf8;font-weight:700}}
+.eyebrow{{letter-spacing:.25em;text-transform:uppercase;font-size:.8rem;opacity:.65;margin:0}}
+.slide h1{{font-size:clamp(2rem,5.5vw,3.8rem);margin:0}}
+.slide h2{{font-size:clamp(1.4rem,3.6vw,2.4rem);margin:0}}
+.slide h3{{font-size:1rem;letter-spacing:.08em;text-transform:uppercase;opacity:.65;margin:.6rem 0 .1rem}}
+.contents{{list-style:none;padding:0;font-size:1.3rem;line-height:2.2}}
+.badge{{align-self:flex-start;font-size:.8rem;letter-spacing:.05em;padding:.25rem .75rem;border-radius:999px;background:#1e293b;border:1px solid #334155}}
+.badge.keep{{background:#052e1a;border-color:#15803d;color:#4ade80}}
+.flow{{opacity:.6;letter-spacing:.1em;text-transform:uppercase;font-size:.85rem}}
+.summary{{max-width:62rem}}
+.affected{{opacity:.75;font-size:.95rem;margin:.1rem 0}}
+.grounding{{opacity:.6;font-size:.82rem;max-width:62rem}}
+.cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1.2rem;align-items:start}}
+.col h3{{margin-top:0}}
+.col p,.col ul{{margin:.2rem 0;font-size:.98rem}}
+.col ul{{padding-left:1.1rem}}
+.shots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:1rem;margin-top:.4rem}}
+.shot figcaption{{font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;opacity:.6;margin-bottom:.3rem}}
+.shot img{{width:100%;border-radius:.6rem;border:1px solid #334155;display:block}}
+figure{{margin:0}}
+blockquote{{margin:.3rem 0;padding:.5rem .9rem;border-left:3px solid #38bdf8;background:#0f1b30;border-radius:.35rem;font-size:.93rem}}
+blockquote cite{{display:block;opacity:.6;font-size:.78rem;font-style:normal;margin-top:.3rem}}
+table.impact{{border-collapse:collapse;font-size:.95rem;max-width:62rem}}
+table.impact th,table.impact td{{text-align:left;padding:.4rem .8rem;border-bottom:1px solid #1e293b}}
+.sev{{font-size:.72rem;padding:.1rem .5rem;border-radius:999px;border:1px solid #334155}}
+.sev-critical{{background:#450a0a;border-color:#b91c1c;color:#fca5a5}}
+.sev-high{{background:#431407;border-color:#c2410c;color:#fdba74}}
+.sev-medium{{background:#422006;border-color:#a16207;color:#fde047}}
+.sev-low{{background:#0f2942;border-color:#0369a1;color:#7dd3fc}}
 .nav{{position:fixed;bottom:1.5rem;right:1.5rem;display:flex;gap:.5rem;z-index:10}}
 .nav button{{background:#1e293b;color:#f1f5f9;border:1px solid #334155;border-radius:.5rem;padding:.5rem 1rem;cursor:pointer;font-size:1rem}}
 .nav button:hover{{background:#334155}}
 .counter{{position:fixed;bottom:1.5rem;left:1.5rem;opacity:.6;font-size:.9rem}}
 </style></head><body>
-<div class="deck">{title_slide}{slides}</div>
+<div class="deck">{deck}</div>
 <div class="nav"><button id="prev" aria-label="Previous slide">&larr;</button><button id="next" aria-label="Next slide">&rarr;</button></div>
 <div class="counter" id="counter"></div>
 <script>
@@ -590,6 +878,55 @@ document.querySelector('.deck').addEventListener('click',(e)=>{{if(e.target.tagN
 show(0);
 </script>
 </body></html>"""
+
+    @staticmethod
+    def _finding_slide(item: dict[str, Any], index: int, issue_label: str) -> str:
+        """One issue, in the three-part shape a usability report uses: what the user
+        hit, why it happens, and what to change -- beside the evidence for it."""
+        severity = str(item.get("severity") or "medium")
+        category = str(item.get("category") or "usability").replace("_", " ")
+        issue_text = item.get("summary") or item.get("evidence") or ""
+        root_cause = item.get("rootCause") or item.get("mechanism") or item.get("evidence") or ""
+        alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
+                                                     if item.get("recommendation") else [])
+        changes = "".join(f"<li>{escape(str(alt.get('proposedChange', '')))}</li>"
+                          for alt in alternatives if alt.get("proposedChange"))
+        affected = (f'<p class="affected">Reproduced by {item["affectedPersonas"]} of the tested persona(s)</p>'
+                    if item.get("affectedPersonas") else "")
+        references = (item.get("grounding") or {}).get("references") or []
+        grounding = ('<p class="grounding"><strong>Grounded in:</strong> ' + "; ".join(
+            f'{escape(str(ref.get("source", "")))} &mdash; {escape(str(ref.get("principle") or ref.get("title") or "")) }'
+            for ref in references) + "</p>") if references else ""
+
+        # Current design | Re-design, the pairing a redesign proposal is read in.
+        shots = ""
+        if item.get("screenshotCrop"):
+            panels = [f'<figure class="shot"><figcaption>Current design</figcaption>'
+                      f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="The region of the page this issue is about"></figure>']
+            if item.get("redesignImage"):
+                panels.append(f'<figure class="shot"><figcaption>Re-design</figcaption>'
+                              f'<img src="{escape(item["redesignImage"], quote=True)}" alt="Proposed redesign of this region"></figure>')
+            shots = f'<div class="shots">{"".join(panels)}</div>'
+
+        # The persona's own words -- what makes this observed rather than predicted.
+        quotes = "".join(
+            f'<blockquote>{escape(str(evidence.get("quote", ""))[:400])}'
+            f'<cite>{escape(str(evidence.get("personaName") or evidence.get("personaId") or "Synthetic user"))}</cite></blockquote>'
+            for evidence in (item.get("personaEvidence") or [])[:2])
+        quote_block = f'<div class="col"><h3>In the user\'s words</h3>{quotes}</div>' if quotes else ""
+
+        return (f'<section class="slide" data-severity="{escape(severity)}">'
+                f'<span class="badge"><span class="sev sev-{escape(severity)}">{escape(severity.upper())}</span> '
+                f'&middot; {escape(category)}</span>'
+                f'<h2>{escape(item.get("title", "Finding"))}</h2>{affected}'
+                f'<div class="cols">'
+                f'<div class="col"><h3>{escape(issue_label)}</h3><p>{escape(str(issue_text))}</p></div>'
+                + (f'<div class="col"><h3>Root cause analysis</h3><p>{escape(str(root_cause))}</p></div>'
+                   if root_cause and root_cause != issue_text else "")
+                + (f'<div class="col"><h3>Recommendations: design solutions</h3><ul>{changes}</ul></div>'
+                   if changes else "")
+                + quote_block
+                + f'</div>{shots}{grounding}</section>')
 
     @staticmethod
     def _browser_outputs(report: dict[str, Any]):
