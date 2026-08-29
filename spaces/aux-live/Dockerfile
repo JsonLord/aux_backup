@@ -53,7 +53,13 @@ ENV PATH="/home/user/app/services/journey-worker/node/node_modules/.bin:${PATH}"
     ARTIFACT_ROOT="/home/user/artifacts" \
     AUTH_MODE="hf_token" \
     PORT="8080" \
-    JOURNEY_ARTIFACT_ROOT="/home/user/artifacts/journeys"
+    JOURNEY_ARTIFACT_ROOT="/home/user/artifacts/journeys" \
+    PERSONA_POOL_GITHUB_REPO="JsonLord/PersonaPool"
+# PERSONA_POOL_GITHUB_TOKEN (read-only, contents:read on the pool repo above) is
+# deliberately not set here -- add it as an HF Space secret so it never lands in
+# this Dockerfile or any image layer. Without it, GitHubPersonaPoolClient still
+# works unauthenticated against the pool repo's public contents, just subject to
+# GitHub's lower unauthenticated rate limit.
 
 EXPOSE 7860
 ENTRYPOINT ["/usr/bin/tini", "--"]
