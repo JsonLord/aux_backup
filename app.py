@@ -713,7 +713,7 @@ def generate_full_ui_call(session_id, selected_solutions_json, url, workspace_id
         if job["status"] != "succeeded":
             return f"❌ Prototype generation failed: {job.get('error')}"
         html = session_client.get_artifact_content(job["output_artifacts"][0])
-        return f'<iframe srcdoc="{html.replace(chr(34), "&quot;")}" width="100%" height="800" frameborder="0"></iframe>'
+        return frame_document(html, "Generated UX prototype", height="800px")
     except Exception as exc:
         add_log(f"Control-plane error: {exc}")
         return f"❌ Error: {exc}"
@@ -729,7 +729,7 @@ def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfi
         if not candidates:
             return "No generated UI artifact is stored for this session yet."
         html = session_client.get_artifact_content(candidates[-1]["artifact_id"])
-        return f'<iframe srcdoc="{html.replace(chr(34), "&quot;")}" width="100%" height="800px" frameborder="0"></iframe>'
+        return frame_document(html, "Saved UI prototype", height="800px")
     except Exception as error:
         return f"Unable to load the saved UI artifact: {error}"
 
@@ -755,6 +755,130 @@ def llm_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profil
     except Exception as e:
         history.append((message, f"Error: {str(e)}"))
         return history, ""
+
+def format_persona_thought_log(content_json: str) -> str:
+    """Render a journey.log or persona.profile artifact as readable
+    Markdown instead of a wall of raw JSON -- persona identity, the
+    verdict, and the real per-action timeline the director recorded
+    (services/journey-worker's timelineToEvents), not just field dumps."""
+    try:
+        data = json.loads(content_json)
+    except (json.JSONDecodeError, TypeError):
+        return "_Could not parse this artifact as JSON._"
+    if isinstance(data, dict) and isinstance(data.get("runs"), list):
+        sections = []
+        for run in data["runs"]:
+            persona = (run.get("simulationProfile") or {}).get("persona", {})
+            name = persona.get("name") or run.get("profileId") or run.get("testerProfileId") or "Persona"
+            verdict = run.get("verdict") or {}
+            status_emoji = {"passed": "✅", "failed": "❌", "blocked": "🚫", "inconclusive": "❓"}.get(verdict.get("status"), "•")
+            reasoning = [item for item in (run.get("reasoning") or [])
+                         if str(item.get("text") or "").strip()]
+            lines = [f"## {status_emoji} {name} — run `{run.get('runId', '?')}`",
+                      f"**Verdict:** {verdict.get('status', 'unknown')} ({verdict.get('confidence', 'n/a')} confidence)",
+                      f"\n{verdict.get('summary', '_No summary recorded._')}\n"]
+            # Say up front whether this run has the model's real thinking or
+            # only its actions, rather than leaving a reader to infer it from
+            # an absence.
+            if reasoning:
+                model_name = next((item.get("model") for item in reasoning if item.get("model")), None)
+                lines.append(f"🧠 **{len(reasoning)} model thought(s)** captured from the director's own "
+                             f"reasoning tokens{f' ({model_name})' if model_name else ''}, shown below as "
+                             "`💭 … — model reasoning`.\n")
+            else:
+                lines.append("🧠 _No model reasoning was captured for this run, so the thoughts below are "
+                             "the agent's recorded text output and browser actions only._\n")
+            # The model's real reasoning is captured from the completions
+            # responses (services/journey-worker/node/src/reasoningCapture.js)
+            # because journeytest-core drops `thinking` blocks before writing
+            # the timeline. Interleave it by elapsed time so the log reads as
+            # one journey rather than two parallel streams.
+            timeline = sorted(
+                list(run.get("timeline") or []) + [
+                    {"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
+                     "data": {"text": item.get("text")}}
+                    for item in (run.get("reasoning") or [])
+                    if str(item.get("text") or "").strip()],
+                key=lambda event: event.get("elapsedMs") or 0)
+            if timeline:
+                lines.append("**What happened, in the persona's own words:**\n")
+                for event in timeline:
+                    event_type, event_data = event.get("type", ""), event.get("data") or {}
+                    elapsed = event.get("elapsedMs")
+                    when = f" _(+{elapsed / 1000:.1f}s)_" if isinstance(elapsed, (int, float)) else ""
+                    # Plain form for use *inside* an italic attribution line; nesting
+                    # `when` there rendered as "_model reasoning _(+0.9s)__".
+                    at = f" · +{elapsed / 1000:.1f}s" if isinstance(elapsed, (int, float)) else ""
+                    # journeytest-core records each assistant turn as
+                    # agent.message.end, whose `summary` is the fixed literal
+                    # "Assistant message ended" -- the model's actual reasoning
+                    # lives in data.text. Rendering `summary` alone (as this
+                    # did) showed none of the thinking the tab exists for.
+                    if event_type == "model.reasoning":
+                        # The model's own thinking tokens for that request,
+                        # read off the wire -- not a summary of them.
+                        thought = str(event_data["text"]).strip()
+                        lines.append(f"> 💭 {thought}\n>\n> — _model reasoning_{at}\n")
+                    elif event_type == "agent.message.end" and str(event_data.get("text") or "").strip():
+                        thought = str(event_data["text"]).strip()
+                        lines.append(f"> 💭 {thought}\n>\n> — _agent text output_{at}\n")
+                    elif event_type == "agent.message.error" and event_data.get("errorMessage"):
+                        lines.append(f"- ⚠️ **Model error:** {event_data['errorMessage']}{when}")
+                    elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENT_TYPES:
+                        summary = event.get("summary") or event_type
+                        lines.append(f"- 🖱️ {summary}{when}")
+                    elif event_type in {"journey.started", "journey.completed", "journey.verdict"}:
+                        lines.append(f"- **{event.get('summary') or event_type}**{when}")
+            for bucket, label in (("blockers", "🚫 Blockers"), ("uxFindings", "⚠️ UX findings")):
+                items = verdict.get(bucket) or []
+                if items:
+                    lines.append(f"\n**{label}:**")
+                    lines.extend(f"- **{item.get('title', 'Finding')}**: {item.get('description', '')}" for item in items)
+            sections.append("\n".join(lines))
+        return "\n\n---\n\n".join(sections) if sections else "_No runs recorded in this log._"
+    if isinstance(data, dict) and ("behavior" in data or "abilities" in data):
+        persona = data.get("persona", {})
+        name = persona.get("name") or data.get("id", "Persona")
+        behavior, abilities = data.get("behavior") or {}, data.get("abilities") or {}
+        lines = [f"## {name}", f"**Source:** {data.get('source', 'unknown')}  ·  **ID:** `{data.get('id', '?')}`"]
+        if behavior:
+            top_traits = sorted(behavior.items(), key=lambda item: -item[1] if isinstance(item[1], (int, float)) else 0)[:5]
+            lines.append("\n**Notable behavior traits:** " + ", ".join(
+                f"{trait} {value:.2f}" for trait, value in top_traits if isinstance(value, (int, float))))
+        vision = (abilities.get("vision") or {})
+        if vision:
+            lines.append(f"**Vision:** {vision.get('colorVision', 'typical')}, acuity {vision.get('acuity', 1):.2f}")
+        return "\n".join(lines)
+    return f"```json\n{json.dumps(data, indent=2)[:4000]}\n```"
+
+
+def frame_document(document: str, title: str, height: str = "78vh") -> str:
+    """Render a whole generated HTML document inside the page, contained.
+
+    `gr.HTML` injects its value with innerHTML, so a full document's own CSS
+    applies to the *host* page. The presentation styles its sections
+    `min-height:90vh; display:grid; align-content:center` -- a full-screen deck --
+    which, leaked into the tab, made every section 90% of the browser viewport
+    tall with its content floated to the middle: the "huge whitespace between the
+    controls and the rendering". An iframe gives the document its own viewport, so
+    90vh means 90% of the frame, and its background and font cannot escape.
+
+    innerHTML also refuses to execute `<script>`, which the slide deck's keyboard
+    navigation needs, so both views want a real document context regardless.
+
+    The body is escaped with `escape(..., quote=True)`: escaping only `"` (as this
+    did) leaves a literal `&quot;` in the document decoding to a bare quote, which
+    ends the attribute early and truncates the render.
+    """
+    return (f'<iframe title="{escape(title, quote=True)}" '
+            f'srcdoc="{escape(document, quote=True)}" '
+            f'style="width:100%;height:{height};border:1px solid var(--border-color-primary,#334155);'
+            'border-radius:.5rem;display:block;background:#fff"></iframe>')
+
+
+# The Persona Thought Logs tab opens on the first of these kinds.
+log_choices_kinds = ("journey.log", "persona.profile")
+
 
 # Gradio UI
 with gr.Blocks(title="UX Analysis Orchestrator") as demo:
@@ -1174,84 +1298,6 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 lines.extend(f"- {limitation}" for limitation in report["limitations"])
             return "\n".join(lines)
 
-        def format_persona_thought_log(content_json: str) -> str:
-            """Render a journey.log or persona.profile artifact as readable
-            Markdown instead of a wall of raw JSON -- persona identity, the
-            verdict, and the real per-action timeline the director recorded
-            (services/journey-worker's timelineToEvents), not just field dumps."""
-            try:
-                data = json.loads(content_json)
-            except (json.JSONDecodeError, TypeError):
-                return "_Could not parse this artifact as JSON._"
-            if isinstance(data, dict) and isinstance(data.get("runs"), list):
-                sections = []
-                for run in data["runs"]:
-                    persona = (run.get("simulationProfile") or {}).get("persona", {})
-                    name = persona.get("name") or run.get("profileId") or run.get("testerProfileId") or "Persona"
-                    verdict = run.get("verdict") or {}
-                    status_emoji = {"passed": "✅", "failed": "❌", "blocked": "🚫", "inconclusive": "❓"}.get(verdict.get("status"), "•")
-                    lines = [f"## {status_emoji} {name} — run `{run.get('runId', '?')}`",
-                              f"**Verdict:** {verdict.get('status', 'unknown')} ({verdict.get('confidence', 'n/a')} confidence)",
-                              f"\n{verdict.get('summary', '_No summary recorded._')}\n"]
-                    # The model's real reasoning is captured from the completions
-                    # responses (services/journey-worker/node/src/reasoningCapture.js)
-                    # because journeytest-core drops `thinking` blocks before writing
-                    # the timeline. Interleave it by elapsed time so the log reads as
-                    # one journey rather than two parallel streams.
-                    timeline = sorted(
-                        list(run.get("timeline") or []) + [
-                            {"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
-                             "data": {"text": item.get("text")}}
-                            for item in (run.get("reasoning") or [])
-                            if str(item.get("text") or "").strip()],
-                        key=lambda event: event.get("elapsedMs") or 0)
-                    if timeline:
-                        lines.append("**What happened, in the persona's own words:**\n")
-                        for event in timeline:
-                            event_type, event_data = event.get("type", ""), event.get("data") or {}
-                            elapsed = event.get("elapsedMs")
-                            when = f" _(+{elapsed / 1000:.1f}s)_" if isinstance(elapsed, (int, float)) else ""
-                            # journeytest-core records each assistant turn as
-                            # agent.message.end, whose `summary` is the fixed literal
-                            # "Assistant message ended" -- the model's actual reasoning
-                            # lives in data.text. Rendering `summary` alone (as this
-                            # did) showed none of the thinking the tab exists for.
-                            if event_type == "model.reasoning":
-                                # The model's own thinking tokens for that request,
-                                # read off the wire -- not a summary of them.
-                                thought = str(event_data["text"]).strip()
-                                lines.append(f"> 💭 {thought}\n>\n> — _model reasoning{when}_\n")
-                            elif event_type == "agent.message.end" and str(event_data.get("text") or "").strip():
-                                thought = str(event_data["text"]).strip()
-                                lines.append(f"> 💭 {thought}\n>\n> — _thinking{when}_\n")
-                            elif event_type == "agent.message.error" and event_data.get("errorMessage"):
-                                lines.append(f"- ⚠️ **Model error:** {event_data['errorMessage']}{when}")
-                            elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENT_TYPES:
-                                summary = event.get("summary") or event_type
-                                lines.append(f"- 🖱️ {summary}{when}")
-                            elif event_type in {"journey.started", "journey.completed", "journey.verdict"}:
-                                lines.append(f"- **{event.get('summary') or event_type}**{when}")
-                    for bucket, label in (("blockers", "🚫 Blockers"), ("uxFindings", "⚠️ UX findings")):
-                        items = verdict.get(bucket) or []
-                        if items:
-                            lines.append(f"\n**{label}:**")
-                            lines.extend(f"- **{item.get('title', 'Finding')}**: {item.get('description', '')}" for item in items)
-                    sections.append("\n".join(lines))
-                return "\n\n---\n\n".join(sections) if sections else "_No runs recorded in this log._"
-            if isinstance(data, dict) and ("behavior" in data or "abilities" in data):
-                persona = data.get("persona", {})
-                name = persona.get("name") or data.get("id", "Persona")
-                behavior, abilities = data.get("behavior") or {}, data.get("abilities") or {}
-                lines = [f"## {name}", f"**Source:** {data.get('source', 'unknown')}  ·  **ID:** `{data.get('id', '?')}`"]
-                if behavior:
-                    top_traits = sorted(behavior.items(), key=lambda item: -item[1] if isinstance(item[1], (int, float)) else 0)[:5]
-                    lines.append("\n**Notable behavior traits:** " + ", ".join(
-                        f"{trait} {value:.2f}" for trait, value in top_traits if isinstance(value, (int, float))))
-                vision = (abilities.get("vision") or {})
-                if vision:
-                    lines.append(f"**Vision:** {vision.get('colorVision', 'typical')}, acuity {vision.get('acuity', 1):.2f}")
-                return "\n".join(lines)
-            return f"```json\n{json.dumps(data, indent=2)[:4000]}\n```"
 
         def workspace_session_choices(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             try:
@@ -1283,6 +1329,13 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             except (PermissionError, requests.RequestException) as error:
                 gr.Warning(workspace_access_message(error))
                 return gr.update(choices=[], value=None)
+            if isinstance(kinds, (list, tuple)):
+                # A sequence means the caller cares which kind the tab opens on --
+                # the dropdown selects its first entry, and a tab named for one kind
+                # must not default to another. (The Persona Thought Logs tab opened
+                # on a persona profile, because profiles are written at session
+                # creation and so sort ahead of the journey log.)
+                artifacts.sort(key=lambda item: list(kinds).index(item["kind"]))
             choices = [(item.get("metadata", {}).get("download_name") or f"{item['kind']} · {item['artifact_id']}", item["artifact_id"]) for item in artifacts]
             return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
@@ -1309,7 +1362,8 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             return workspace_artifact_choices(session_id, {"ux.report"}, workspace_id, oauth_profile, oauth_token)
 
         def log_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-            return workspace_artifact_choices(session_id, {"journey.log", "persona.profile"}, workspace_id, oauth_profile, oauth_token)
+            # Ordered, not a set: the thought log is what this tab is for.
+            return workspace_artifact_choices(session_id, log_choices_kinds, workspace_id, oauth_profile, oauth_token)
 
         def evidence_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"browser.screenshot", "browser.snapshot", "browser.video", "ux.evidence", "ui.prototype"}, workspace_id, oauth_profile, oauth_token)
@@ -1327,7 +1381,14 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             presentation_view = gr.HTML(label="Presentation")
             presentation_refresh.click(workspace_session_choices, [workspace_selector], [presentation_session, presentation_status], api_name="list_presentation_sessions")
             presentation_session.change(presentation_choices, [presentation_session, workspace_selector], [presentation_artifact], api_name="list_session_presentations")
-            presentation_load.click(load_workspace_artifact, [presentation_session, presentation_artifact, workspace_selector], [presentation_view, presentation_download], api_name="load_session_presentation")
+            def load_and_frame_presentation(session_id, artifact_id, workspace_id,
+                                             oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
+                if not artifact_id or download is None:
+                    return content, download
+                return frame_document(content, "Saved UX presentation"), download
+
+            presentation_load.click(load_and_frame_presentation, [presentation_session, presentation_artifact, workspace_selector], [presentation_view, presentation_download], api_name="load_session_presentation")
 
             gr.Markdown("### Slide deck\nA navigable slide per synthesized finding (arrow keys or click to advance) -- "
                         "generated locally alongside the presentation, no external tool or repository involved.")
@@ -1352,8 +1413,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 # in an iframe (the same srcdoc pattern already used for the
                 # generated UI prototype elsewhere in this file) instead of
                 # rendering the raw HTML directly.
-                framed = f'<iframe srcdoc="{content.replace(chr(34), "&quot;")}" width="100%" height="600" frameborder="0"></iframe>'
-                return framed, download
+                return frame_document(content, "Saved UX slide deck"), download
 
             slides_refresh.click(workspace_session_choices, [workspace_selector], [slides_session, slides_status], api_name="list_slides_sessions")
             slides_session.change(slides_choices, [slides_session, workspace_selector], [slides_artifact], api_name="list_session_slides")
