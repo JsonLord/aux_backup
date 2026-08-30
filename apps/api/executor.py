@@ -31,6 +31,31 @@ _FAIL_CRITERION_IDS = {"tasks-blocked"}
 _QUIET_BROWSER_EVENTS = {"browser.snapshot", "browser.screenshot", "browser.get_url", "browser.get_title",
                          "browser.console_evidence", "browser.network_evidence",
                          "browser.network_har.start", "browser.network_har.stop"}
+_TITLE_STOPWORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "with", "is", "are", "not",
+                    "its", "it's", "this", "that", "was", "were", "be", "been", "has", "have", "but"}
+# A pass criterion is a machine label; a report reads it as a sentence about the
+# user. Keyed by (criterion id, result) so a fail criterion's "met" -- which means
+# the failure actually happened -- never reads as a success.
+_CRITERION_TITLES = {
+    ("tasks-completed", "not-met"): "Users could not finish the tasks they came to do",
+    ("tasks-completed", "blocked"): "The journey was blocked before the tasks could be judged",
+    ("tasks-blocked", "met"): "The journey was blocked before completion",
+    ("tasks-blocked", "blocked"): "The journey was blocked before completion",
+}
+# Failures of the test harness itself. Real, worth reporting, but they are not
+# usability findings about the product and must not be numbered among them.
+_RUN_DIAGNOSTIC_PATTERNS = (
+    re.compile(r"\bpi director\b", re.I),
+    re.compile(r"\bdirector (did not|failed)\b", re.I),
+    re.compile(r"\bprovider (error|timeout)\b", re.I),
+    re.compile(r"\bagent (crashed|errored)\b", re.I),
+)
+
+
+def _is_run_diagnostic(finding: dict[str, Any]) -> bool:
+    """True when a finding describes the harness failing rather than the product."""
+    text = f"{finding.get('title', '')} {finding.get('summary', '')}"
+    return any(pattern.search(text) for pattern in _RUN_DIAGNOSTIC_PATTERNS)
 
 
 def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
@@ -208,6 +233,15 @@ class JobExecutor:
                            "any blockers, UX findings, or failed pass criteria for the configured tasks.",
                 "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
                 "source": "verdict"})
+        # A harness failure is real but is not a usability finding about the product;
+        # numbering it among the user issues (as "Pi director did not finish the
+        # journey" was) misrepresents both.
+        run_diagnostics = [finding for finding in findings if _is_run_diagnostic(finding)]
+        findings = self._merge_similar_findings([finding for finding in findings if finding not in run_diagnostics])
+        if run_diagnostics:
+            limitations.append(
+                f"{len(run_diagnostics)} run diagnostic(s) were recorded (the test harness itself failing, "
+                "not the product): see run_diagnostics. They are excluded from the usability findings.")
         thoughts_by_persona = {persona.get("id"): self._persona_thoughts(journey)
                                for journey, persona in zip(journeys, personas) if persona.get("id")}
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
@@ -228,6 +262,7 @@ class JobExecutor:
                 "synthetic_users": personas, "persona_artifacts": persona_artifacts,
                 "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys},
                 "critical_pain_points": findings,
+                "run_diagnostics": run_diagnostics,
                 "flow_groups": self._flow_groups(findings, tasks),
                 "elements_to_preserve": preserve,
                 "impact_analysis": self._impact_analysis(findings, personas),
@@ -280,16 +315,34 @@ class JobExecutor:
                 finding["personaEvidence"] = evidence
 
     @staticmethod
+    def _flow_label(finding: dict[str, Any]) -> str:
+        """Name the part of the product a finding belongs to, as a reviewer would."""
+        route = finding.get("route") or finding.get("url")
+        if route:
+            try:
+                from urllib.parse import urlparse
+                path = (urlparse(str(route)).path or "/").rstrip("/")
+            except ValueError:
+                path = ""
+            if not path:
+                return "Landing page"
+            return path.strip("/").replace("-", " ").replace("_", " ").replace("/", " · ").title()
+        category = str(finding.get("category") or "usability")
+        return category.replace("_", " ").title()
+
+    @staticmethod
     def _flow_groups(findings: list[dict[str, Any]], tasks: list[str]) -> list[dict[str, Any]]:
         """Group findings the way a usability report is read -- by the part of the
-        product they belong to -- instead of one flat list. Categories are the only
-        route-independent grouping this pipeline actually has (a single-URL run gives
-        every finding the same route), so they stand in for the reference report's
-        "Introduction flow" / "Landing page" sections."""
+        product they belong to -- instead of one flat list, the way a review names
+        its sections "Sign up page" or "Landing page".
+
+        Prefers the route the finding was actually observed on, which is the real
+        product area; falls back to the category only when a finding has no route
+        (a category name like "Ux" is taxonomy, not a place in the product)."""
         groups: dict[str, dict[str, Any]] = {}
         for finding in findings:
-            key = str(finding.get("category") or "usability")
-            group = groups.setdefault(key, {"flow": key.replace("_", " ").title(), "category": key, "findings": []})
+            key = JobExecutor._flow_label(finding)
+            group = groups.setdefault(key, {"flow": key, "category": finding.get("category"), "findings": []})
             group["findings"].append(finding.get("title"))
         ordered = sorted(groups.values(), key=lambda item: -len(item["findings"]))
         for index, group in enumerate(ordered, start=1):
@@ -380,9 +433,13 @@ class JobExecutor:
                 findings.append({
                     "severity": "critical" if result == "blocked" or criterion_id in _FAIL_CRITERION_IDS else "high",
                     "category": "blocker" if result == "blocked" or criterion_id in _FAIL_CRITERION_IDS else "ux",
-                    "title": f"Pass criterion {result}: {criterion_id}",
+                    # "Pass criterion not-met: tasks-completed" is a machine label.
+                    # A usability report states what happened to the user.
+                    "title": _CRITERION_TITLES.get((criterion_id, result))
+                             or f"Criterion {result}: {criterion_id}",
                     "summary": criterion.get("explanation") or "",
                     "evidence": _evidence_reference_summary(criterion.get("evidence")),
+                    "criterionId": criterion_id, "criterionResult": result,
                     "source": "criteria", "runId": run_id, "personaId": persona_id,
                 })
         return findings
@@ -540,25 +597,111 @@ class JobExecutor:
                 last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
 
     @staticmethod
-    def _merge_strengths(strengths: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _title_tokens(title: str) -> set[str]:
+        return {token for token in re.findall(r"[a-z0-9']+", str(title).lower())
+                if len(token) > 2 and token not in _TITLE_STOPWORDS}
+
+    @classmethod
+    def _cluster_by_title(cls, items: list[dict[str, Any]], threshold: float = 0.5) -> list[list[dict[str, Any]]]:
+        """Group items whose titles describe the same thing.
+
+        aggregateCohort groups pain points on an exact match of the vision model's
+        free-form mechanism text, so one issue phrased three ways stays three
+        issues -- a real run produced "Visually styled link is not interactive",
+        "Visually apparent link is not interactive" and "Visually apparent link is
+        not programmatically detected" as separate numbered findings. Single-linkage
+        clustering on title-token overlap collapses those without needing another
+        model call: an item joins a cluster if it is close to *any* member, which
+        chains the three together even though the first and last are not
+        individually close.
+        """
+        tokens = [cls._title_tokens(item.get("title", "")) for item in items]
+        # Connected components, not a greedy single pass: with three phrasings A, B
+        # and C where A~C and B~C but A!~B, a greedy pass puts C in A's cluster and
+        # strands B. Only the transitive closure gets all three into one issue.
+        parent = list(range(len(items)))
+
+        def find(node: int) -> int:
+            while parent[node] != node:
+                parent[node] = parent[parent[node]]
+                node = parent[node]
+            return node
+
+        for left in range(len(items)):
+            for right in range(left + 1, len(items)):
+                union = tokens[left] | tokens[right]
+                if union and len(tokens[left] & tokens[right]) / len(union) >= threshold:
+                    parent[find(left)] = find(right)
+
+        grouped: dict[int, list[dict[str, Any]]] = {}
+        for index, item in enumerate(items):
+            grouped.setdefault(find(index), []).append(item)
+        # Preserve input order of first appearance so output stays deterministic.
+        return [grouped[root] for root in dict.fromkeys(find(index) for index in range(len(items)))]
+
+    @classmethod
+    def _merge_similar_findings(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """One real issue, stated once -- with everything each phrasing contributed."""
+        merged: list[dict[str, Any]] = []
+        for cluster in cls._cluster_by_title(findings):
+            if len(cluster) == 1:
+                merged.append(cluster[0])
+                continue
+            # Lead with the most severe phrasing; it is the one a reader should see.
+            primary = max(cluster, key=lambda item: cls._SEVERITY_RANK.get(str(item.get("severity")), 1))
+            combined = dict(primary)
+            persona_ids, alternatives, evidence = [], [], []
+            for item in cluster:
+                for persona_id in (item.get("affectedPersonaIds") or []):
+                    if persona_id not in persona_ids:
+                        persona_ids.append(persona_id)
+                for alternative in (item.get("alternatives") or []):
+                    if alternative.get("proposedChange") not in {existing.get("proposedChange") for existing in alternatives}:
+                        alternatives.append(alternative)
+                for quote in (item.get("personaEvidence") or []):
+                    if quote.get("quote") not in {existing.get("quote") for existing in evidence}:
+                        evidence.append(quote)
+                for field in ("screenshotCrop", "screenshotIsRegion", "redesignHtml", "grounding", "rootCause"):
+                    if not combined.get(field) and item.get(field):
+                        combined[field] = item[field]
+            if alternatives:
+                combined["alternatives"] = alternatives
+            if evidence:
+                combined["personaEvidence"] = evidence
+            if persona_ids:
+                combined["affectedPersonaIds"] = persona_ids
+                combined["affectedPersonas"] = len(persona_ids)
+            combined["mergedFrom"] = [item.get("title") for item in cluster if item is not primary]
+            merged.append(combined)
+        return merged
+
+    @classmethod
+    def _merge_strengths(cls, strengths: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """Collapse per-screenshot strengths into the report's "elements to preserve"
         section: the same design decision seen by several personas is one item that
-        names how many of them saw it, not one entry per screenshot."""
-        merged: dict[str, dict[str, Any]] = {}
-        for strength in strengths:
-            key = str(strength.get("title", "")).strip().lower()
-            if not key:
-                continue
-            entry = merged.setdefault(key, {"title": strength.get("title"), "description": strength.get("description"),
-                                            "elements": strength.get("elements") or [], "personaIds": [],
-                                            "routes": [], "screenshotRefs": []})
-            for field, value in (("personaIds", strength.get("personaId")), ("routes", strength.get("route")),
-                                 ("screenshotRefs", strength.get("screenshotRef"))):
-                if value and value not in entry[field]:
-                    entry[field].append(value)
-        for entry in merged.values():
+        names how many of them saw it, not one entry per screenshot.
+
+        Grouped by title *similarity*, not exact text -- a real run produced "Clear
+        and concise page purpose", "Clear purpose statement" and "Clear and concise
+        purpose statement" as three separate items, which is one observation said
+        three ways.
+        """
+        entries = []
+        for cluster in cls._cluster_by_title([item for item in strengths if str(item.get("title", "")).strip()]):
+            # Prefer the fullest description; the shortest phrasing is rarely the
+            # most informative one.
+            primary = max(cluster, key=lambda item: len(str(item.get("description") or "")))
+            entry = {"title": primary.get("title"), "description": primary.get("description"),
+                     "elements": primary.get("elements") or [], "personaIds": [], "routes": [], "screenshotRefs": [],
+                     "alsoDescribedAs": [item.get("title") for item in cluster if item is not primary]}
+            for item in cluster:
+                for field, value in (("personaIds", item.get("personaId")), ("routes", item.get("route")),
+                                     ("screenshotRefs", item.get("screenshotRef"))):
+                    if value and value not in entry[field]:
+                        entry[field].append(value)
             entry["observedByPersonas"] = len(entry["personaIds"])
-        return sorted(merged.values(), key=lambda item: -item["observedByPersonas"])
+            entries.append(entry)
+        return sorted(entries, key=lambda item: -item["observedByPersonas"])
 
     @classmethod
     def _persona_thoughts(cls, journey: dict[str, Any], limit: int = 12) -> list[dict[str, Any]]:
@@ -708,6 +851,7 @@ class JobExecutor:
                 # critique referenced -- what grounds a redesign in the actual DOM
                 # rather than in a guess at it.
                 "elements": representative.get("elements") or [],
+                "route": representative.get("route"),
             }
             if crop:
                 finding["screenshotCrop"] = crop
@@ -971,11 +1115,10 @@ class JobExecutor:
         # --- 02 Issues: a numbered sub-divider then the finding itself ---
         slides.append(divider("02", "User issues"))
         for index, item in enumerate(findings, start=1):
-            category = str(item.get("category") or "usability").replace("_", " ")
             slides.append(
                 f'<section class="slide divider sub"><p class="secnum">02.{index}</p>'
                 f'<h2>{escape(item.get("title", "Finding"))}</h2>'
-                f'<p class="flow">{escape(category.title())}</p></section>')
+                f'<p class="flow">{escape(cls._flow_label(item))}</p></section>')
             slides.append(cls._finding_slide(item, index, issue_label))
 
         # --- 03 Elements to preserve ---
@@ -1014,53 +1157,61 @@ class JobExecutor:
         deck = "".join(slides)
         return f"""<!doctype html><html><head><meta charset=utf-8><meta name=viewport content='width=device-width,initial-scale=1'>
 <title>Usability review slides</title><style>
-:root{{color-scheme:dark}}
+:root{{color-scheme:light}}
 *{{box-sizing:border-box}}
-body{{margin:0;font:20px/1.5 system-ui,sans-serif;background:#0b1220;color:#f1f5f9;overflow:hidden}}
-.deck{{height:100vh;width:100vw;position:relative}}
-.slide{{position:absolute;inset:0;padding:5vw 6vw;display:none;flex-direction:column;justify-content:center;gap:.9rem;overflow-y:auto}}
+body{{margin:0;font:20px/1.55 "Helvetica Neue",Helvetica,Arial,system-ui,sans-serif;background:#eceff3;color:#16202c;overflow:hidden}}
+.deck{{height:100vh;width:100vw;position:relative;background:#fff}}
+.slide{{position:absolute;inset:0;padding:4.5vh 6vw;display:none;flex-direction:column;justify-content:center;gap:.7rem;overflow-y:auto;background:#fff}}
 .slide.active{{display:flex}}
-.slide.title{{align-items:center;text-align:center;background:linear-gradient(160deg,#0b1220,#15233d)}}
-.slide.divider{{align-items:flex-start;justify-content:center;background:linear-gradient(160deg,#0f1b30,#0b1220)}}
-.slide.divider.sub{{background:linear-gradient(160deg,#101d33,#0b1220)}}
-.secnum{{font-size:clamp(3rem,10vw,7rem);font-weight:700;color:#38bdf8;opacity:.9;margin:0;line-height:1}}
-.secnum-inline{{display:inline-block;min-width:2.5rem;color:#38bdf8;font-weight:700}}
-.eyebrow{{letter-spacing:.25em;text-transform:uppercase;font-size:.8rem;opacity:.65;margin:0}}
-.slide h1{{font-size:clamp(2rem,5.5vw,3.8rem);margin:0}}
-.slide h2{{font-size:clamp(1.4rem,3.6vw,2.4rem);margin:0}}
-.slide h3{{font-size:1rem;letter-spacing:.08em;text-transform:uppercase;opacity:.65;margin:.6rem 0 .1rem}}
-.contents{{list-style:none;padding:0;font-size:1.3rem;line-height:2.2}}
-.badge{{align-self:flex-start;font-size:.8rem;letter-spacing:.05em;padding:.25rem .75rem;border-radius:999px;background:#1e293b;border:1px solid #334155}}
-.badge.keep{{background:#052e1a;border-color:#15803d;color:#4ade80}}
-.flow{{opacity:.6;letter-spacing:.1em;text-transform:uppercase;font-size:.85rem}}
-.summary{{max-width:62rem}}
-.affected{{opacity:.75;font-size:.95rem;margin:.1rem 0}}
-.grounding{{opacity:.6;font-size:.82rem;max-width:62rem}}
-.cols{{display:grid;grid-template-columns:repeat(auto-fit,minmax(15rem,1fr));gap:1.2rem;align-items:start}}
-.col h3{{margin-top:0}}
-.col p,.col ul{{margin:.2rem 0;font-size:.98rem}}
-.col ul{{padding-left:1.1rem}}
-.shots{{display:grid;grid-template-columns:repeat(auto-fit,minmax(13rem,1fr));gap:1rem;margin-top:.4rem}}
-.shot figcaption{{font-size:.78rem;letter-spacing:.08em;text-transform:uppercase;opacity:.6;margin-bottom:.3rem}}
-.shot img{{width:100%;border-radius:.6rem;border:1px solid #334155;display:block}}
-.shot iframe.redesign{{width:100%;height:16rem;border-radius:.6rem;border:1px solid #334155;background:#fff;display:block}}
-details.code{{margin-top:.6rem;font-size:.8rem;opacity:.85}}
-details.code summary{{cursor:pointer;opacity:.7;letter-spacing:.05em;text-transform:uppercase;font-size:.72rem}}
-details.code pre{{max-height:14rem;overflow:auto;background:#0f1b30;border:1px solid #1e293b;border-radius:.5rem;padding:.7rem;margin:.4rem 0 0}}
+.slide.title{{align-items:flex-start;justify-content:center;background:#12303f;color:#fff}}
+.slide.title h1{{color:#fff}}
+.slide.divider{{align-items:flex-start;justify-content:center;background:#f4f6f8}}
+.slide.divider.sub{{background:#fff;border-left:10px solid #12303f}}
+.secnum{{font-size:clamp(3.2rem,11vw,8rem);font-weight:800;color:#12303f;opacity:.13;margin:0 0 -1.2rem;line-height:1;letter-spacing:-.04em}}
+.slide.divider.sub .secnum{{opacity:.28;font-size:clamp(2rem,5vw,3.4rem);margin-bottom:.2rem}}
+.secnum-inline{{display:inline-block;min-width:3rem;color:#12303f;font-weight:800;opacity:.45}}
+.eyebrow{{letter-spacing:.3em;text-transform:uppercase;font-size:.72rem;opacity:.6;margin:0 0 .6rem}}
+.slide h1{{font-size:clamp(2rem,5vw,3.6rem);margin:0;font-weight:700;letter-spacing:-.02em}}
+.slide h2{{font-size:clamp(1.4rem,3.2vw,2.3rem);margin:0;font-weight:700;letter-spacing:-.01em;color:#12303f}}
+.slide h3{{font-size:.74rem;letter-spacing:.16em;text-transform:uppercase;color:#12303f;opacity:.55;margin:0 0 .25rem;font-weight:700}}
+.contents{{list-style:none;padding:0;font-size:1.35rem;line-height:2.3;font-weight:600;color:#12303f}}
+.badge{{align-self:flex-start;font-size:.72rem;letter-spacing:.12em;text-transform:uppercase;color:#5b6b7c}}
+.badge.keep{{color:#0f7b4f;font-weight:700}}
+.flow{{color:#5b6b7c;letter-spacing:.18em;text-transform:uppercase;font-size:.8rem;margin:.3rem 0 0;font-weight:600}}
+.summary{{max-width:60rem;color:#39485a}}
+.affected{{color:#5b6b7c;font-size:.9rem;margin:.1rem 0}}
+.grounding{{color:#7c8896;font-size:.76rem;max-width:62rem;margin:.5rem 0 0;border-top:1px solid #e3e8ee;padding-top:.5rem}}
+/* Text on the left, the evidence it is about on the right -- the layout a
+   usability review is read in. */
+.finding{{display:grid;grid-template-columns:minmax(0,1.05fr) minmax(0,1fr);gap:1.6rem;align-items:start;margin-top:.5rem}}
+@media (max-width:60rem){{.finding{{grid-template-columns:1fr}}}}
+.cols{{display:flex;flex-direction:column;gap:.85rem;min-width:0}}
+.col p,.col ul{{margin:0;font-size:.95rem;color:#39485a}}
+.col ul{{padding-left:1.05rem}}
+.col li{{margin:.15rem 0}}
+.evidence{{display:flex;flex-direction:column;gap:.7rem;min-width:0}}
+.shots{{display:grid;grid-template-columns:1fr;gap:.7rem}}
+.shot figcaption{{font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:#5b6b7c;margin-bottom:.28rem;font-weight:700}}
+.shot img{{width:100%;border-radius:.35rem;border:1px solid #d6dde5;display:block;background:#fff}}
+.shot iframe.redesign{{width:100%;height:14rem;border-radius:.35rem;border:1px solid #d6dde5;background:#fff;display:block}}
 figure{{margin:0}}
-blockquote{{margin:.3rem 0;padding:.5rem .9rem;border-left:3px solid #38bdf8;background:#0f1b30;border-radius:.35rem;font-size:.93rem}}
-blockquote cite{{display:block;opacity:.6;font-size:.78rem;font-style:normal;margin-top:.3rem}}
-table.impact{{border-collapse:collapse;font-size:.95rem;max-width:62rem}}
-table.impact th,table.impact td{{text-align:left;padding:.4rem .8rem;border-bottom:1px solid #1e293b}}
-.sev{{font-size:.72rem;padding:.1rem .5rem;border-radius:999px;border:1px solid #334155}}
-.sev-critical{{background:#450a0a;border-color:#b91c1c;color:#fca5a5}}
-.sev-high{{background:#431407;border-color:#c2410c;color:#fdba74}}
-.sev-medium{{background:#422006;border-color:#a16207;color:#fde047}}
-.sev-low{{background:#0f2942;border-color:#0369a1;color:#7dd3fc}}
-.nav{{position:fixed;bottom:1.5rem;right:1.5rem;display:flex;gap:.5rem;z-index:10}}
-.nav button{{background:#1e293b;color:#f1f5f9;border:1px solid #334155;border-radius:.5rem;padding:.5rem 1rem;cursor:pointer;font-size:1rem}}
-.nav button:hover{{background:#334155}}
-.counter{{position:fixed;bottom:1.5rem;left:1.5rem;opacity:.6;font-size:.9rem}}
+blockquote{{margin:0;padding:.55rem .85rem;border-left:3px solid #12303f;background:#f4f6f8;border-radius:0 .3rem .3rem 0;font-size:.88rem;color:#39485a}}
+blockquote cite{{display:block;color:#7c8896;font-size:.72rem;font-style:normal;margin-top:.3rem}}
+details.code{{margin-top:.2rem;font-size:.78rem}}
+details.code summary{{cursor:pointer;color:#5b6b7c;letter-spacing:.14em;text-transform:uppercase;font-size:.66rem;font-weight:700}}
+details.code pre{{max-height:11rem;overflow:auto;background:#12303f;color:#e6edf3;border-radius:.35rem;padding:.65rem;margin:.35rem 0 0;font-size:.72rem;line-height:1.45}}
+table.impact{{border-collapse:collapse;font-size:.92rem;max-width:62rem;color:#39485a}}
+table.impact th{{text-align:left;padding:.4rem .8rem;border-bottom:2px solid #12303f;font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:#12303f}}
+table.impact td{{text-align:left;padding:.45rem .8rem;border-bottom:1px solid #e3e8ee}}
+.sev{{font-size:.66rem;padding:.12rem .5rem;border-radius:2px;letter-spacing:.1em;font-weight:700}}
+.sev-critical{{background:#fbe3e3;color:#a01b1b}}
+.sev-high{{background:#fdeadb;color:#a3510e}}
+.sev-medium{{background:#fdf4d9;color:#8a6206}}
+.sev-low{{background:#e2eef8;color:#1c5680}}
+.nav{{position:fixed;bottom:1.4rem;right:1.4rem;display:flex;gap:.4rem;z-index:10}}
+.nav button{{background:#12303f;color:#fff;border:none;border-radius:.3rem;padding:.45rem 1rem;cursor:pointer;font-size:1rem}}
+.nav button:hover{{background:#1d4459}}
+.counter{{position:fixed;bottom:1.55rem;left:1.5rem;color:#7c8896;font-size:.8rem;letter-spacing:.1em}}
 </style></head><body>
 <div class="deck">{deck}</div>
 <div class="nav"><button id="prev" aria-label="Previous slide">&larr;</button><button id="next" aria-label="Next slide">&rarr;</button></div>
@@ -1081,7 +1232,7 @@ show(0);
         """One issue, in the three-part shape a usability report uses: what the user
         hit, why it happens, and what to change -- beside the evidence for it."""
         severity = str(item.get("severity") or "medium")
-        category = str(item.get("category") or "usability").replace("_", " ")
+        flow = JobExecutor._flow_label(item)
         issue_text = item.get("summary") or item.get("evidence") or ""
         root_cause = item.get("rootCause") or item.get("mechanism") or item.get("evidence") or ""
         alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
@@ -1127,16 +1278,16 @@ show(0);
 
         return (f'<section class="slide" data-severity="{escape(severity)}">'
                 f'<span class="badge"><span class="sev sev-{escape(severity)}">{escape(severity.upper())}</span> '
-                f'&middot; {escape(category)}</span>'
+                f'&middot; {escape(flow)}</span>'
                 f'<h2>{escape(item.get("title", "Finding"))}</h2>{affected}'
-                f'<div class="cols">'
+                f'<div class="finding"><div class="cols">'
                 f'<div class="col"><h3>{escape(issue_label)}</h3><p>{escape(str(issue_text))}</p></div>'
                 + (f'<div class="col"><h3>Root cause analysis</h3><p>{escape(str(root_cause))}</p></div>'
                    if root_cause and root_cause != issue_text else "")
                 + (f'<div class="col"><h3>Recommendations: design solutions</h3><ul>{changes}</ul></div>'
                    if changes else "")
                 + quote_block
-                + f'</div>{shots}{grounding}</section>')
+                + f'</div><div class="evidence">{shots}</div></div>{grounding}</section>')
 
     @staticmethod
     def _browser_outputs(report: dict[str, Any]):

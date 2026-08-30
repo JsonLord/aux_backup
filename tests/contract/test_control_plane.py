@@ -296,7 +296,12 @@ def test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardco
     titles = {item["title"] for item in findings}
     assert "Checkout spinner never resolves" in titles
     assert "Low-contrast price label" in titles
-    assert any(item["source"] == "criteria" and "tasks-blocked" in item["title"] for item in findings)
+    # The criterion is still identifiable, but a report states it as a sentence
+    # about the user rather than as the engine's own label.
+    blocked = next(item for item in findings if item.get("criterionId") == "tasks-blocked")
+    assert blocked["source"] == "criteria" and blocked["criterionResult"] == "blocked"
+    assert blocked["title"] == "The journey was blocked before completion"
+    assert "tasks-blocked" not in blocked["title"]
     assert not any("Validate task clarity" in item["title"] for item in findings)
 
     blocker = next(item for item in findings if item["title"] == "Checkout spinner never resolves")
@@ -920,3 +925,93 @@ def test_redesign_fragment_rejects_a_full_document_or_prose(monkeypatch):
                             ("```html\n<div>ok</div>\n```", "<div>ok</div>")]:
         monkeypatch.setattr(semantic, "DirectLLMSemanticEngine", lambda r=reply: Engine(r))
         assert JobExecutor._generate_redesign_fragment({"title": "t"}, "https://example.com") == expected
+
+
+def test_near_duplicate_findings_are_merged_into_one_issue():
+    """aggregateCohort groups on an exact match of the vision model's free-form
+    mechanism text, so one issue phrased three ways stayed three numbered issues.
+    A real run produced exactly these three titles for one problem."""
+    merged = JobExecutor._merge_similar_findings([
+        {"title": "Visually styled link is not interactive", "severity": "medium",
+         "affectedPersonaIds": ["p1"], "alternatives": [{"proposedChange": "Make it a real anchor."}]},
+        {"title": "Visually apparent link is not interactive", "severity": "high",
+         "affectedPersonaIds": ["p2"], "alternatives": [{"proposedChange": "Make it a real anchor."}],
+         "screenshotCrop": "data:image/png;base64,Zm9v"},
+        {"title": "Visually apparent link is not programmatically detected", "severity": "low",
+         "affectedPersonaIds": ["p3"], "alternatives": [{"proposedChange": "Expose it to assistive tech."}]},
+        {"title": "Low contrast footer text", "severity": "medium", "affectedPersonaIds": ["p1"]},
+    ])
+
+    assert len(merged) == 2
+    link_issue = next(item for item in merged if "link" in item["title"])
+    # Led by the most severe phrasing, carrying what every phrasing contributed.
+    assert link_issue["title"] == "Visually apparent link is not interactive"
+    assert link_issue["affectedPersonas"] == 3
+    assert sorted(link_issue["affectedPersonaIds"]) == ["p1", "p2", "p3"]
+    assert len(link_issue["alternatives"]) == 2  # deduplicated by proposedChange
+    assert link_issue["screenshotCrop"] == "data:image/png;base64,Zm9v"
+    assert len(link_issue["mergedFrom"]) == 2
+
+
+def test_unrelated_findings_are_not_merged():
+    merged = JobExecutor._merge_similar_findings([
+        {"title": "Low contrast footer text", "severity": "medium"},
+        {"title": "Primary navigation hidden in a dropdown", "severity": "high"},
+    ])
+    assert len(merged) == 2
+
+
+def test_near_duplicate_strengths_are_merged():
+    """A real run produced these three as separate "elements to preserve"."""
+    merged = JobExecutor._merge_strengths([
+        {"title": "Clear and concise page purpose", "description": "The heading states the purpose plainly.",
+         "personaId": "p1", "route": "https://example.com", "screenshotRef": "/a.png"},
+        {"title": "Clear purpose statement", "description": "Short.", "personaId": "p2",
+         "route": "https://example.com", "screenshotRef": "/b.png"},
+        {"title": "Clear and concise purpose statement", "description": "Also short.", "personaId": "p3",
+         "route": "https://example.com", "screenshotRef": "/c.png"},
+        {"title": "Restrained colour palette", "description": "Few colours.", "personaId": "p1",
+         "route": "https://example.com", "screenshotRef": "/a.png"},
+    ])
+
+    assert len(merged) == 2
+    purpose = merged[0]
+    assert purpose["observedByPersonas"] == 3
+    # Keeps the fullest description rather than the shortest phrasing.
+    assert purpose["description"] == "The heading states the purpose plainly."
+    assert len(purpose["alsoDescribedAs"]) == 2
+
+
+def test_criterion_findings_read_as_sentences_about_the_user():
+    """"Pass criterion not-met: tasks-completed" is a machine label, not a
+    usability finding."""
+    findings = JobExecutor._pain_points_from_journeys([{
+        "runId": "run_1", "profileId": "p1",
+        "verdict": {"criteria": [
+            {"id": "tasks-completed", "result": "not-met", "explanation": "The checkout never appeared."},
+            {"id": "tasks-blocked", "result": "met", "explanation": "Blocked by a spinner."},
+        ]},
+    }])
+
+    titles = [item["title"] for item in findings]
+    assert "Users could not finish the tasks they came to do" in titles
+    assert "The journey was blocked before completion" in titles
+    assert not any("criterion" in title.lower() for title in titles)
+    # The machine label is still available for anyone who needs it.
+    assert {item["criterionId"] for item in findings} == {"tasks-completed", "tasks-blocked"}
+
+
+def test_harness_failures_are_not_numbered_among_the_usability_findings():
+    from apps.api.executor import _is_run_diagnostic
+
+    assert _is_run_diagnostic({"title": "Pi director did not finish the journey", "summary": ""})
+    assert _is_run_diagnostic({"title": "Run failed", "summary": "provider timeout after 3 attempts"})
+    assert not _is_run_diagnostic({"title": "Low contrast footer text", "summary": "Hard to read."})
+
+
+def test_flow_label_names_the_product_area_not_the_taxonomy():
+    assert JobExecutor._flow_label({"route": "https://example.com/"}) == "Landing page"
+    assert JobExecutor._flow_label({"route": "https://example.com/sign-up"}) == "Sign Up"
+    assert JobExecutor._flow_label({"route": "https://example.com/account/settings"}) == "Account · Settings"
+    # Only when there is no route at all does the category stand in.
+    assert JobExecutor._flow_label({"category": "accessibility"}) == "Accessibility"
