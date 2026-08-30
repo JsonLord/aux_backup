@@ -1282,3 +1282,27 @@ def test_a_slide_never_heads_a_capture_reference_as_root_cause_analysis():
 
     assert "Initial snapshot shows more than 15 buttons" in with_observation
     assert "001-snapshot.txt" not in without
+
+
+def test_one_design_decision_praised_two_ways_becomes_one_preserved_element():
+    """A live run listed "Clear visual status indicators" and "Effective use of state
+    indicators" separately; both describe the same ACTIVE badge."""
+    merged = JobExecutor._merge_strengths([
+        {"title": "Clear visual status indicators", "personaId": "p1",
+         "description": "The 'ACTIVE' and 'READY' badges provide immediate feedback on module state."},
+        {"title": "Effective use of state indicators", "personaId": "p2",
+         "description": "The 'ACTIVE' badge and the green border communicate the user's current location."},
+        {"title": "Effective progress indicator", "personaId": "p1",
+         "description": "The top stepper shows the user's current location in the workflow."},
+        {"title": "Consistent color palette", "personaId": "p1",
+         "description": "A single accent colour for primary actions creates a cohesive feel."},
+    ])
+
+    titles = [item["title"] for item in merged]
+    assert len(merged) == 3
+    indicators = next(item for item in merged if "indicators" in item["title"])
+    assert sorted(indicators["personaIds"]) == ["p1", "p2"]
+    assert indicators["observedByPersonas"] == 2
+    # The progress stepper is a different design decision, however similarly worded.
+    assert "Effective progress indicator" in titles
+    assert "Consistent color palette" in titles

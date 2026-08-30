@@ -1064,9 +1064,20 @@ class JobExecutor:
         # readability" and "Excellent visual contrast and simplicity" are one
         # observation. Dropping the quality words leaves the design property those
         # phrasings actually share, which is what should group them.
+        # A quarter, not a third: "Clear visual status indicators" and "Effective use
+        # of state indicators" -- one ACTIVE badge, described twice in a live run --
+        # share one token in four once the quality words are dropped. Measured across
+        # four real reports, 0.25 merges exactly the true repeats and nothing else.
+        #
+        # Deliberately *not* the description-similarity signal that merges findings:
+        # on the same run it scores that true pair at 0.067 while scoring the ACTIVE
+        # badge against a wholly separate progress stepper at 0.350, because both
+        # descriptions happen to talk about the user's current location. Praise
+        # describes a design property in whatever words come to hand; the shared
+        # noun in the title is the more reliable signal here.
         for cluster in cls._cluster_by_title(
                 [item for item in strengths if str(item.get("title", "")).strip()],
-                threshold=0.33, drop=_QUALITY_ADJECTIVES):
+                threshold=0.25, drop=_QUALITY_ADJECTIVES):
             # Prefer the fullest description; the shortest phrasing is rarely the
             # most informative one.
             primary = max(cluster, key=lambda item: len(str(item.get("description") or "")))
