@@ -111,6 +111,26 @@ def authenticated_clients(workspace_id, oauth_profile, oauth_token):
         PersonaRuntimeClient(workspace_id=identity.workspace_id, user_id=identity.user_id, authorization=identity.authorization),
     )
 
+
+def workspace_access_message(error: Exception) -> str:
+    """A readable status line for a workspace lookup that could not be served.
+
+    The Hugging Face OAuth token a Space hands a callback expires while the tab
+    stays open, so list_sessions()/list_artifacts() start returning 401 long
+    after sign-in appeared to succeed. Surfacing that as an unhandled
+    requests.HTTPError puts a raw traceback in front of the user (observed in
+    production on the saved-report tabs); it is a sign-in prompt, not a crash.
+    """
+    if isinstance(error, PermissionError):
+        return f"\U0001f512 {error}."
+    status = getattr(getattr(error, "response", None), "status_code", None)
+    if status in (401, 403):
+        return ("\U0001f512 Your Hugging Face sign-in has expired. Reload the Space and sign in "
+                "again to see this workspace's sessions.")
+    if status is not None:
+        return f"\u26a0\ufe0f The control plane rejected the request (HTTP {status})."
+    return f"\u26a0\ufe0f The control plane is unreachable: {error}."
+
 # Better summaries for example personas
 BETTER_SUMMARIES = {
     "Friedrich_Wolf.agent.json": "A meticulous German architect at Awesome Inc. He focuses on standardizing apartment designs, favoring quality over cost, and can be confrontational when challenged.",
@@ -1116,29 +1136,50 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             return f"```json\n{json.dumps(data, indent=2)[:4000]}\n```"
 
         def workspace_session_choices(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-            sessions = session_client.list_sessions()
+            try:
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                sessions = session_client.list_sessions()
+            except (PermissionError, requests.RequestException) as error:
+                return gr.update(choices=[], value=None), workspace_access_message(error)
             choices = []
             for session in sessions:
                 metadata = session.get("metadata") or {}
                 label = metadata.get("name") or metadata.get("target_url") or session["session_id"]
                 choices.append((f"{label} · {session['session_id']}", session["session_id"]))
-            return gr.update(choices=choices, value=choices[0][1] if choices else None), f"Loaded {len(choices)} workspace sessions."
+            note = ""
+            if (oauth_profile is None or oauth_token is None) and ADMIN_API_TOKEN:
+                # authenticated_clients() fell back to the administrator credential, so
+                # this lists the *admin* workspace -- a session created while signed in
+                # is legitimately absent here rather than lost.
+                note = (" Signed out \u2014 showing the administrator workspace; sign in with "
+                        "Hugging Face to see your own sessions.")
+            return (gr.update(choices=choices, value=choices[0][1] if choices else None),
+                    f"Loaded {len(choices)} workspace session(s).{note}")
 
         def workspace_artifact_choices(session_id, kinds, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             if not session_id:
                 return gr.update(choices=[], value=None)
-            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-            artifacts = [item for item in session_client.list_artifacts(session_id) if item["kind"] in kinds]
+            try:
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                artifacts = [item for item in session_client.list_artifacts(session_id) if item["kind"] in kinds]
+            except (PermissionError, requests.RequestException) as error:
+                gr.Warning(workspace_access_message(error))
+                return gr.update(choices=[], value=None)
             choices = [(item.get("metadata", {}).get("download_name") or f"{item['kind']} · {item['artifact_id']}", item["artifact_id"]) for item in artifacts]
             return gr.update(choices=choices, value=choices[0][1] if choices else None)
 
         def load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             if not session_id or not artifact_id:
                 return "Select a saved artifact.", None
-            session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-            artifact = next(item for item in session_client.list_artifacts(session_id) if item["artifact_id"] == artifact_id)
-            return session_client.get_artifact_content(artifact_id), session_client.download_artifact(artifact)
+            try:
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                artifact = next((item for item in session_client.list_artifacts(session_id)
+                                 if item["artifact_id"] == artifact_id), None)
+                if artifact is None:
+                    return "That artifact is no longer in this session -- refresh the list.", None
+                return session_client.get_artifact_content(artifact_id), session_client.download_artifact(artifact)
+            except (PermissionError, requests.RequestException) as error:
+                return workspace_access_message(error), None
 
         def presentation_choices(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
             return workspace_artifact_choices(session_id, {"ux.presentation"}, workspace_id, oauth_profile, oauth_token)
@@ -1185,7 +1226,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             def load_and_frame_slides(session_id, artifact_id, workspace_id,
                                        oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
                 content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
-                if not artifact_id:
+                if not artifact_id or download is None:
                     return content, download
                 # gr.HTML injects its value via innerHTML, which silently does not
                 # execute <script> tags -- the slide deck's own keyboard/click
@@ -1217,7 +1258,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             def load_and_format_report(session_id, artifact_id, workspace_id,
                                         oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
                 content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
-                if not artifact_id:
+                if not artifact_id or download is None:
                     return content, "", download
                 return format_ux_report(content), content, download
 
@@ -1243,7 +1284,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             def load_and_format_log(session_id, artifact_id, workspace_id,
                                      oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
                 content, download = load_workspace_artifact(session_id, artifact_id, workspace_id, oauth_profile, oauth_token)
-                if not artifact_id:
+                if not artifact_id or download is None:
                     return content, "", download
                 return format_persona_thought_log(content), content, download
 
@@ -1279,8 +1320,12 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 """
                 if not session_id or not artifact_id:
                     return "Select a saved artifact.", gr.update(visible=False), gr.update(visible=False), "", None
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                artifacts = session_client.list_artifacts(session_id)
+                try:
+                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    artifacts = session_client.list_artifacts(session_id)
+                except (PermissionError, requests.RequestException) as error:
+                    return (workspace_access_message(error), gr.update(visible=False),
+                            gr.update(visible=False), "", None)
                 artifact = next((item for item in artifacts if item["artifact_id"] == artifact_id), None)
                 if artifact is None:
                     return "Artifact not found.", gr.update(visible=False), gr.update(visible=False), "", None

@@ -832,10 +832,20 @@ def test_page_wide_finding_falls_back_to_the_full_screenshot():
 
     uri = JobExecutor._screenshot_data_uri(buffer.getvalue(), max_width=700)
 
-    assert uri.startswith("data:image/png;base64,")
+    # JPEG, not PNG: inlining page-wide captures as base64 PNG made a real
+    # seven-finding deck 1.78 MB.
+    assert uri.startswith("data:image/jpeg;base64,")
     import base64 as b64
     with Image.open(BytesIO(b64.b64decode(uri.split(",", 1)[1]))) as scaled:
         assert scaled.width == 700  # downscaled for a slide
+
+    # A full-page capture of a long page is taller than any slide panel can render
+    # legibly, so the visible top is kept rather than the whole page squashed.
+    tall = BytesIO()
+    Image.new("RGB", (1400, 12000), color="white").save(tall, format="PNG")
+    capped = JobExecutor._screenshot_data_uri(tall.getvalue(), max_width=700, max_height=1500)
+    with Image.open(BytesIO(b64.b64decode(capped.split(",", 1)[1]))) as scaled:
+        assert (scaled.width, scaled.height) == (700, 1500)
 
     assert JobExecutor._screenshot_data_uri(b"not an image") is None
 
@@ -849,7 +859,7 @@ def test_finding_slide_labels_a_full_page_shot_distinctly_from_a_region_crop():
          "screenshotIsRegion": False}, 1, "Observed user issue")
 
     assert ">Current design<" in region and "full page" not in region
-    assert "Current design (full page)" in full
+    assert "Current design (page context)" in full
 
 
 def test_redesign_is_rendered_as_live_html_beside_the_current_screenshot():
@@ -1078,3 +1088,112 @@ def test_the_same_link_text_issue_phrased_three_ways_merges():
     assert "Duplicated page layout and content" in titles
     assert "Outdated revision metadata" in titles
     assert "Low contrast footer text" in titles  # not merged with the link-text issue
+
+
+def test_journeytest_praise_becomes_an_element_to_preserve_not_a_usability_issue():
+    """JourneyTest's `uxFindings` bucket is mixed: a live run against
+    leon4gr45-nova-test filed "Clear value proposition" and "Prominent sign-up
+    entry point" there, and both were published as usability issues."""
+    journeys = [{"runId": "run_1", "profileId": "persona_ada", "verdict": {"uxFindings": [
+        {"title": "Clear value proposition",
+         "description": "The hero states what the product does in one sentence."},
+        {"title": "Prominent sign-up entry point",
+         "description": "The primary call to action sits above the fold and is visually distinct."},
+        {"title": "Form fields have no visible labels",
+         "description": "Placeholders disappear on focus, leaving the field unlabelled."},
+        {"title": "Clear labelling, but the submit control is too small",
+         "description": "Labels read well; the button is under the minimum touch target."},
+    ]}}]
+
+    issues = [item["title"] for item in JobExecutor._pain_points_from_journeys(journeys)]
+    praise = [item["title"] for item in JobExecutor._praise_from_verdicts(journeys)]
+
+    assert issues == ["Form fields have no visible labels",
+                      "Clear labelling, but the submit control is too small"]
+    assert praise == ["Clear value proposition", "Prominent sign-up entry point"]
+
+
+def test_a_finding_quoting_text_that_is_not_on_the_page_is_dropped():
+    """The live nova-test run reported "Leftover debug text 'navbar.' visible on
+    page"; the string only ever occurs mid-sentence inside real copy."""
+    corpus = ["Sign up free", "Get started",
+              "You will find it in the sidebar or navbar. You will be redirected shortly."]
+
+    kept, rejected = JobExecutor._drop_unverifiable_quotes([
+        {"title": "Leftover debug text 'navbar.' visible on page", "summary": "A stray token is rendered."},
+        {"title": "Generic link text ('Sign up')", "summary": "The link names no destination."},
+        {"title": "Low contrast body text", "summary": "Body copy sits near 3:1."},
+    ], corpus)
+
+    assert [item["title"] for item in kept] == ["Generic link text ('Sign up')", "Low contrast body text"]
+    assert rejected[0]["quotes"] == ["navbar."]
+    # With no snapshots captured there is nothing to check against, so nothing is dropped.
+    assert len(JobExecutor._drop_unverifiable_quotes([{"title": "Quotes 'anything'", "summary": ""}], [])[0]) == 1
+
+
+def test_screenshots_pair_with_the_dom_snapshot_journeytest_actually_writes(tmp_path):
+    """journeytest-core names the semantic capture `<stem>-dom.json` beside
+    `<stem>.png`. The previous stem rule stripped "-before"/"-after" from the
+    screenshot but left "-dom" on the snapshot, so nothing ever matched and every
+    vision finding was produced with an empty element list -- which is why every
+    crop in a live run came back as a whole page."""
+    import json as json_module
+
+    def snapshot(name, label):
+        path = tmp_path / name
+        path.write_text(json_module.dumps({"elements": [
+            {"selector": f"#{label}", "role": "button", "text": label,
+             "boundingBox": {"x": 1, "y": 2, "width": 3, "height": 4}}]}))
+        return str(path)
+
+    snapshots = [snapshot("001-click-e21-before-dom.json", "first-before"),
+                 snapshot("001-click-e21-after-dom.json", "first-after"),
+                 snapshot("002-click-e4-before-dom.json", "second-before"),
+                 snapshot("002-click-e4-after-dom.json", "second-after"),
+                 str(tmp_path / "001-snapshot.txt")]
+
+    def label_for(screenshot_name):
+        elements = JobExecutor._elements_for_screenshot(str(tmp_path / screenshot_name), snapshots)
+        return elements[0]["text"] if elements else None
+
+    assert label_for("001-click-e21-after.png") == "first-after"
+    assert label_for("001-click-e21-before.png") == "first-before"
+    # A "change" frame has no DOM capture of its own; the action's post-action DOM
+    # describes the same page state.
+    assert label_for("001-click-e21-change-001.png") == "first-after"
+    # The un-numbered framing shots are literally the page before the first action
+    # and after the last one -- in capture order, not alphabetical order.
+    assert label_for("initial-view.png") == "first-before"
+    assert label_for("final-view.png") == "second-after"
+    # Nothing to pair it with, and no guessing.
+    assert label_for("after-nova-act-click.png") is None
+
+
+def test_a_verdict_finding_shows_the_screenshot_journeytest_cited(tmp_path):
+    """Only vision-synthesis findings carried an image before, so every slide built
+    from JourneyTest's own verdict rendered with an empty "Current design" panel."""
+    from PIL import Image
+
+    cited = tmp_path / "after-nova-act-click.png"
+    Image.new("RGB", (400, 300), color="white").save(cited)
+    final_view = tmp_path / "final-view.png"
+    Image.new("RGB", (400, 300), color="white").save(final_view)
+
+    findings = [
+        {"title": "Overwhelming number of buttons", "source": "uxFindings", "runId": "run_1",
+         "evidenceScreenshot": str(cited)},
+        {"title": "The journey was blocked before completion", "source": "criteria", "runId": "run_1",
+         "evidenceScreenshot": None},
+        {"title": "Already has its own region crop", "source": "eyeson-vision-synthesis", "runId": "run_1",
+         "screenshotCrop": "data:image/png;base64,Zm9v", "screenshotIsRegion": True},
+    ]
+    JobExecutor._attach_verdict_screenshots(findings, [{"runId": "run_1", "artifacts": {
+        "screenshots": [str(cited), str(final_view)]}}])
+
+    assert findings[0]["screenshotRef"] == str(cited)
+    assert findings[0]["screenshotCrop"].startswith("data:image/jpeg;base64,")
+    assert findings[0]["screenshotIsRegion"] is False
+    # No cited screenshot: a failed criterion is shown as the state the run ended in.
+    assert findings[1]["screenshotRef"] == str(final_view)
+    # An existing region crop is never overwritten with a whole page.
+    assert findings[2]["screenshotCrop"] == "data:image/png;base64,Zm9v"

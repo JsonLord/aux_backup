@@ -38,6 +38,41 @@ _QUALITY_ADJECTIVES = frozenset({
     "minimalist", "minimal", "concise", "consistent", "well", "nice", "solid", "readable",
     "distraction", "free", "design", "visual", "excellentt",
 })
+# JourneyTest's `uxFindings` bucket is "things the reviewer noticed about the UX",
+# and a real run puts praise in it as readily as problems ("Clear value proposition",
+# "Prominent sign-up entry point" both arrived there against a live site). The
+# schema has no polarity field, so polarity has to be read from the text. The
+# asymmetry matters: mistaking praise for a problem publishes a wrong issue, while
+# mistaking a problem for praise buries a real one -- so an item is only treated as
+# praise when it carries praise language AND no problem language at all.
+_PRAISE_MARKERS = re.compile(
+    r"\b(clear|clearly|clean|prominent|prominently|well[- ]\w+|good|great|excellent|strong|"
+    r"effective|effectively|simple|intuitive|easy|easily|readable|legible|consistent|obvious|"
+    r"helpful|accessible|concise|visible|straightforward|polished|professional|"
+    r"uncluttered|scannable|discoverable|reassuring|works well|done well)\b", re.I)
+_PROBLEM_MARKERS = re.compile(
+    r"\b(no|not|never|none|without|missing|missed|lack|lacks|lacking|absent|unclear|ambiguous|"
+    r"ambiguity|confus\w*|difficult|hard|cannot|can't|unable|fail|fails|failed|failure|error|"
+    r"errors|broken|block|blocks|blocked|blocking|slow|hidden|hides|obscure\w*|overwhelm\w*|"
+    r"inconsistent|inconsistency|clutter\w*|cramped|tiny|small|low|poor|weak|risk|risky|issue|"
+    r"issues|problem|problems|frustrat\w*|mislead\w*|distract\w*|too|only|but|however|although|"
+    r"should|would benefit|improve|improved|improvement|instead|degrade\w*|truncat\w*|overlap\w*|"
+    r"contrast ratio|unlabel\w*|unreadable|illegible|inaccessible)\b", re.I)
+
+
+def _reads_as_praise(title: str, description: str) -> bool:
+    """True when a verdict finding describes a design decision that works.
+
+    Deliberately one-sided: praise language must be present and problem language
+    must be entirely absent. "Clear labelling, but the button is small" keeps its
+    problem word and stays an issue.
+    """
+    text = f"{title or ''} {description or ''}"
+    if not text.strip():
+        return False
+    return bool(_PRAISE_MARKERS.search(text)) and not _PROBLEM_MARKERS.search(text)
+
+
 _TITLE_STOPWORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "with", "is", "are", "not",
                     "its", "it's", "this", "that", "was", "were", "be", "been", "has", "have", "but"}
 # A pass criterion is a machine label; a report reads it as a sentence about the
@@ -206,7 +241,8 @@ class JobExecutor:
                 journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             findings.extend(vision_findings)
-            preserve = self._merge_strengths(raw_strengths) + self._preserved_from_verdicts(journeys)
+            preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys))
+                        + self._preserved_from_verdicts(journeys))
             evidence_language, journey_status = "observed", "completed"
             limitations = [
                 "Findings are JourneyTest's own evidence-grounded verdict (blockers/uxFindings/"
@@ -250,6 +286,14 @@ class JobExecutor:
         # journey" was) misrepresents both.
         run_diagnostics = [finding for finding in findings if _is_run_diagnostic(finding)]
         findings = self._merge_similar_findings([finding for finding in findings if finding not in run_diagnostics])
+        findings, unverified = self._drop_unverifiable_quotes(findings, self._visible_text_corpus(journeys))
+        if unverified:
+            quoted = "; ".join(f"{item['title']!r} (quoted {', '.join(repr(q) for q in item['quotes'])})"
+                               for item in unverified)
+            limitations.append(
+                f"{len(unverified)} finding(s) were discarded because they quoted on-page text that the "
+                f"run's own element snapshots do not contain: {quoted}. Claims about literal visible text "
+                "are checked against journeytest-core's snapshots before they are reported.")
         if run_diagnostics:
             limitations.append(
                 f"{len(run_diagnostics)} run diagnostic(s) were recorded (the test harness itself failing, "
@@ -259,6 +303,7 @@ class JobExecutor:
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
+        self._attach_verdict_screenshots(findings, journeys)
         self._attach_redesigns(findings, data.get("url"))
         if any(item.get("source", "").startswith("verdict")
                for thoughts in thoughts_by_persona.values() for item in thoughts):
@@ -419,6 +464,13 @@ class JobExecutor:
             verdict = journey.get("verdict") or {}
             for bucket, fallback_severity in (("blockers", "critical"), ("uxFindings", "medium"), ("suggestedImprovements", "low")):
                 for item in verdict.get(bucket, []):
+                    # `uxFindings` is a mixed bucket: praise the agent wrote there is
+                    # a design decision to preserve, not a usability issue. It is
+                    # picked up by _praise_from_verdicts() instead of being numbered
+                    # among the problems (a live run filed "Clear value proposition"
+                    # and "Prominent sign-up entry point" as issues before this).
+                    if bucket == "uxFindings" and _reads_as_praise(item.get("title"), item.get("description")):
+                        continue
                     findings.append({
                         "severity": _JOURNEYTEST_SEVERITY_MAP.get(item.get("severity"), fallback_severity),
                         "category": item.get("category"),
@@ -426,6 +478,9 @@ class JobExecutor:
                         "summary": item.get("description") or "",
                         "recommendation": item.get("recommendation"),
                         "evidence": _evidence_reference_summary(item.get("evidence")),
+                        # The screenshot JourneyTest itself cited for this finding --
+                        # the honest image to show beside it on a slide.
+                        "evidenceScreenshot": (item.get("evidence") or {}).get("screenshot"),
                         "source": bucket, "runId": run_id, "personaId": persona_id,
                     })
             for criterion in verdict.get("criteria", []):
@@ -454,10 +509,129 @@ class JobExecutor:
                              or f"Criterion {result}: {criterion_id}",
                     "summary": criterion.get("explanation") or "",
                     "evidence": _evidence_reference_summary(criterion.get("evidence")),
+                    "evidenceScreenshot": (criterion.get("evidence") or {}).get("screenshot"),
                     "criterionId": criterion_id, "criterionResult": result,
                     "source": "criteria", "runId": run_id, "personaId": persona_id,
                 })
         return findings
+
+    # A finding that quotes on-page text is making a checkable claim, and a vision
+    # model will occasionally invent one: a live run reported "Leftover debug text
+    # 'navbar.' visible on page" when that string only ever occurs mid-sentence in
+    # real copy ("...in the sidebar or navbar. You will be redirected..."). The
+    # snapshots journeytest-core writes alongside every screenshot carry the real
+    # visible text, so the claim can simply be checked.
+    _QUOTED_TEXT = re.compile(r"""['"\u201c\u2018]([^'"\u201c\u201d\u2018\u2019]{2,60})['"\u201d\u2019]""")
+
+    @staticmethod
+    def _visible_text_corpus(journeys: list[dict[str, Any]]) -> list[str]:
+        """Every piece of text journeytest-core actually saw on the page, one entry
+        per captured element, across every snapshot of every run."""
+        corpus: list[str] = []
+        for journey in journeys:
+            for snapshot_path in (journey.get("artifacts") or {}).get("snapshots") or []:
+                try:
+                    snapshot = json.loads(Path(snapshot_path).read_text())
+                except (OSError, json.JSONDecodeError):
+                    continue
+                if not isinstance(snapshot, dict):
+                    continue
+                for element in snapshot.get("elements") or []:
+                    text = str((element or {}).get("text") or "").strip()
+                    if text:
+                        corpus.append(text)
+        return corpus
+
+    @classmethod
+    def _quote_is_on_page(cls, quote: str, corpus: list[str]) -> bool:
+        """A quoted literal is credible when it is a whole captured text, or begins
+        one ("Sign up" quoted from a "Sign up free" button). A match that starts
+        mid-element is a fragment of a sentence, not a visible string in its own
+        right -- which is exactly the shape of the invented "navbar." finding.
+        """
+        needle = quote.strip().casefold()
+        if not needle:
+            return False
+        return any(text.casefold() == needle or text.casefold().startswith(needle) for text in corpus)
+
+    @classmethod
+    def _drop_unverifiable_quotes(cls, findings: list[dict[str, Any]], corpus: list[str]
+                                  ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """Remove findings whose quoted on-page text is not on the page.
+
+        Only runs when there is a corpus to check against -- with no snapshots
+        captured, nothing is verifiable and nothing is dropped. Findings that quote
+        no literal text at all are untouched: this checks a specific kind of claim,
+        it does not second-guess the critique.
+        """
+        if not corpus:
+            return findings, []
+        kept, rejected = [], []
+        for finding in findings:
+            quotes = cls._QUOTED_TEXT.findall(f"{finding.get('title', '')} {finding.get('summary', '')}")
+            unverified = [quote for quote in quotes if not cls._quote_is_on_page(quote, corpus)]
+            if unverified:
+                rejected.append({"title": finding.get("title"), "quotes": unverified,
+                                 "source": finding.get("source"), "runId": finding.get("runId")})
+                continue
+            kept.append(finding)
+        return kept, rejected
+
+    @classmethod
+    def _attach_verdict_screenshots(cls, findings: list[dict[str, Any]], journeys: list[dict[str, Any]]) -> None:
+        """Show the page a stage-1 finding is about.
+
+        Only the vision-synthesis findings carried an image before, so every slide
+        built from JourneyTest's own verdict (blockers, uxFindings, failed pass
+        criteria) rendered with an empty "Current design" panel. The verdict already
+        cites the screenshot it drew each finding from -- use it. Where it cites
+        none, fall back to the run's own framing shots: the state the run ended in
+        for a blocker or a failed criterion, the state it started in for an
+        observation about the page.
+        """
+        screenshots_by_run = {journey.get("runId"): (journey.get("artifacts") or {}).get("screenshots") or []
+                              for journey in journeys}
+        for finding in findings:
+            if finding.get("screenshotCrop"):
+                continue
+            path = finding.get("evidenceScreenshot")
+            if not path or not Path(path).is_file():
+                run_screenshots = screenshots_by_run.get(finding.get("runId")) or []
+                preferred = "final-view" if finding.get("source") in ("blockers", "criteria") else "initial-view"
+                path = (next((item for item in run_screenshots if Path(item).stem == preferred), None)
+                        or (run_screenshots[-1] if run_screenshots else None))
+            if not path:
+                continue
+            try:
+                image_bytes = Path(path).read_bytes()
+            except OSError:
+                continue
+            crop = cls._screenshot_data_uri(image_bytes)
+            if crop:
+                finding["screenshotCrop"] = crop
+                finding["screenshotIsRegion"] = False
+                finding["screenshotRef"] = path
+
+    @staticmethod
+    def _praise_from_verdicts(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The other half of the `uxFindings` bucket: what the agent said works.
+
+        Shaped like the vision-critique strengths so it flows through the same
+        _merge_strengths() grouping into "elements to preserve" -- one design
+        decision named once, with the personas who observed it, rather than one
+        entry per run.
+        """
+        praise: list[dict[str, Any]] = []
+        for journey in journeys:
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            for item in (journey.get("verdict") or {}).get("uxFindings", []):
+                if not _reads_as_praise(item.get("title"), item.get("description")):
+                    continue
+                praise.append({"title": item.get("title") or "Design decision that works",
+                               "description": item.get("description") or "",
+                               "elements": [], "personaId": persona_id,
+                               "route": None, "screenshotRef": None, "source": "verdict.uxFindings"})
+        return praise
 
     @staticmethod
     def _evenly_spaced(items: list, limit: int) -> list:
@@ -466,29 +640,93 @@ class JobExecutor:
         step = len(items) / limit
         return [items[int(index * step)] for index in range(limit)]
 
-    _SNAPSHOT_SUFFIX_PATTERN = re.compile(r"-(before|after|change-\d+)$")
+    # journeytest-core writes, per action, a screenshot triple
+    # (001-click-e21-before.png / -after.png / -change-001.png) plus the semantic
+    # DOM capture as 001-click-e21-before-dom.json / -after-dom.json. The ".txt"
+    # snapshots beside them are the agent's own text rendering, not JSON, and carry
+    # no element geometry.
+    _DOM_SNAPSHOT_SUFFIX = "-dom"
+    _ACTION_PHASE_PATTERN = re.compile(r"^(?P<action>.+?)-(?:before|after|change-\d+)$")
 
     @classmethod
     def _stem(cls, path: str) -> str:
-        name = Path(path).stem
-        return cls._SNAPSHOT_SUFFIX_PATTERN.sub("", name)
+        """The action a capture belongs to, with its phase suffix removed."""
+        match = cls._ACTION_PHASE_PATTERN.match(Path(path).stem)
+        return match.group("action") if match else Path(path).stem
+
+    @classmethod
+    def _dom_snapshots(cls, snapshot_paths: list[str]) -> dict[str, str]:
+        """The JSON DOM snapshots among a run's snapshot artifacts, keyed by the
+        screenshot stem they describe (i.e. with the "-dom" marker removed)."""
+        snapshots = {}
+        for snapshot_path in snapshot_paths:
+            path = Path(snapshot_path)
+            if path.suffix != ".json":
+                continue
+            stem = path.stem
+            if stem.endswith(cls._DOM_SNAPSHOT_SUFFIX):
+                stem = stem[: -len(cls._DOM_SNAPSHOT_SUFFIX)]
+            snapshots[stem] = snapshot_path
+        return snapshots
+
+    @staticmethod
+    def _read_snapshot_elements(snapshot_path: str) -> list[dict]:
+        try:
+            snapshot = json.loads(Path(snapshot_path).read_text())
+        except (OSError, json.JSONDecodeError):
+            return []
+        return snapshot.get("elements", []) if isinstance(snapshot, dict) else []
 
     @classmethod
     def _elements_for_screenshot(cls, screenshot_path: str, snapshot_paths: list[str]) -> list[dict]:
-        """Best-effort pairing of a screenshot with the semantic snapshot captured
-        alongside it, by shared filename stem (journeytest-core's uiChangeRecording
-        middleware names paired before/after/change-N screenshots and snapshots
-        with a common stem). Returns [] rather than guessing when no exact stem
-        match exists -- a page-wide vision finding with no element attribution is
-        honest; a wrongly paired element attribution is not."""
-        target_stem = cls._stem(screenshot_path)
-        for snapshot_path in snapshot_paths:
-            if cls._stem(snapshot_path) == target_stem:
-                try:
-                    snapshot = json.loads(Path(snapshot_path).read_text())
-                except (OSError, json.JSONDecodeError):
-                    return []
-                return snapshot.get("elements", []) if isinstance(snapshot, dict) else []
+        """The real semantic elements (selector/role/text/boundingBox) captured for
+        the page state a screenshot shows.
+
+        Pairing is by name, in decreasing order of directness:
+
+        1. The DOM snapshot taken for exactly this capture
+           (001-click-e21-after.png -> 001-click-e21-after-dom.json).
+        2. The same action's other phase -- a "change-001" frame has no DOM capture
+           of its own, so the action's post-action DOM ("-after"), else its
+           pre-action DOM ("-before"), describes the same page.
+        3. For the un-numbered framing shots journeytest-core takes around the run
+           ("initial-view", "final-view"), the first and last DOM capture
+           respectively: those are literally the page before the first action and
+           after the last one.
+
+        Returns [] when none of those hold, rather than attributing a finding to
+        elements from a different page state.
+
+        Before this, none of them held for *any* screenshot: the previous stem rule
+        stripped "-before"/"-after" from the screenshot but left "-dom" on the
+        snapshot, so the two never matched and every vision finding was produced
+        with an empty element list -- which is why every crop in a live run came
+        back as a full page rather than the region a finding was about.
+        """
+        dom_snapshots = cls._dom_snapshots(snapshot_paths)
+        if not dom_snapshots:
+            return []
+        stem = Path(screenshot_path).stem
+        if stem in dom_snapshots:
+            return cls._read_snapshot_elements(dom_snapshots[stem])
+        match = cls._ACTION_PHASE_PATTERN.match(stem)
+        if match:
+            for phase in ("after", "before"):
+                candidate = f"{match.group('action')}-{phase}"
+                if candidate in dom_snapshots:
+                    return cls._read_snapshot_elements(dom_snapshots[candidate])
+            return []
+        # Capture order, not alphabetical order: within one action "-before" comes
+        # first, and "001-click-e21-after" sorts ahead of "001-click-e21-before".
+        def capture_order(key: str) -> tuple[str, int]:
+            phase = cls._ACTION_PHASE_PATTERN.match(key)
+            return (phase.group("action"), 0 if key.endswith("-before") else 1) if phase else (key, 1)
+
+        ordered = [dom_snapshots[key] for key in sorted(dom_snapshots, key=capture_order)]
+        if stem == "initial-view":
+            return cls._read_snapshot_elements(ordered[0])
+        if stem == "final-view":
+            return cls._read_snapshot_elements(ordered[-1])
         return []
 
     @staticmethod
@@ -519,14 +757,24 @@ class JobExecutor:
             return None
 
     @staticmethod
-    def _screenshot_data_uri(image_bytes: bytes, max_width: int = 900) -> str | None:
+    def _screenshot_data_uri(image_bytes: bytes, max_width: int = 760, quality: int = 72,
+                             max_height: int = 1500) -> str | None:
         """The whole screenshot a finding was critiqued from, downscaled for a slide.
 
         A vision finding about the page as a whole ("the layout repeats", "footer
         contrast is too low") legitimately has no single element to point at, so
-        there is no region to crop -- and on a live run against example.com every
-        finding was page-wide, leaving the deck's "Current design" panel empty.
-        Showing the page the issue is about is far better than showing nothing.
+        there is no region to crop, and a stage-1 verdict finding cites the page it
+        was drawn from rather than a control on it. Showing the page the issue is
+        about is far better than showing nothing.
+
+        Encoded as JPEG rather than PNG: these are photographic full-page captures,
+        and inlining them as base64 PNG made a real seven-finding deck 1.78 MB
+        (131-261 KB per image) -- enough to make the deck slow to load in the tab it
+        is rendered in. Element crops stay PNG, where sharp text matters and the
+        images are small. A full-page capture of a long page is also taller than any
+        slide panel can show legibly (2.4 MB and 12000px for one nova-test page), so
+        the visible top of the page is kept rather than scaling the whole thing down
+        to an unreadable strip.
         """
         try:
             from PIL import Image
@@ -536,10 +784,12 @@ class JobExecutor:
             with Image.open(BytesIO(image_bytes)) as image:
                 if image.width > max_width:
                     ratio = max_width / float(image.width)
-                    image = image.resize((max_width, max(1, int(image.height * ratio))))
+                    image = image.resize((max_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+                if max_height and image.height > max_height:
+                    image = image.crop((0, 0, image.width, max_height))
                 buffer = BytesIO()
-                image.convert("RGB").save(buffer, format="PNG")
-                return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
+                image.convert("RGB").save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+                return f"data:image/jpeg;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
         except (OSError, ValueError):
             return None
 
@@ -574,7 +824,13 @@ class JobExecutor:
             pain_points: list[dict[str, Any]] = []
             if screenshots:
                 persona_summary = persona.get("minibio") or (persona.get("persona") or {}).get("name")
-                for step_index, screenshot_path in enumerate(cls._evenly_spaced(screenshots, max(1, limit))):
+                # Critique the screenshots that have a semantic DOM capture in
+                # preference to the ones that do not: with an element list the model
+                # can name the exact control a finding is about, which is what lets
+                # the report crop the region instead of showing the whole page.
+                paired = [path for path in screenshots if cls._elements_for_screenshot(path, snapshots)]
+                sampled = cls._evenly_spaced(paired or screenshots, max(1, limit))
+                for step_index, screenshot_path in enumerate(sampled):
                     attempted = True
                     try:
                         image_bytes = Path(screenshot_path).read_bytes()
@@ -1292,7 +1548,9 @@ show(0);
         # Current design | Re-design, the pairing a redesign proposal is read in.
         panels = []
         if item.get("screenshotCrop"):
-            caption = "Current design" if item.get("screenshotIsRegion", True) else "Current design (full page)"
+            # "(page context)" rather than "(full page)": a page-wide capture is shown
+            # from the top down to the height a slide panel can render legibly.
+            caption = "Current design" if item.get("screenshotIsRegion", True) else "Current design (page context)"
             panels.append(f'<figure class="shot"><figcaption>{caption}</figcaption>'
                           f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="The part of the page this issue is about"></figure>')
         # The re-design is real, running HTML rather than a picture of one: rendered
