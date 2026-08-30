@@ -2,6 +2,109 @@
 
 Date: 2026-08-27, updated 2026-08-28 (multiple passes), 2026-08-29 (multiple passes)
 
+## -13. Ten defects found by running the pipeline against a live site
+## (leon4gr45-nova-test, 2026-08-30)
+
+Everything below was found by reading the actual output of real runs against
+`https://leon4gr45-nova-test.hf.space`, not by reasoning about the code. Each
+threshold quoted was calibrated against real reports rather than picked.
+
+**1. The saved-report tabs crashed on an expired sign-in.** The Hugging Face
+OAuth token a Space hands a callback expires while the tab stays open, so
+`list_sessions()`/`list_artifacts()` start returning 401 long after sign-in
+appeared to succeed -- surfaced as a raw
+`requests.exceptions.HTTPError: 401 Client Error: Unauthorized for url:
+http://127.0.0.1:8000/v1/sessions/.../artifacts` traceback. `app.py`'s
+`workspace_access_message()` now turns that into a sign-in prompt, and a
+signed-out visitor is told the listing is the *administrator* workspace rather
+than silently shown a workspace that is not theirs.
+
+**2. Praise was published as usability issues.** JourneyTest's `uxFindings`
+bucket is mixed, and a run filed "Clear value proposition" and "Prominent
+sign-up entry point" there. There is no polarity field in the schema, so
+polarity is read from the text, deliberately one-sided: an item is treated as
+praise only when it carries praise language *and no problem language at all*, so
+"Clear labelling, but the button is too small" stays an issue. Praise flows into
+`elements_to_preserve`.
+
+**3. A finding quoted text that is not on the page.** The run reported "Leftover
+debug text 'navbar.' visible on page"; that string only occurs mid-sentence in
+real copy ("...in the sidebar or navbar. You will be redirected..."). Quoted
+literals are now checked against the run's own snapshots -- both the `.json` DOM
+captures and the `.txt` accessibility trees, which carry the non-interactive text
+too (920 corpus entries on a real 30-snapshot run, against ~180 from the DOM
+captures alone). A quote is credible when it is a whole captured text or begins
+one; a mid-string match is a sentence fragment, not a visible string. A later run
+had this fire correctly on an invented "Simulation Results" heading, verified
+absent from all 30 of that run's snapshots.
+
+**4. Every crop was a whole page.** journeytest-core writes the semantic capture
+as `<stem>-dom.json` beside `<stem>.png`; the stem rule stripped
+`-before`/`-after` from the screenshot but left `-dom` on the snapshot, so the
+two never matched. Every vision finding was produced with an empty element list
+and had no region to crop -- 7 of 7 crops on one run were 900x957 full pages.
+Pairing is now exact, then by action phase for the `change-NNN` frames that have
+no DOM capture of their own, then first/last capture for the un-numbered
+`initial-view`/`final-view` framing shots (in *capture* order, since
+`...-after` sorts before `...-before` alphabetically). The critique also prefers
+screenshots that have an element list at all. Result on the next run: 2 of 3,
+then 2 of 2, cropped to a real element region.
+
+**5. Three slides had no image at all.** Only vision-synthesis findings carried
+one, so every slide built from JourneyTest's own verdict rendered with an empty
+"Current design" panel. The verdict already cites the screenshot it drew each
+finding from; where it cites none, a blocker or failed criterion shows the state
+the run ended in and an observation the state it started in.
+
+**6. The deck was 1.78 MB.** Seven page-wide captures inlined as base64 PNG at
+131-261 KB each; two nova-test pages were 12,000px tall, taller than any slide
+panel can render legibly. Page-context shots are now JPEG capped to the visible
+top (the same seven images come to 437 KB), while element crops stay PNG where
+sharp text matters. With fix 4 in place a later deck came to **22 KB**.
+
+**7. A persona quote about something else was published as evidence.** One
+sentence about tab navigation was attached to all five findings of a run,
+"Missing input labels" included, because the persona's *last* piece of reasoning
+was taken regardless of subject. Quotes are now scored by how much of the finding
+they cover; on that run the one true pairing scored 0.86 and every wrong one 0.29
+or less, so the gate is 0.35. A finding the persona never discussed gets no
+quote rather than an unrelated one.
+
+**8. One issue was published twice.** "Ambiguous navigation hierarchy" and
+"Redundant and confusing navigation layers" both say the page offers several
+overlapping ways to navigate, but share one content token in six -- under the
+title threshold. Descriptions are now compared as well, stemmed so
+"navigation"/"navigate" and "confusion"/"confusing" match. Calibrated across five
+real reports: true duplicates score 0.196-0.667, the closest unrelated pair
+0.159, so the threshold is 0.18.
+
+**9. Server file paths were printed where the report should read as prose.** The
+deck's "Root cause analysis" column rendered `snapshot: /home/user/artifacts/
+journeys/2026-08-30T10-57-43-548Z-job_.../snapshots/005-snapshot.txt`. Capture
+references now render by the name the workspace lists them under, and a slide
+falls back to the verdict's own observation prose rather than to a capture
+reference -- with neither, the column is left out.
+
+**10. One design decision praised two ways stayed two entries.** "Clear visual
+status indicators" and "Effective use of state indicators" both describe the same
+ACTIVE badge; once quality adjectives are dropped they share one token in four.
+The strengths threshold moved to 0.25, which across four real reports merges
+exactly the true repeats. Notably the description-similarity signal from fix 8 is
+**not** used here: on the same run it scores that true pair at 0.067 while
+scoring the ACTIVE badge against a wholly separate progress stepper at 0.350,
+because both descriptions mention the user's current location. Praise describes a
+design property in whatever words come to hand, so the shared noun in the title
+is the better signal.
+
+**Not a defect.** A later run produced zero stage-1 findings; the praise
+classifier was checked and was not over-filtering -- both agents' verdicts
+genuinely contained no blockers, uxFindings, or suggestedImprovements.
+
+**Still open (operator action).** The Space log continues to report
+`No writable /data mount found`, so every redeploy wipes the saved sessions --
+which is why session `ses_5ef57d6e...` now 404s. Attaching Hugging Face
+Persistent Storage is the only thing that makes the tabs survive a restart.
+
 ## -12. The report becomes a usability review
 
 Prompted by a real hand-made UX review deck supplied as a reference (a 24-slide
@@ -396,7 +499,11 @@ Findings are grounded through the previously-unused `CuratedUXKnowledgeProvider`
 endpoint; `apps/api/executor.py` calls it for a bounded, evenly-spaced sample
 of each run's screenshots, pairs each with its semantic snapshot by filename
 stem, and crops the specific element region a finding refers to into the
-report as a data URI. Findings seen on multiple screenshots from the same run
+report as a data URI. (**That pairing never actually matched** -- see §-13:
+journeytest-core names the semantic capture `<stem>-dom.json`, and the stem rule
+stripped `-before`/`-after` from the screenshot while leaving `-dom` on the
+snapshot, so every vision finding until 2026-08-30 was produced with an empty
+element list and had no region to crop.) Findings seen on multiple screenshots from the same run
 (the same real bug, confirmed by more than one sample) now collapse into one
 finding instead of listing near-duplicates. See `docs/upstream-sources.md`'s
 Eyeson entry for how this relates to the originally-planned Eyeson migration.
@@ -994,13 +1101,10 @@ What is left:
 1. ~~Redeploy the Space with this change~~ — done, running commit `1295a32`.
 2. ~~Confirm/correct the Space `OPENAI_MODEL` secret~~ — done, set to `alias-large`.
 3. ~~Fix the 400/404 application-level errors~~ — done, verified no recurrence.
-4. **Retry once Blablador's gateway is stable.** Every remaining failure in ~50
-   minutes of live testing was `502 Proxy Error / Error reading from remote server`
-   from Blablador itself, not this application. Re-run the reproduction command in
-   §0 — if the pipeline still can't get a clean run through, consider: lowering
-   `OPENAI_MAX_COMPLETION_TOKENS` further (e.g. 4096) to shrink each request's
-   footprint, generating fewer personas per batch, or trying `alias-fast` for a
-   lighter-weight smoke test before returning to `alias-large`.
+4. ~~Retry once Blablador's gateway is stable.~~ — **obsolete.** Blablador was
+   replaced by the self-hosted freellmapi router (§-1); the `502 Proxy Error`
+   failures this step was written for came from Blablador's gateway and have not
+   recurred. `BLABLADOR_*` survives only as a legacy environment alias.
 5. Fix the Workspace-dropdown UX gap noted in §0: have `load_hf_workspaces` add an
    `admin` choice when `ADMIN_API_TOKEN` is set and no HF profile is present, so an
    admin using the actual browser UI (not just headless API calls) gets a usable
