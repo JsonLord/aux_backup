@@ -613,7 +613,10 @@ class JobExecutor:
 
     @staticmethod
     def _title_tokens(title: str, drop: frozenset[str] = frozenset()) -> set[str]:
-        return {token for token in re.findall(r"[a-z0-9']+", str(title).lower())
+        # Strip quote artifacts: a title like "Generic link text ('Learn more')"
+        # otherwise yields "'learn" and "more'", which match nothing.
+        tokens = (token.strip("'") for token in re.findall(r"[a-z0-9']+", str(title).lower()))
+        return {token for token in tokens
                 if len(token) > 2 and token not in _TITLE_STOPWORDS and token not in drop}
 
     @classmethod
@@ -657,9 +660,18 @@ class JobExecutor:
 
     @classmethod
     def _merge_similar_findings(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """One real issue, stated once -- with everything each phrasing contributed."""
+        """One real issue, stated once -- with everything each phrasing contributed.
+
+        The threshold is a third rather than a half: a live run produced "Generic
+        link text ('Learn more')", "Ambiguous link text" and "Non-descriptive link
+        text" as three numbered issues, and the closest of those pairs overlaps on
+        two tokens of six. Unrelated findings sit far below even that -- "Low
+        contrast footer text" against "Primary navigation hidden in a dropdown"
+        shares nothing at all -- so the looser threshold buys the real merges
+        without collapsing distinct issues.
+        """
         merged: list[dict[str, Any]] = []
-        for cluster in cls._cluster_by_title(findings):
+        for cluster in cls._cluster_by_title(findings, threshold=0.33):
             if len(cluster) == 1:
                 merged.append(cluster[0])
                 continue

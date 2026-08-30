@@ -1056,3 +1056,25 @@ def test_preserve_section_is_capped_and_says_how_many_were_found():
     assert "9 design decisions were noted as working" in html
     assert "Strength 0" in html and "Strength 5" in html
     assert "Strength 6" not in html  # capped at six
+
+
+def test_the_same_link_text_issue_phrased_three_ways_merges():
+    """The exact three titles a live run against example.com produced for one
+    problem."""
+    merged = JobExecutor._merge_similar_findings([
+        {"title": "Generic link text ('Learn more')", "severity": "medium", "affectedPersonaIds": ["p1"]},
+        {"title": "Ambiguous link text", "severity": "low", "affectedPersonaIds": ["p2"]},
+        {"title": "Non-descriptive link text", "severity": "medium", "affectedPersonaIds": ["p1", "p3"]},
+        {"title": "Duplicated page layout and content", "severity": "high", "affectedPersonaIds": ["p1"]},
+        {"title": "Outdated revision metadata", "severity": "low", "affectedPersonaIds": ["p2"]},
+        {"title": "Low contrast footer text", "severity": "medium", "affectedPersonaIds": ["p1"]},
+    ])
+
+    titles = [item["title"] for item in merged]
+    # The three link-text phrasings become one issue; everything else stays put.
+    assert len(merged) == 4
+    link = next(item for item in merged if "link text" in item["title"].lower())
+    assert sorted(link["affectedPersonaIds"]) == ["p1", "p2", "p3"]
+    assert "Duplicated page layout and content" in titles
+    assert "Outdated revision metadata" in titles
+    assert "Low contrast footer text" in titles  # not merged with the link-text issue
