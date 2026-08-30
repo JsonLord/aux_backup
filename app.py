@@ -765,6 +765,39 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True, allow_custom_value=True)
     login_status = gr.Markdown("Sign in with Hugging Face to load your personal and organization workspaces.")
 
+    # Connecting GitHub belongs with signing in, not buried in the backup tab: it is
+    # the same act of attaching an account to the workspace, and the token has to be
+    # re-entered after every page reload (it is never stored server-side), so it is
+    # the control a returning user reaches for first.
+    with gr.Row():
+        github_pat_input = gr.Textbox(label="GitHub token (optional -- for backups)", type="password",
+                                      placeholder="github_pat_... or ghp_...", scale=3)
+        github_connect_btn = gr.Button("Connect GitHub", scale=1)
+        # allow_custom_value for the same reason as workspace_selector above: the
+        # server-side choices list is shared across concurrent sessions.
+        github_repo_select = gr.Dropdown(label="Backup repository", choices=[], interactive=True,
+                                         allow_custom_value=True, scale=3)
+    github_connect_status = gr.Markdown(
+        "Optional. Bring a [fine-grained personal access token](https://github.com/settings/tokens?type=beta) "
+        "with **Contents: Read and write** to back workspace sessions up to your own repo. The token is used "
+        "live for each sync and is **never stored** on the server, so re-enter it after a page reload.")
+    github_pat_state = gr.State("")
+
+    def connect_github(pat):
+        try:
+            username, repos = validate_and_list_repos(pat)
+        except GitHubAuthError as error:
+            return gr.update(choices=[], value=None), f"Connection failed: {error}", ""
+        except requests.exceptions.RequestException as error:
+            return gr.update(choices=[], value=None), f"GitHub request failed: {error}", ""
+        if not repos:
+            return gr.update(choices=[], value=None), f"Connected as **{username}**, but no repos with push access were found.", pat
+        return (gr.update(choices=repos, value=repos[0]),
+                f"Connected as **{username}** -- {len(repos)} repo(s) with push access.", pat)
+
+    github_connect_btn.click(connect_github, [github_pat_input],
+                             [github_repo_select, github_connect_status, github_pat_state])
+
     def load_hf_workspaces(profile: gr.OAuthProfile | None):
         workspaces = workspaces_from_profile(dict(profile) if profile else None)
         if not workspaces:
@@ -1352,41 +1385,25 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
         with gr.Tab("GitHub Backup"):
             gr.Markdown("### Back up workspace session artifacts to your own GitHub repo\n"
-                       "Bring your own [fine-grained personal access token](https://github.com/settings/tokens?type=beta) "
-                       "with **Contents: Read and write** on the repo you choose. Your token is used live for each "
-                       "sync only -- it is **never stored** on the server, so you'll need to re-enter it after a page reload.")
-            with gr.Row():
-                github_pat_input = gr.Textbox(label="GitHub Personal Access Token", type="password", placeholder="github_pat_... or ghp_...")
-                github_connect_btn = gr.Button("Connect", variant="primary")
-            github_connect_status = gr.Markdown()
-            github_repo_select = gr.Dropdown(label="Repository", choices=[], interactive=True)
-            github_pat_state = gr.State("")
+                       "Connect GitHub and choose the target repository at the top of the page, beside the "
+                       "Hugging Face sign-in, then pick the session to push here.")
             with gr.Row():
                 github_backup_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
                 github_backup_refresh = gr.Button("Refresh sessions")
+            # Its own status line: refreshing the session list must not overwrite
+            # whether GitHub is connected.
+            github_backup_status = gr.Markdown()
             github_sync_btn = gr.Button("Sync session to GitHub", variant="primary")
             github_sync_status = gr.Markdown()
 
-            def connect_github(pat):
-                try:
-                    username, repos = validate_and_list_repos(pat)
-                except GitHubAuthError as e:
-                    return gr.update(choices=[], value=None), f"Connection failed: {e}", ""
-                except requests.exceptions.RequestException as e:
-                    return gr.update(choices=[], value=None), f"GitHub request failed: {e}", ""
-                if not repos:
-                    return gr.update(choices=[], value=None), f"Connected as **{username}**, but no repos with push access were found.", pat
-                return gr.update(choices=repos, value=repos[0]), f"Connected as **{username}** -- {len(repos)} repo(s) with push access.", pat
-
-            github_connect_btn.click(connect_github, [github_pat_input], [github_repo_select, github_connect_status, github_pat_state])
-            github_backup_refresh.click(workspace_session_choices, [workspace_selector], [github_backup_session, github_connect_status], api_name="list_github_backup_sessions")
+            github_backup_refresh.click(workspace_session_choices, [workspace_selector], [github_backup_session, github_backup_status], api_name="list_github_backup_sessions")
 
             def sync_session_to_github(pat, repo, session_id, workspace_id,
                                        oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
                 if not pat:
-                    return "Connect to GitHub first."
+                    return "Connect GitHub at the top of the page first."
                 if not repo:
-                    return "Choose a repository first."
+                    return "Choose a backup repository at the top of the page first."
                 if not session_id:
                     return "Choose a workspace session first."
                 session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)

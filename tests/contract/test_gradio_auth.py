@@ -42,3 +42,38 @@ def test_expired_sign_in_reads_as_a_prompt_not_a_traceback():
         requests.exceptions.ConnectionError("connection refused"))
     assert "Sign in with Hugging Face to continue" in gradio_app.workspace_access_message(
         PermissionError("Sign in with Hugging Face to continue"))
+
+
+def test_github_connection_sits_in_the_header_beside_the_hugging_face_sign_in():
+    """Connecting GitHub is the same act as signing in -- attaching an account to
+    the workspace -- and the token must be re-entered after every page reload
+    because it is never stored server-side. Buried in the GitHub Backup tab it was
+    a control a returning user had to go looking for."""
+    import gradio as gr
+
+    import app as gradio_app
+
+    def ancestry(component):
+        names, node = [], component
+        while getattr(node, "parent", None) is not None:
+            node = node.parent
+            names.append(type(node).__name__)
+        return names
+
+    components = list(gradio_app.demo.blocks.values())
+    token = next(c for c in components
+                 if isinstance(c, gr.Textbox) and (c.label or "").startswith("GitHub token"))
+    repo = next(c for c in components
+                if isinstance(c, gr.Dropdown) and c.label == "Backup repository")
+    workspace = next(c for c in components
+                     if isinstance(c, gr.Dropdown) and c.label == "Workspace")
+
+    # In the header, not inside any tab -- the same place the Workspace selector is.
+    for component in (token, repo):
+        assert "Tab" not in ancestry(component), ancestry(component)
+        assert ancestry(component)[-1] == ancestry(workspace)[-1] == "Blocks"
+    # The token is a secret, not free text.
+    assert token.type == "password"
+    # Exactly one place to enter it; the backup tab no longer defines its own.
+    assert sum(1 for c in components
+               if isinstance(c, gr.Textbox) and "GitHub" in (c.label or "")) == 1
