@@ -125,6 +125,17 @@ def _is_run_diagnostic(finding: dict[str, Any]) -> bool:
     return any(pattern.search(text) for pattern in _RUN_DIAGNOSTIC_PATTERNS)
 
 
+def _capture_name(path: str | None) -> str:
+    """The name a capture is known by, not where the container happened to write it.
+
+    A live deck rendered "snapshot: /home/user/artifacts/journeys/2026-08-30T10-57-
+    43-548Z-job_08147074e9f648a58d3c/snapshots/005-snapshot.txt" as its root-cause
+    analysis. The absolute path says nothing to a reader and is meaningless once the
+    container is gone; the capture's own name ("005-snapshot.txt") is what the
+    evidence artifacts in the workspace are listed under."""
+    return Path(str(path)).name if path else ""
+
+
 def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
     """Render a JourneyTest EvidenceReference (screenshot/snapshot/observation/... path
     or text) into a single human-readable string for the report's ``evidence`` field."""
@@ -134,11 +145,11 @@ def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
     if evidence.get("observation"):
         parts.append(evidence["observation"])
     if evidence.get("screenshot"):
-        parts.append(f"screenshot: {evidence['screenshot']}")
+        parts.append(f"screenshot: {_capture_name(evidence['screenshot'])}")
     if evidence.get("snapshot"):
-        parts.append(f"snapshot: {evidence['snapshot']}")
+        parts.append(f"snapshot: {_capture_name(evidence['snapshot'])}")
     if evidence.get("uiChangeTimeline"):
-        parts.append(f"UI change timeline: {evidence['uiChangeTimeline']}")
+        parts.append(f"UI change timeline: {_capture_name(evidence['uiChangeTimeline'])}")
     if evidence.get("url"):
         parts.append(f"url: {evidence['url']}")
     if evidence.get("videoTimeMs") is not None:
@@ -519,6 +530,7 @@ class JobExecutor:
                         # The screenshot JourneyTest itself cited for this finding --
                         # the honest image to show beside it on a slide.
                         "evidenceScreenshot": (item.get("evidence") or {}).get("screenshot"),
+                        "observation": (item.get("evidence") or {}).get("observation"),
                         "source": bucket, "runId": run_id, "personaId": persona_id,
                     })
             for criterion in verdict.get("criteria", []):
@@ -548,6 +560,7 @@ class JobExecutor:
                     "summary": criterion.get("explanation") or "",
                     "evidence": _evidence_reference_summary(criterion.get("evidence")),
                     "evidenceScreenshot": (criterion.get("evidence") or {}).get("screenshot"),
+                    "observation": (criterion.get("evidence") or {}).get("observation"),
                     "criterionId": criterion_id, "criterionResult": result,
                     "source": "criteria", "runId": run_id, "personaId": persona_id,
                 })
@@ -1612,7 +1625,11 @@ show(0);
         severity = str(item.get("severity") or "medium")
         flow = JobExecutor._flow_label(item)
         issue_text = item.get("summary") or item.get("evidence") or ""
-        root_cause = item.get("rootCause") or item.get("mechanism") or item.get("evidence") or ""
+        # Never the `evidence` string: for a stage-1 verdict finding that is a bare
+        # capture reference, and a slide headed "Root cause analysis" showing
+        # "snapshot: 005-snapshot.txt" says nothing. The verdict's own observation is
+        # real prose about what was seen; with neither, the column is left out.
+        root_cause = item.get("rootCause") or item.get("mechanism") or item.get("observation") or ""
         alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
                                                      if item.get("recommendation") else [])
         changes = "".join(f"<li>{escape(str(alt.get('proposedChange', '')))}</li>"

@@ -306,7 +306,7 @@ def test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardco
 
     blocker = next(item for item in findings if item["title"] == "Checkout spinner never resolves")
     assert blocker["severity"] == "critical"
-    assert "screenshot: /tmp/run/screenshots/003.png" in blocker["evidence"]
+    assert "screenshot: 003.png" in blocker["evidence"]
     assert blocker["recommendation"] == "Add a timeout and error state to the checkout request."
 
     ux_finding = next(item for item in findings if item["title"] == "Low-contrast price label")
@@ -1251,3 +1251,34 @@ def test_one_issue_described_two_ways_merges_on_its_description():
     assert "Missing input labels" in titles
     assert "Guided tour for new users" in titles
     assert sum("navigation" in title.lower() for title in titles) == 1
+
+
+def test_capture_references_read_as_names_not_container_paths():
+    """A live deck rendered "snapshot: /home/user/artifacts/journeys/2026-08-30T10-57-
+    43-548Z-job_08147074e9f648a58d3c/snapshots/005-snapshot.txt" as its root-cause
+    analysis. The path says nothing to a reader and is gone with the container."""
+    from apps.api.executor import _evidence_reference_summary
+
+    summary = _evidence_reference_summary({
+        "observation": "Initial snapshot shows more than 15 buttons without scrolling.",
+        "screenshot": "/home/user/artifacts/journeys/2026-08-30T10-57-43-548Z-job_a/screenshots/initial-view.png",
+        "snapshot": "/home/user/artifacts/journeys/2026-08-30T10-57-43-548Z-job_a/snapshots/005-snapshot.txt",
+    })
+
+    assert "/home/user/artifacts" not in summary
+    assert "screenshot: initial-view.png" in summary
+    assert "snapshot: 005-snapshot.txt" in summary
+    assert summary.startswith("Initial snapshot shows more than 15 buttons")
+
+
+def test_a_slide_never_heads_a_capture_reference_as_root_cause_analysis():
+    with_observation = JobExecutor._finding_slide(
+        {"title": "Overwhelming number of buttons", "summary": "Many controls compete for attention.",
+         "observation": "Initial snapshot shows more than 15 buttons without scrolling.",
+         "evidence": "snapshot: 001-snapshot.txt"}, 1, "Observed user issue")
+    without = JobExecutor._finding_slide(
+        {"title": "Guided tour for new users", "summary": "The product offers many features.",
+         "evidence": "snapshot: 001-snapshot.txt"}, 1, "Observed user issue")
+
+    assert "Initial snapshot shows more than 15 buttons" in with_observation
+    assert "001-snapshot.txt" not in without
