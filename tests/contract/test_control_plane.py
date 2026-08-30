@@ -744,21 +744,46 @@ def test_impact_analysis_orders_by_severity_then_reach():
 
 def test_attach_persona_evidence_quotes_every_affected_persona():
     findings = [
-        {"title": "Synthesized", "affectedPersonaIds": ["p1", "p2"]},
-        {"title": "Single persona", "personaId": "p1"},
-        {"title": "No persona"},
+        {"title": "Checkout button is hard to find",
+         "summary": "The checkout button sits below the fold.", "affectedPersonaIds": ["p1", "p2"]},
+        {"title": "Checkout button is hard to find",
+         "summary": "The checkout button sits below the fold.", "personaId": "p1"},
+        {"title": "Checkout button is hard to find", "summary": "The checkout button sits below the fold."},
     ]
     thoughts = {
-        "p1": [{"kind": "action", "text": "Clicked"}, {"kind": "reasoning", "text": "I am lost."}],
-        "p2": [{"kind": "reasoning", "text": "Where is the button?"}],
+        "p1": [{"kind": "action", "text": "Clicked"},
+               {"kind": "reasoning", "text": "I scrolled twice before the checkout button appeared below the fold."}],
+        "p2": [{"kind": "reasoning", "text": "I could not find the checkout button until I scrolled below the fold."}],
     }
 
     JobExecutor._attach_persona_evidence(findings, thoughts, {"p1": "Ada", "p2": "Lin"})
 
-    assert [item["quote"] for item in findings[0]["personaEvidence"]] == ["I am lost.", "Where is the button?"]
     assert [item["personaName"] for item in findings[0]["personaEvidence"]] == ["Ada", "Lin"]
-    assert findings[1]["personaEvidence"][0]["quote"] == "I am lost."
+    assert "checkout button" in findings[1]["personaEvidence"][0]["quote"]
     assert "personaEvidence" not in findings[2]
+
+
+def test_a_persona_quote_about_something_else_is_not_published_as_evidence():
+    """One sentence about tab navigation was attached to all five findings of a live
+    run -- "Missing input labels" included -- because the persona's *last* piece of
+    reasoning was taken regardless of what it was about. That reads as evidence and
+    is not."""
+    navigation = ("The main navigation uses buttons labeled with numbers and 'Previous view'/"
+                  "'Next view' which may not be immediately obvious as tabs to all users.")
+    findings = [
+        {"title": "Unconventional tab navigation",
+         "summary": "The main navigation uses numbered buttons that may not read as tabs.",
+         "personaId": "p1"},
+        {"title": "Missing input labels",
+         "summary": "Several input fields rely on placeholder text rather than explicit label elements.",
+         "personaId": "p1"},
+    ]
+
+    JobExecutor._attach_persona_evidence(
+        findings, {"p1": [{"kind": "reasoning", "text": navigation}]}, {"p1": "Friedrich Wolf"})
+
+    assert findings[0]["personaEvidence"][0]["quote"] == navigation
+    assert "personaEvidence" not in findings[1]
 
 
 def test_executive_summary_reports_what_was_found_not_what_was_prepared():
@@ -1197,3 +1222,32 @@ def test_a_verdict_finding_shows_the_screenshot_journeytest_cited(tmp_path):
     assert findings[1]["screenshotRef"] == str(final_view)
     # An existing region crop is never overwritten with a whole page.
     assert findings[2]["screenshotCrop"] == "data:image/png;base64,Zm9v"
+
+
+def test_one_issue_described_two_ways_merges_on_its_description():
+    """A live run against leon4gr45-nova-test published "Ambiguous navigation
+    hierarchy" and "Redundant and confusing navigation layers" as two findings.
+    Both say the page offers several overlapping ways to navigate, but they share
+    one content token in six -- far under the title threshold."""
+    merged = JobExecutor._merge_similar_findings([
+        {"title": "Ambiguous navigation hierarchy", "severity": "medium",
+         "summary": "The page uses two different sets of navigation controls (the top header buttons and "
+                    "the horizontal card carousel) that seem to represent similar or overlapping product "
+                    "areas. This creates confusion about which control dictates the current view."},
+        {"title": "Redundant and confusing navigation layers", "severity": "medium",
+         "summary": "The page features three different ways to navigate between product sections: a top "
+                    "header nav, a horizontal tab bar with arrows, and a grid of cards. This creates "
+                    "cognitive load as the user isn't sure which control is the primary way to switch "
+                    "contexts."},
+        {"title": "Missing input labels", "severity": "medium",
+         "summary": "Several input fields (Company, Product, Seed, Group Name) rely on placeholder text "
+                    "or proximity rather than explicit label elements, which is poor for accessibility."},
+        {"title": "Guided tour for new users", "severity": "low",
+         "summary": "The product offers many features which could overwhelm new users."},
+    ])
+
+    titles = [item["title"] for item in merged]
+    assert len(merged) == 3
+    assert "Missing input labels" in titles
+    assert "Guided tour for new users" in titles
+    assert sum("navigation" in title.lower() for title in titles) == 1

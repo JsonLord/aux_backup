@@ -75,6 +75,26 @@ def _reads_as_praise(title: str, description: str) -> bool:
 
 _TITLE_STOPWORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "with", "is", "are", "not",
                     "its", "it's", "this", "that", "was", "were", "be", "been", "has", "have", "but"}
+# Additional filler that carries no information in a *sentence* (titles are short
+# enough that these barely occur, so they are kept out of _TITLE_STOPWORDS and the
+# tuned title threshold is left undisturbed).
+_PROSE_STOPWORDS = frozenset({
+    "page", "users", "user", "use", "uses", "using", "which", "when", "from", "into", "also", "more",
+    "some", "them", "they", "their", "there", "would", "could", "should", "make", "makes", "may",
+    "might", "seem", "seems", "about", "other", "each", "between", "than", "then", "because",
+    "while", "where", "what",
+})
+_SUFFIXES = ("ations", "ation", "ings", "ing", "ers", "er", "ies", "ied", "es", "ed", "s")
+
+
+def _stem(word: str) -> str:
+    """Crude suffix stripping, enough that "navigation"/"navigate",
+    "control"/"controls" and "confusion"/"confusing" compare equal. Two findings
+    describing one problem rarely reuse the same inflections."""
+    for suffix in _SUFFIXES:
+        if len(word) > len(suffix) + 3 and word.endswith(suffix):
+            return word[: -len(suffix)]
+    return word
 # A pass criterion is a machine label; a report reads it as a sentence about the
 # user. Keyed by (criterion id, result) so a fail criterion's "met" -- which means
 # the failure actually happened -- never reads as a success.
@@ -352,8 +372,12 @@ class JobExecutor:
             entry["observedByPersonas"] = len(entry["personaIds"])
         return list(preserved.values())
 
-    @staticmethod
-    def _attach_persona_evidence(findings: list[dict[str, Any]], thoughts_by_persona: dict[str, list[dict[str, Any]]],
+    # Fraction of a finding's content words a persona quote must cover before it is
+    # published as evidence for that finding.
+    _QUOTE_RELEVANCE = 0.35
+
+    @classmethod
+    def _attach_persona_evidence(cls, findings: list[dict[str, Any]], thoughts_by_persona: dict[str, list[dict[str, Any]]],
                                  persona_names: dict[str, str]) -> None:
         """Give every finding the persona reasoning that stands behind it.
 
@@ -361,16 +385,30 @@ class JobExecutor:
         demonstrated one: the reader sees the persona's own words from the run that
         produced it. Stage-1 findings name one persona; synthesized stage-2 findings
         name every persona the aggregation grouped together.
+
+        The quote has to be about the finding. Taking the persona's *last* piece of
+        reasoning regardless of subject put one sentence about tab navigation under
+        all five findings of a live run, including "Missing input labels" -- which
+        reads as evidence and is not. Each candidate quote is scored by how much of
+        the finding it actually covers, and a finding the persona never discussed
+        gets no quote rather than an unrelated one. On that run the one true pairing
+        scored 0.86 and every wrong one 0.29 or less.
         """
         for finding in findings:
             persona_ids = finding.get("affectedPersonaIds") or (
                 [finding["personaId"]] if finding.get("personaId") else [])
+            subject = (cls._text_tokens(finding.get("title") or "")
+                       | cls._text_tokens(finding.get("summary") or ""))
             evidence = []
             for persona_id in persona_ids:
                 reasoning = [item for item in thoughts_by_persona.get(persona_id, []) if item["kind"] == "reasoning"]
-                if reasoning:
-                    evidence.append({"personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
-                                     "quote": reasoning[-1]["text"], "elapsedMs": reasoning[-1].get("elapsedMs")})
+                if not reasoning or not subject:
+                    continue
+                best = max(reasoning, key=lambda item: len(subject & cls._text_tokens(item["text"])))
+                if len(subject & cls._text_tokens(best["text"])) / len(subject) < cls._QUOTE_RELEVANCE:
+                    continue
+                evidence.append({"personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
+                                 "quote": best["text"], "elapsedMs": best.get("elapsedMs")})
             if evidence:
                 finding["personaEvidence"] = evidence
 
@@ -867,6 +905,19 @@ class JobExecutor:
         return (cohort_runs, screenshot_bytes, strengths,
                 last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
 
+    @classmethod
+    def _text_tokens(cls, text: str) -> set[str]:
+        """Content words of a sentence or paragraph, stemmed -- for comparing the
+        prose of two findings rather than their titles."""
+        words = (word.strip("'") for word in re.findall(r"[a-z0-9']+", str(text).lower()))
+        return {_stem(word) for word in words
+                if len(word) > 2 and word not in _TITLE_STOPWORDS and word not in _PROSE_STOPWORDS}
+
+    @staticmethod
+    def _jaccard(left: set[str], right: set[str]) -> float:
+        union = left | right
+        return len(left & right) / len(union) if union else 0.0
+
     @staticmethod
     def _title_tokens(title: str, drop: frozenset[str] = frozenset()) -> set[str]:
         # Strip quote artifacts: a title like "Generic link text ('Learn more')"
@@ -877,7 +928,8 @@ class JobExecutor:
 
     @classmethod
     def _cluster_by_title(cls, items: list[dict[str, Any]], threshold: float = 0.5,
-                          drop: frozenset[str] = frozenset()) -> list[list[dict[str, Any]]]:
+                          drop: frozenset[str] = frozenset(),
+                          related=None) -> list[list[dict[str, Any]]]:
         """Group items whose titles describe the same thing.
 
         aggregateCohort groups pain points on an exact match of the vision model's
@@ -889,8 +941,14 @@ class JobExecutor:
         model call: an item joins a cluster if it is close to *any* member, which
         chains the three together even though the first and last are not
         individually close.
+
+        `related` overrides the pairwise test entirely, for callers that have a
+        better signal than the title alone.
         """
         tokens = [cls._title_tokens(item.get("title", ""), drop) for item in items]
+        if related is None:
+            def related(left, right, left_index, right_index):
+                return cls._jaccard(tokens[left_index], tokens[right_index]) >= threshold
         # Connected components, not a greedy single pass: with three phrasings A, B
         # and C where A~C and B~C but A!~B, a greedy pass puts C in A's cluster and
         # strands B. Only the transitive closure gets all three into one issue.
@@ -904,8 +962,7 @@ class JobExecutor:
 
         for left in range(len(items)):
             for right in range(left + 1, len(items)):
-                union = tokens[left] | tokens[right]
-                if union and len(tokens[left] & tokens[right]) / len(union) >= threshold:
+                if related(items[left], items[right], left, right):
                     parent[find(left)] = find(right)
 
         grouped: dict[int, list[dict[str, Any]]] = {}
@@ -925,9 +982,28 @@ class JobExecutor:
         contrast footer text" against "Primary navigation hidden in a dropdown"
         shares nothing at all -- so the looser threshold buys the real merges
         without collapsing distinct issues.
+
+        The title alone is not enough. A live run against leon4gr45-nova-test
+        published "Ambiguous navigation hierarchy" and "Redundant and confusing
+        navigation layers" as two issues; both say the page offers several
+        overlapping ways to navigate, but they share one content token in six, well
+        under the title threshold. Their descriptions overlap far more, so the
+        descriptions are compared as well.
+
+        The prose threshold is calibrated against five real reports: across every
+        pair of findings in them, true duplicates score 0.196-0.667 (including two
+        verbatim repeats and the nova-test pair at 0.231) and the closest unrelated
+        pair scores 0.159. 0.18 sits in that gap.
         """
+        def same_issue(left: dict[str, Any], right: dict[str, Any], left_index: int, right_index: int) -> bool:
+            if cls._jaccard(cls._title_tokens(left.get("title", "")),
+                            cls._title_tokens(right.get("title", ""))) >= 0.33:
+                return True
+            return cls._jaccard(cls._text_tokens(left.get("summary") or ""),
+                                cls._text_tokens(right.get("summary") or "")) >= 0.18
+
         merged: list[dict[str, Any]] = []
-        for cluster in cls._cluster_by_title(findings, threshold=0.33):
+        for cluster in cls._cluster_by_title(findings, related=same_issue):
             if len(cluster) == 1:
                 merged.append(cluster[0])
                 continue
@@ -1146,6 +1222,9 @@ class JobExecutor:
             if crop:
                 finding["screenshotCrop"] = crop
                 finding["screenshotIsRegion"] = crop_is_region
+                # Without this the crop could not be traced back to the capture it
+                # was taken from (it was recorded only for stage-1 findings).
+                finding["screenshotRef"] = representative.get("screenshotRef")
             findings.append(finding)
         return findings
 
