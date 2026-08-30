@@ -736,8 +736,12 @@ def poll_for_generated_ui(session_id, workspace_id, oauth_profile: gr.OAuthProfi
         return f"Unable to load the saved UI artifact: {error}"
 
 def llm_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+    def exchange(reply):
+        return [{"role": "user", "content": message}, {"role": "assistant", "content": reply}]
+
+    history = list(history or [])
     if not jules_uuid:
-        return history + [("System", "Error: Analysis job ID missing.")], ""
+        return history + [{"role": "assistant", "content": "Error: Analysis job ID missing."}], ""
     try:
         session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
         parent = session_client.get_job(jules_uuid)
@@ -752,11 +756,9 @@ def llm_chat_adaptation(message, history, jules_uuid, workspace_id, oauth_profil
             raise RuntimeError(job.get("error"))
         agent_msg = f"Adaptation completed as job {job['job_id']}. The responsive prototype is stored as artifact {job['output_artifacts'][0]}."
 
-        history.append((message, agent_msg))
-        return history, ""
-    except Exception as e:
-        history.append((message, f"Error: {str(e)}"))
-        return history, ""
+        return history + exchange(agent_msg), ""
+    except Exception as error:
+        return history + exchange(f"Error: {error}"), ""
 
 def format_persona_thought_log(content_json: str) -> str:
     """Render a journey.log or persona.profile artifact as readable
@@ -2018,7 +2020,9 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 
                 with gr.Column(scale=1):
                     gr.Markdown("### Real-time Adaptation")
-                    ui_chatbot = gr.Chatbot(label="Design Chat")
+                    # type="messages": the default "tuples" format is deprecated and
+                    # slated for removal, and this is the app's only chatbot.
+                    ui_chatbot = gr.Chatbot(label="Design Chat", type="messages")
                     ui_chat_msg = gr.Textbox(label="Request Modification", placeholder="e.g. Change primary color to emerald...")
                     ui_chat_send = gr.Button("Send Request")
 
