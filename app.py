@@ -1555,91 +1555,174 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             log_session.change(log_choices, [log_session, workspace_selector], [log_artifact], api_name="list_session_logs")
             log_load.click(load_and_format_log, [log_session, log_artifact, workspace_selector], [log_summary, log_viewer, log_download], api_name="load_session_log")
 
-        with gr.Tab("Evidence Artifacts"):
-            gr.Markdown("### Saved browser and UX evidence\nSelect any evidence artifact persisted for this workspace session.")
+        with gr.Tab("Recordings"):
+            gr.Markdown("### Persona journey recordings\nEvery run is recorded end to end, and its screenshots "
+                        "are consecutive frames of that same journey. Watch the recording, or step through the "
+                        "frames.")
             with gr.Row():
                 evidence_session = gr.Dropdown(label="Workspace session", choices=[], interactive=True, allow_custom_value=True)
                 evidence_refresh = gr.Button("Refresh sessions")
             evidence_status = gr.Markdown()
-            with gr.Row():
-                evidence_artifact = gr.Dropdown(label="Evidence artifact", choices=[], interactive=True, allow_custom_value=True)
-                evidence_load = gr.Button("Load evidence", variant="primary")
-                evidence_download = gr.DownloadButton("Download evidence")
-            evidence_caption = gr.Markdown()
-            evidence_image = gr.HTML(visible=False)
-            evidence_video = gr.Video(label="Session recording", visible=False)
-            with gr.Accordion("Raw content", open=False):
-                evidence_viewer = gr.Code(label="Evidence content", lines=24)
 
-            gr.Markdown("### Watch the journey\nEvery run is recorded, and its screenshots are consecutive "
-                        "frames of one journey rather than fifty unrelated files. Pick a persona run to play "
-                        "its recording, or step through its screenshots one at a time.")
-            with gr.Row():
-                journey_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
-                journey_refresh = gr.Button("Find runs")
-                journey_play = gr.Button("Play recording", variant="primary")
-                journey_series_btn = gr.Button("Step through screenshots")
+            # Video is the native form of a journey: it shows the run as it
+            # happened, at its real pace. The frame gallery is the fallback for a
+            # run with no recording, and for reading a single screen closely.
+            recordings_mode = gr.Radio(["Video", "Screenshot gallery"], value="Video", label="Mode")
+            recordings_layout = gr.Radio(["Single", "Compare up to 4"], value="Single", label="Layout")
+            journey_runs_state = gr.State([])
             journey_status = gr.Markdown()
-            journey_video = gr.Video(label="Journey recording", visible=False)
-            journey_series = gr.HTML(visible=False)
 
-            def journey_run_choices(session_id, workspace_id,
-                                    oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-                """One entry per persona run, from the run id every capture carries."""
+            with gr.Group(visible=True) as single_video_group:
+                # One recording at a time, stepped with a slider: with a handful of
+                # personas per session that is faster than reopening a dropdown.
+                recording_slider = gr.Slider(1, 1, value=1, step=1, label="Recording 1 / 1", interactive=True)
+                journey_video = gr.Video(label="Journey recording", visible=False)
+
+            with gr.Group(visible=False) as compare_group:
+                compare_pick = gr.CheckboxGroup(choices=[], label="Choose up to 4 recordings to watch together")
+                compare_status = gr.Markdown()
+                with gr.Row():
+                    compare_video_1 = gr.Video(label="", visible=False)
+                    compare_video_2 = gr.Video(label="", visible=False)
+                with gr.Row():
+                    compare_video_3 = gr.Video(label="", visible=False)
+                    compare_video_4 = gr.Video(label="", visible=False)
+            compare_videos = [compare_video_1, compare_video_2, compare_video_3, compare_video_4]
+
+            with gr.Group(visible=False) as gallery_group:
+                gallery_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
+                journey_series_btn = gr.Button("Step through screenshots", variant="primary")
+                journey_series = gr.HTML(visible=False)
+
+            with gr.Accordion("Inspect a single artifact (snapshots, raw content)", open=False):
+                with gr.Row():
+                    evidence_artifact = gr.Dropdown(label="Evidence artifact", choices=[], interactive=True, allow_custom_value=True)
+                    evidence_load = gr.Button("Load evidence", variant="primary")
+                    evidence_download = gr.DownloadButton("Download evidence")
+                evidence_caption = gr.Markdown()
+                evidence_image = gr.HTML(visible=False)
+                evidence_video = gr.Video(label="Session recording", visible=False)
+                with gr.Accordion("Raw content", open=False):
+                    evidence_viewer = gr.Code(label="Evidence content", lines=24)
+
+            def switch_recordings_mode(mode, layout):
+                """Video and gallery are exclusive; the layout choice only applies to video."""
+                video = mode == "Video"
+                return (gr.update(visible=video and layout == "Single"),
+                        gr.update(visible=video and layout == "Compare up to 4"),
+                        gr.update(visible=not video),
+                        gr.update(visible=video))
+
+
+            def discover_recordings(session_id, workspace_id,
+                                     oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                """One entry per persona run, from the run id every capture carries.
+
+                Returns the runs themselves as state, so the slider, the compare
+                picker and the gallery all address the same list rather than each
+                re-deriving it.
+                """
+                empty = ([], gr.update(maximum=1, value=1, label="Recording 1 / 1"),
+                         gr.update(choices=[], value=[]), gr.update(choices=[], value=None))
                 if not session_id:
-                    return gr.update(choices=[], value=None), "Select a workspace session first."
+                    return (*empty, "Select a workspace session first.")
                 try:
                     session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
                     artifacts = session_client.list_artifacts(session_id)
                 except (PermissionError, requests.RequestException) as error:
-                    return gr.update(choices=[], value=None), workspace_access_message(error)
-                runs = {}
+                    return (*empty, workspace_access_message(error))
+                found: dict[str, dict] = {}
                 for artifact in artifacts:
                     if artifact["kind"] not in ("browser.video", "browser.screenshot"):
                         continue
                     run_id = (artifact.get("metadata") or {}).get("run_id")
                     if not run_id:
                         continue
-                    entry = runs.setdefault(run_id, {"shots": 0, "video": None})
+                    entry = found.setdefault(run_id, {"runId": run_id, "shots": 0, "video": None})
                     if artifact["kind"] == "browser.video":
                         entry["video"] = artifact["artifact_id"]
                     else:
                         entry["shots"] += 1
-                if not runs:
-                    return gr.update(choices=[], value=None), "No browser recordings or screenshots on this session."
-                choices = [(f"Run {position} \u00b7 {entry['shots']} screenshot(s)"
-                            + ("" if entry["video"] else " \u00b7 no recording"), run_id)
-                           for position, (run_id, entry) in enumerate(sorted(runs.items()), start=1)]
-                return gr.update(choices=choices, value=choices[0][1]), f"Found {len(choices)} persona run(s)."
+                if not found:
+                    return (*empty, "No recordings or screenshots on this session.")
+                runs = []
+                for position, run_id in enumerate(sorted(found), start=1):
+                    entry = found[run_id]
+                    entry["label"] = (f"Run {position} \u00b7 {entry['shots']} frame(s)"
+                                      + ("" if entry["video"] else " \u00b7 no recording"))
+                    runs.append(entry)
+                labels = [run["label"] for run in runs]
+                with_video = sum(1 for run in runs if run["video"])
+                return (runs,
+                        gr.update(maximum=len(runs), value=1, label=f"Recording 1 / {len(runs)}"),
+                        gr.update(choices=labels, value=[]),
+                        gr.update(choices=[(run["label"], run["runId"]) for run in runs], value=runs[0]["runId"]),
+                        f"{len(runs)} persona run(s); {with_video} with a recording.")
 
-            def _run_artifacts(session_id, run_id, kind, workspace_id, oauth_profile, oauth_token):
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                artifacts = [item for item in session_client.list_artifacts(session_id)
-                             if item["kind"] == kind and (item.get("metadata") or {}).get("run_id") == run_id]
-                # Capture order: journeytest-core numbers each action's captures, and
-                # the un-numbered framing shots bracket the run.
-                def order(item):
-                    stem = str((item.get("metadata") or {}).get("capture_stem") or "")
-                    if stem.startswith("initial"):
-                        return (0, stem)
-                    if stem.startswith("final"):
-                        return (2, stem)
-                    return (1, stem)
-                return session_client, sorted(artifacts, key=order)
-
-            def play_journey_video(session_id, run_id, workspace_id,
-                                   oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-                if not session_id or not run_id:
-                    return "Pick a persona run first.", gr.update(visible=False)
+            def show_recording(index, runs, session_id, workspace_id,
+                                oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                """Play the run the slider points at."""
+                total = len(runs or [])
+                if not total:
+                    return gr.update(visible=False), "Press **Refresh sessions**, then pick a session.", gr.update()
+                position = max(1, min(total, int(index or 1)))
+                run = runs[position - 1]
+                label = gr.update(label=f"Recording {position} / {total}")
+                if not run.get("video"):
+                    return (gr.update(visible=False),
+                            f"{run['label']} has no recording stored \u2014 use the screenshot gallery for this run.",
+                            label)
                 try:
-                    session_client, videos = _run_artifacts(session_id, run_id, "browser.video",
-                                                            workspace_id, oauth_profile, oauth_token)
-                    if not videos:
-                        return "This run has no recording stored.", gr.update(visible=False)
-                    path = session_client.download_artifact(videos[0])
+                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    artifact = next((item for item in session_client.list_artifacts(session_id)
+                                     if item["artifact_id"] == run["video"]), None)
+                    if artifact is None:
+                        return gr.update(visible=False), "That recording is no longer in this session.", label
+                    path = session_client.download_artifact(artifact)
                 except (PermissionError, requests.RequestException) as error:
-                    return workspace_access_message(error), gr.update(visible=False)
-                return f"Recording of run `{run_id}`.", gr.update(visible=True, value=path)
+                    return gr.update(visible=False), workspace_access_message(error), label
+                return (gr.update(visible=True, value=path),
+                        f"**{run['label']}** \u2014 run `{run['runId']}`", label)
+
+            def compare_recordings(selected, runs, session_id, workspace_id,
+                                    oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                """Play up to four recordings side by side.
+
+                Four is the cap because that is what fits legibly in a 2x2 grid at
+                this width, and each recording is a real file download.
+                """
+                hidden = [gr.update(visible=False, value=None) for _ in range(4)]
+                chosen = [run for run in (runs or []) if run["label"] in (selected or [])]
+                if not chosen:
+                    return (*hidden, "Choose one to four recordings.", gr.update())
+                note = ""
+                if len(chosen) > 4:
+                    # Hold the selection at four rather than silently ignoring the
+                    # rest: the picker should show what is actually playing.
+                    note = " Four is the maximum; the later picks were dropped."
+                    chosen = chosen[:4]
+                try:
+                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    artifacts = {item["artifact_id"]: item for item in session_client.list_artifacts(session_id)}
+                except (PermissionError, requests.RequestException) as error:
+                    return (*hidden, workspace_access_message(error), gr.update())
+                updates, missing = [], []
+                for run in chosen:
+                    artifact = artifacts.get(run.get("video") or "")
+                    if artifact is None:
+                        missing.append(run["label"])
+                        continue
+                    try:
+                        path = session_client.download_artifact(artifact)
+                    except requests.RequestException as error:
+                        missing.append(f"{run['label']} ({error})")
+                        continue
+                    updates.append(gr.update(visible=True, value=path, label=run["label"]))
+                updates.extend(gr.update(visible=False, value=None) for _ in range(4 - len(updates)))
+                message = f"Playing {sum(1 for u in updates if u.get('visible'))} recording(s).{note}"
+                if missing:
+                    message += " No recording stored for: " + ", ".join(missing) + "."
+                return (*updates, message, gr.update(value=[run["label"] for run in chosen]))
 
             def show_journey_series(session_id, run_id, workspace_id,
                                     oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
@@ -1667,11 +1750,38 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 return (f"{len(frames)} frame(s) from run `{run_id}` \u2014 click, or use the arrow keys.",
                         gr.update(visible=True, value=frame_document(document, "Journey evidence series")))
 
-            journey_refresh.click(journey_run_choices, [evidence_session, workspace_selector],
-                                  [journey_run, journey_status], api_name="list_journey_runs")
-            journey_play.click(play_journey_video, [evidence_session, journey_run, workspace_selector],
-                               [journey_status, journey_video], api_name="play_journey_video")
-            journey_series_btn.click(show_journey_series, [evidence_session, journey_run, workspace_selector],
+            def _run_artifacts(session_id, run_id, kind, workspace_id, oauth_profile, oauth_token):
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                artifacts = [item for item in session_client.list_artifacts(session_id)
+                             if item["kind"] == kind and (item.get("metadata") or {}).get("run_id") == run_id]
+                # Capture order: journeytest-core numbers each action's captures, and
+                # the un-numbered framing shots bracket the run.
+                def order(item):
+                    stem = str((item.get("metadata") or {}).get("capture_stem") or "")
+                    if stem.startswith("initial"):
+                        return (0, stem)
+                    if stem.startswith("final"):
+                        return (2, stem)
+                    return (1, stem)
+                return session_client, sorted(artifacts, key=order)
+
+            recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout],
+                                   [single_video_group, compare_group, gallery_group, recordings_layout])
+            recordings_layout.change(switch_recordings_mode, [recordings_mode, recordings_layout],
+                                     [single_video_group, compare_group, gallery_group, recordings_layout])
+            evidence_session.change(discover_recordings, [evidence_session, workspace_selector],
+                                    [journey_runs_state, recording_slider, compare_pick, gallery_run, journey_status],
+                                    api_name="list_journey_runs")
+            # .release / .input, not .change: both handlers write back to the control
+            # that triggered them (the slider's own label, the picker's held value),
+            # and .change also fires on a programmatic update, which would feed back.
+            recording_slider.release(show_recording,
+                                    [recording_slider, journey_runs_state, evidence_session, workspace_selector],
+                                    [journey_video, journey_status, recording_slider], api_name="play_journey_video")
+            compare_pick.input(compare_recordings,
+                                [compare_pick, journey_runs_state, evidence_session, workspace_selector],
+                                [*compare_videos, compare_status, compare_pick], api_name="compare_journey_videos")
+            journey_series_btn.click(show_journey_series, [evidence_session, gallery_run, workspace_selector],
                                      [journey_status, journey_series], api_name="show_journey_series")
 
             def load_evidence(session_id, artifact_id, workspace_id,

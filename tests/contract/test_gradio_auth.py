@@ -238,3 +238,109 @@ def test_inlined_evidence_frames_are_bounded_in_size():
     with Image.open(BytesIO(b64.b64decode(uri.split(",", 1)[1]))) as scaled:
         assert scaled.width == 1100
         assert scaled.height == 2600, "a very tall page must be bounded, not shrunk to a strip"
+
+
+def _recordings_session(artifacts):
+    """A control-plane client stub exposing just what the Recordings tab uses."""
+    class Client:
+        def list_artifacts(self, session_id):
+            return artifacts
+        def download_artifact(self, artifact):
+            return f"/tmp/{artifact['artifact_id']}.webm"
+    return Client()
+
+
+def _artifact(kind, artifact_id, run_id, stem=None):
+    metadata = {"run_id": run_id}
+    if stem:
+        metadata["capture_stem"] = stem
+    return {"kind": kind, "artifact_id": artifact_id, "metadata": metadata}
+
+
+def test_recordings_are_discovered_one_entry_per_persona_run(monkeypatch):
+    import app as gradio_app
+
+    artifacts = [
+        _artifact("browser.video", "art_v1", "run_a"),
+        _artifact("browser.screenshot", "art_s1", "run_a", "initial-view"),
+        _artifact("browser.screenshot", "art_s2", "run_a", "001-click-e1-after"),
+        # A run whose recording never made it: it must still be listed, and say so.
+        _artifact("browser.screenshot", "art_s3", "run_b", "initial-view"),
+        _artifact("ux.report", "art_r", None),
+    ]
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: (_recordings_session(artifacts), None))
+
+    runs, slider, picker, gallery, status = gradio_app.discover_recordings("ses_1", "ws", object(), object())
+
+    assert [run["runId"] for run in runs] == ["run_a", "run_b"]
+    assert runs[0]["shots"] == 2 and runs[0]["video"] == "art_v1"
+    assert runs[1]["video"] is None and "no recording" in runs[1]["label"]
+    assert slider["maximum"] == 2 and slider["label"] == "Recording 1 / 2"
+    assert picker["choices"] == [run["label"] for run in runs]
+    assert "2 persona run(s); 1 with a recording." == status
+
+
+def test_the_slider_steps_between_recordings_and_says_which_one(monkeypatch):
+    import app as gradio_app
+
+    artifacts = [_artifact("browser.video", "art_v1", "run_a"), _artifact("browser.video", "art_v2", "run_b")]
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: (_recordings_session(artifacts), None))
+    runs = gradio_app.discover_recordings("ses_1", "ws", object(), object())[0]
+
+    video, status, slider = gradio_app.show_recording(2, runs, "ses_1", "ws", object(), object())
+
+    assert video["value"] == "/tmp/art_v2.webm" and video["visible"] is True
+    assert slider["label"] == "Recording 2 / 2"
+    assert "run_b" in status
+
+
+def test_a_run_without_a_recording_points_at_the_gallery_instead(monkeypatch):
+    import app as gradio_app
+
+    artifacts = [_artifact("browser.screenshot", "art_s1", "run_a", "initial-view")]
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: (_recordings_session(artifacts), None))
+    runs = gradio_app.discover_recordings("ses_1", "ws", object(), object())[0]
+
+    video, status, _ = gradio_app.show_recording(1, runs, "ses_1", "ws", object(), object())
+
+    assert video["visible"] is False
+    assert "screenshot gallery" in status
+
+
+def test_comparing_recordings_plays_up_to_four_and_holds_the_pick_there(monkeypatch):
+    import app as gradio_app
+
+    artifacts = [_artifact("browser.video", f"art_v{n}", f"run_{n}") for n in range(1, 7)]
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: (_recordings_session(artifacts), None))
+    runs = gradio_app.discover_recordings("ses_1", "ws", object(), object())[0]
+
+    labels = [run["label"] for run in runs]
+    *videos, status, picker = gradio_app.compare_recordings(labels[:2], runs, "ses_1", "ws", object(), object())
+    assert [v["visible"] for v in videos] == [True, True, False, False]
+    assert "Playing 2 recording(s)." in status
+
+    *videos, status, picker = gradio_app.compare_recordings(labels[:6], runs, "ses_1", "ws", object(), object())
+    assert [v["visible"] for v in videos] == [True, True, True, True]
+    assert "Four is the maximum" in status
+    # The picker is held at four, so it shows what is actually playing.
+    assert picker["value"] == labels[:4]
+
+
+def test_recordings_modes_are_exclusive_and_video_is_the_default():
+    import app as gradio_app
+
+    single, compare, gallery, layout = gradio_app.switch_recordings_mode("Video", "Single")
+    assert (single["visible"], compare["visible"], gallery["visible"]) == (True, False, False)
+    assert layout["visible"] is True
+
+    single, compare, gallery, layout = gradio_app.switch_recordings_mode("Video", "Compare up to 4")
+    assert (single["visible"], compare["visible"], gallery["visible"]) == (False, True, False)
+
+    single, compare, gallery, layout = gradio_app.switch_recordings_mode("Screenshot gallery", "Single")
+    assert (single["visible"], compare["visible"], gallery["visible"]) == (False, False, True)
+    # The layout choice only applies to video.
+    assert layout["visible"] is False
