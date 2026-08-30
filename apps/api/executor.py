@@ -31,6 +31,13 @@ _FAIL_CRITERION_IDS = {"tasks-blocked"}
 _QUIET_BROWSER_EVENTS = {"browser.snapshot", "browser.screenshot", "browser.get_url", "browser.get_title",
                          "browser.console_evidence", "browser.network_evidence",
                          "browser.network_har.start", "browser.network_har.stop"}
+# Generic quality adjectives. They carry no information about *which* design
+# decision is being praised, so they are ignored when grouping strengths.
+_QUALITY_ADJECTIVES = frozenset({
+    "clear", "clean", "high", "good", "great", "excellent", "strong", "effective", "simple",
+    "minimalist", "minimal", "concise", "consistent", "well", "nice", "solid", "readable",
+    "distraction", "free", "design", "visual", "excellentt",
+})
 _TITLE_STOPWORDS = {"the", "a", "an", "and", "or", "for", "of", "to", "in", "on", "with", "is", "are", "not",
                     "its", "it's", "this", "that", "was", "were", "be", "been", "has", "have", "but"}
 # A pass criterion is a machine label; a report reads it as a sentence about the
@@ -605,12 +612,13 @@ class JobExecutor:
                 last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
 
     @staticmethod
-    def _title_tokens(title: str) -> set[str]:
+    def _title_tokens(title: str, drop: frozenset[str] = frozenset()) -> set[str]:
         return {token for token in re.findall(r"[a-z0-9']+", str(title).lower())
-                if len(token) > 2 and token not in _TITLE_STOPWORDS}
+                if len(token) > 2 and token not in _TITLE_STOPWORDS and token not in drop}
 
     @classmethod
-    def _cluster_by_title(cls, items: list[dict[str, Any]], threshold: float = 0.5) -> list[list[dict[str, Any]]]:
+    def _cluster_by_title(cls, items: list[dict[str, Any]], threshold: float = 0.5,
+                          drop: frozenset[str] = frozenset()) -> list[list[dict[str, Any]]]:
         """Group items whose titles describe the same thing.
 
         aggregateCohort groups pain points on an exact match of the vision model's
@@ -623,7 +631,7 @@ class JobExecutor:
         chains the three together even though the first and last are not
         individually close.
         """
-        tokens = [cls._title_tokens(item.get("title", "")) for item in items]
+        tokens = [cls._title_tokens(item.get("title", ""), drop) for item in items]
         # Connected components, not a greedy single pass: with three phrasings A, B
         # and C where A~C and B~C but A!~B, a greedy pass puts C in A's cluster and
         # strands B. Only the transitive closure gets all three into one issue.
@@ -695,7 +703,13 @@ class JobExecutor:
         three ways.
         """
         entries = []
-        for cluster in cls._cluster_by_title([item for item in strengths if str(item.get("title", "")).strip()]):
+        # Praise is mostly interchangeable adjectives -- "High visual contrast and
+        # readability" and "Excellent visual contrast and simplicity" are one
+        # observation. Dropping the quality words leaves the design property those
+        # phrasings actually share, which is what should group them.
+        for cluster in cls._cluster_by_title(
+                [item for item in strengths if str(item.get("title", "")).strip()],
+                threshold=0.33, drop=_QUALITY_ADJECTIVES):
             # Prefer the fullest description; the shortest phrasing is rarely the
             # most informative one.
             primary = max(cluster, key=lambda item: len(str(item.get("description") or "")))
@@ -1132,7 +1146,16 @@ class JobExecutor:
         # --- 03 Elements to preserve ---
         if preserve:
             slides.append(divider("03", "Elements to preserve"))
-            for item in preserve:
+            # Editorial restraint, as in a hand-made review: show the most widely
+            # observed, and say plainly how many were found rather than listing
+            # every phrasing.
+            shown = preserve[:6]
+            if len(preserve) > len(shown):
+                slides.append(
+                    f'<section class="slide"><h2>What is working</h2>'
+                    f'<p class="summary">{escape(str(len(preserve)))} design decisions were noted as working. '
+                    f'The {escape(str(len(shown)))} seen by the most synthetic users follow.</p></section>')
+            for item in shown:
                 seen = item.get("observedByPersonas") or 0
                 seen_line = (f'<p class="affected">Noted by {seen} of the tested persona(s)</p>' if seen else "")
                 slides.append(

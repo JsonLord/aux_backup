@@ -1017,3 +1017,42 @@ def test_flow_label_names_the_product_area_not_the_taxonomy():
     assert JobExecutor._flow_label({"route": "https://example.com/account/settings"}) == "Account · Settings"
     # Only when there is no route at all does the category stand in.
     assert JobExecutor._flow_label({"category": "accessibility"}) == "Accessibility"
+
+
+def test_praise_phrasings_group_on_the_design_property_not_the_adjective():
+    """A real run produced seven "elements to preserve" that were three
+    observations: quality adjectives ("High", "Excellent", "Clean") carry no
+    information about *which* decision is being praised."""
+    merged = JobExecutor._merge_strengths([
+        {"title": t, "description": t, "personaId": f"p{index}"} for index, t in enumerate([
+            "High contrast and distraction-free design",
+            "Excellent visual contrast and simplicity",
+            "High visual contrast and readability",
+            "Clean visual hierarchy and layout",
+            "Minimalist and distraction-free layout",
+            "Clear and concise technical copy",
+            "Clear typographic hierarchy",
+        ])])
+
+    titles = [item["title"] for item in merged]
+    assert len(merged) == 3
+    contrast = next(item for item in merged if "contrast" in item["title"].lower())
+    assert contrast["observedByPersonas"] == 3
+    # Genuinely different observations stay apart.
+    assert any("copy" in title.lower() for title in titles)
+    assert any("layout" in title.lower() for title in titles)
+
+
+def test_preserve_section_is_capped_and_says_how_many_were_found():
+    report = {
+        "url": "https://example.com", "evidence_language": "observed",
+        "critical_pain_points": [],
+        "elements_to_preserve": [{"title": f"Strength {index}", "description": "d",
+                                  "observedByPersonas": 1} for index in range(9)],
+    }
+
+    html = JobExecutor._slide_deck(report)
+
+    assert "9 design decisions were noted as working" in html
+    assert "Strength 0" in html and "Strength 5" in html
+    assert "Strength 6" not in html  # capped at six
