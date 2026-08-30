@@ -3,6 +3,7 @@ import sys
 
 import base64
 from io import BytesIO
+from urllib.parse import quote
 import subprocess
 import importlib.util
 import re
@@ -961,6 +962,52 @@ show(0);
 </script></body></html>"""
 
 
+def journey_worker_url() -> str:
+    return os.getenv("JOURNEY_WORKER_URL", "http://127.0.0.1:8080").rstrip("/")
+
+
+def fetch_live_runs() -> list[dict]:
+    """The journeys the worker currently has in flight.
+
+    Asking the worker which runs are live avoids threading job and persona ids
+    through the UI, and works the same whether the run was started from this app
+    or through the API.
+    """
+    try:
+        response = requests.get(f"{journey_worker_url()}/v1/runs/live", timeout=5)
+        response.raise_for_status()
+        return response.json().get("runs") or []
+    except (requests.RequestException, ValueError):
+        return []
+
+
+def fetch_live_state(run_id: str) -> dict:
+    try:
+        response = requests.get(f"{journey_worker_url()}/v1/runs/{quote(run_id, safe='')}/live", timeout=10)
+        response.raise_for_status()
+        return response.json()
+    except (requests.RequestException, ValueError) as error:
+        return {"runId": run_id, "status": "unreachable", "frames": 0, "frame": None,
+                "reasoning": [], "error": str(error)}
+
+
+def render_live_thoughts(reasoning: list[dict]) -> str:
+    """The agent's thinking as it arrives, newest first.
+
+    Newest first because a live view is read from the top: the thought that
+    explains what is on screen right now is the one that just landed.
+    """
+    if not reasoning:
+        return "_Waiting for the model's first thought..._"
+    lines = []
+    for item in reversed(reasoning):
+        elapsed = item.get("elapsedMs")
+        when = f" · +{elapsed / 1000:.1f}s" if isinstance(elapsed, (int, float)) else ""
+        text = str(item.get("text") or "").strip()
+        lines.append(f"> 💭 {text}\n>\n> — _model reasoning_{when}\n")
+    return "\n".join(lines)
+
+
 # The Persona Thought Logs tab opens on the first of these kinds.
 log_choices_kinds = ("journey.log", "persona.profile")
 
@@ -1110,7 +1157,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     all_solutions_state = gr.State([])
     selected_solutions_json_state = gr.State("[]")
 
-    with gr.Tabs():
+    with gr.Tabs() as main_tabs:
         with gr.Tab("Analysis Orchestrator"):
             gr.Markdown("### Start New Analysis Sessions")
             with gr.Row():
@@ -1217,6 +1264,9 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             start_session_btn = gr.Button("Start Analysis Session", variant="primary")
             session_id_orch = gr.Textbox(label="Session name", interactive=True, placeholder="Optional label for this workspace session...")
             session_id_sync_list.append(session_id_orch)
+            # Right under the session, because that is where a reader looks once a
+            # run has started and wants to see it happening.
+            go_live_btn = gr.Button("\U0001f7e2 Go to live browsing session", variant="secondary")
             report_output = gr.Markdown(label="Active Session Reports")
 
         with gr.Tab("Persona Studio"):
@@ -1555,7 +1605,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             log_session.change(log_choices, [log_session, workspace_selector], [log_artifact], api_name="list_session_logs")
             log_load.click(load_and_format_log, [log_session, log_artifact, workspace_selector], [log_summary, log_viewer, log_download], api_name="load_session_log")
 
-        with gr.Tab("Recordings"):
+        with gr.Tab("Recordings", id="recordings"):
             gr.Markdown("### Persona journey recordings\nEvery run is recorded end to end, and its screenshots "
                         "are consecutive frames of that same journey. Watch the recording, or step through the "
                         "frames.")
@@ -1567,7 +1617,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             # Video is the native form of a journey: it shows the run as it
             # happened, at its real pace. The frame gallery is the fallback for a
             # run with no recording, and for reading a single screen closely.
-            recordings_mode = gr.Radio(["Video", "Screenshot gallery"], value="Video", label="Mode")
+            recordings_mode = gr.Radio(["Video", "Live", "Screenshot gallery"], value="Video", label="Mode")
             recordings_layout = gr.Radio(["Single", "Compare up to 4"], value="Single", label="Layout")
             journey_runs_state = gr.State([])
             journey_status = gr.Markdown()
@@ -1589,6 +1639,20 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     compare_video_4 = gr.Video(label="", visible=False)
             compare_videos = [compare_video_1, compare_video_2, compare_video_3, compare_video_4]
 
+            with gr.Group(visible=False) as live_group:
+                gr.Markdown("**Following a run as it happens.** The recording is only finalized when the run "
+                            "ends, so there is no video to stream yet \u2014 this is the newest frame the "
+                            "browser has written, beside the model's thinking as it arrives.")
+                with gr.Row():
+                    live_run = gr.Dropdown(label="Live run", choices=[], interactive=True, allow_custom_value=True)
+                    live_refresh = gr.Button("Find live runs")
+                    live_follow = gr.Checkbox(label="Follow", value=True)
+                with gr.Row():
+                    live_frame = gr.HTML(visible=False)
+                    live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
+                live_note = gr.Markdown()
+                live_timer = gr.Timer(2.0, active=False)
+
             with gr.Group(visible=False) as gallery_group:
                 gallery_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
                 journey_series_btn = gr.Button("Step through screenshots", variant="primary")
@@ -1605,13 +1669,19 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 with gr.Accordion("Raw content", open=False):
                     evidence_viewer = gr.Code(label="Evidence content", lines=24)
 
-            def switch_recordings_mode(mode, layout):
-                """Video and gallery are exclusive; the layout choice only applies to video."""
-                video = mode == "Video"
+            def switch_recordings_mode(mode, layout, following):
+                """The three modes are exclusive; the layout choice only applies to video.
+
+                The timer only ticks while Live is on screen and Follow is checked --
+                a poll every two seconds is cheap, but not while nobody is looking.
+                """
+                video, live = mode == "Video", mode == "Live"
                 return (gr.update(visible=video and layout == "Single"),
                         gr.update(visible=video and layout == "Compare up to 4"),
-                        gr.update(visible=not video),
-                        gr.update(visible=video))
+                        gr.update(visible=live),
+                        gr.update(visible=not video and not live),
+                        gr.update(visible=video),
+                        gr.update(active=bool(live and following)))
 
 
             def discover_recordings(session_id, workspace_id,
@@ -1765,10 +1835,57 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     return (1, stem)
                 return session_client, sorted(artifacts, key=order)
 
-            recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout],
-                                   [single_video_group, compare_group, gallery_group, recordings_layout])
-            recordings_layout.change(switch_recordings_mode, [recordings_mode, recordings_layout],
-                                     [single_video_group, compare_group, gallery_group, recordings_layout])
+            def live_run_choices():
+                runs = fetch_live_runs()
+                if not runs:
+                    return (gr.update(choices=[], value=None),
+                            "No journey is running right now. Start an analysis, then come back.")
+                choices = [(f"{run['runId']} \u00b7 {run.get('thoughts', 0)} thought(s)", run["runId"])
+                           for run in runs]
+                return (gr.update(choices=choices, value=choices[0][1]),
+                        f"{len(choices)} run(s) in flight.")
+
+            def poll_live_run(run_id, following):
+                """One tick of the live view."""
+                if not run_id:
+                    return gr.update(visible=False), "_Pick a live run._", "", gr.update()
+                state = fetch_live_state(run_id)
+                thoughts = render_live_thoughts(state.get("reasoning") or [])
+                if state.get("status") == "unreachable":
+                    return (gr.update(visible=False), thoughts,
+                            f"\u26a0\ufe0f Could not reach the journey worker: {state.get('error', '')}",
+                            gr.update(active=False))
+                if state.get("status") == "finished":
+                    # The capture is cleared when a run ends, so its absence *is* the
+                    # end of the run -- stop polling and send the reader to the video.
+                    return (gr.update(visible=False), thoughts,
+                            "\u2714\ufe0f This run has finished. Its recording is under **Video**.",
+                            gr.update(active=False))
+                frame = state.get("frame")
+                elapsed = (state.get("elapsedMs") or 0) / 1000
+                note = (f"Live \u00b7 {state.get('frames', 0)} frame(s) captured \u00b7 "
+                        f"{len(state.get('reasoning') or [])} thought(s) \u00b7 running {elapsed:.0f}s")
+                if not frame:
+                    return (gr.update(visible=False), thoughts,
+                            note + " \u2014 the browser has not written a frame yet.",
+                            gr.update(active=bool(following)))
+                image = (f'<img src="{escape(frame, quote=True)}" alt="Newest frame of the running journey" '
+                         'style="width:100%;border-radius:.5rem;border:1px solid #334155;background:#fff">')
+                caption = escape(str(state.get("frameName") or ""))
+                return (gr.update(visible=True, value=f'{image}<p style="opacity:.6;font-size:.85em">{caption}</p>'),
+                        thoughts, note, gr.update(active=bool(following)))
+
+            recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout, live_follow],
+                                   [single_video_group, compare_group, live_group, gallery_group,
+                                    recordings_layout, live_timer])
+            recordings_layout.change(switch_recordings_mode, [recordings_mode, recordings_layout, live_follow],
+                                     [single_video_group, compare_group, live_group, gallery_group,
+                                      recordings_layout, live_timer])
+            live_follow.change(lambda mode, following: gr.update(active=bool(mode == "Live" and following)),
+                               [recordings_mode, live_follow], [live_timer])
+            live_refresh.click(live_run_choices, None, [live_run, live_note], api_name="list_live_runs")
+            live_timer.tick(poll_live_run, [live_run, live_follow],
+                            [live_frame, live_thoughts, live_note, live_timer])
             evidence_session.change(discover_recordings, [evidence_session, workspace_selector],
                                     [journey_runs_state, recording_slider, compare_pick, gallery_run, journey_status],
                                     api_name="list_journey_runs")
@@ -2077,6 +2194,21 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
     persona_index.change(fn=load_persona, inputs=[persona_display, persona_index], outputs=studio_outputs)
     apply_tweaks_btn.click(fn=apply_persona_tweaks, inputs=[persona_editor, *behavior_sliders.values(), color_vision, visual_acuity, contrast_sensitivity, pointer_precision, processing_speed, working_memory, reading_speed], outputs=[persona_view, persona_editor, persona_studio_status])
     save_persona_btn.click(fn=save_manual_persona, inputs=[persona_editor, persona_display, persona_index, workspace_selector], outputs=[persona_view, persona_editor, persona_display, persona_studio_status])
+
+    def go_to_live_session():
+        """Open the Recordings tab already following whatever is in flight."""
+        runs = fetch_live_runs()
+        if not runs:
+            return (gr.update(), gr.update(), gr.update(), gr.update(),
+                    "No journey is running right now \u2014 start an analysis first.")
+        choices = [(f"{run['runId']} \u00b7 {run.get('thoughts', 0)} thought(s)", run["runId"]) for run in runs]
+        return (gr.Tabs(selected="recordings"), gr.update(value="Live"),
+                gr.update(choices=choices, value=choices[0][1]), gr.update(active=True),
+                f"Following {choices[0][1]}.")
+
+    go_live_btn.click(go_to_live_session, None,
+                      [main_tabs, recordings_mode, live_run, live_timer, live_note],
+                      api_name="go_to_live_session")
 
     start_session_btn.click(
         fn=start_and_monitor_sessions,

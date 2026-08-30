@@ -333,14 +333,127 @@ def test_comparing_recordings_plays_up_to_four_and_holds_the_pick_there(monkeypa
 def test_recordings_modes_are_exclusive_and_video_is_the_default():
     import app as gradio_app
 
-    single, compare, gallery, layout = gradio_app.switch_recordings_mode("Video", "Single")
-    assert (single["visible"], compare["visible"], gallery["visible"]) == (True, False, False)
-    assert layout["visible"] is True
+    def modes(mode, layout="Single", following=True):
+        single, compare, live, gallery, layout_vis, timer = gradio_app.switch_recordings_mode(
+            mode, layout, following)
+        return ((single["visible"], compare["visible"], live["visible"], gallery["visible"]),
+                layout_vis["visible"], timer["active"])
 
-    single, compare, gallery, layout = gradio_app.switch_recordings_mode("Video", "Compare up to 4")
-    assert (single["visible"], compare["visible"], gallery["visible"]) == (False, True, False)
+    visible, layout_shown, ticking = modes("Video")
+    assert visible == (True, False, False, False)
+    assert layout_shown is True
+    # Nothing is polled unless the live view is on screen.
+    assert ticking is False
 
-    single, compare, gallery, layout = gradio_app.switch_recordings_mode("Screenshot gallery", "Single")
-    assert (single["visible"], compare["visible"], gallery["visible"]) == (False, False, True)
-    # The layout choice only applies to video.
-    assert layout["visible"] is False
+    visible, _, _ = modes("Video", "Compare up to 4")
+    assert visible == (False, True, False, False)
+
+    visible, layout_shown, ticking = modes("Live")
+    assert visible == (False, False, True, False)
+    assert layout_shown is False, "the layout choice only applies to video"
+    assert ticking is True
+
+    # Unchecking Follow stops the polling without leaving the view.
+    assert modes("Live", following=False)[2] is False
+
+    visible, layout_shown, ticking = modes("Screenshot gallery")
+    assert visible == (False, False, False, True)
+    assert (layout_shown, ticking) == (False, False)
+
+
+def _live_worker(routes):
+    """A stand-in journey worker serving the live endpoints' real JSON shape."""
+    import json
+    import threading
+    from http.server import BaseHTTPRequestHandler, HTTPServer
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            body = routes.get(self.path)
+            self.send_response(200 if body is not None else 404)
+            self.send_header("content-type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(body if body is not None else {"error": "not_found"}).encode())
+        def log_message(self, *args):
+            pass
+
+    server = HTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    return server
+
+
+def test_the_live_view_reads_frames_and_thoughts_from_the_worker(monkeypatch):
+    """The recording is only finalized when a run ends, so a live view shows what
+    does exist mid-flight: the newest frame on disk and the reasoning so far."""
+    import app as gradio_app
+
+    frame = "data:image/png;base64,iVBORw0KGgo="
+    server = _live_worker({
+        "/v1/runs/live": {"runs": [{"runId": "job_a_persona_1", "startedAt": 1, "thoughts": 2}]},
+        "/v1/runs/job_a_persona_1/live": {
+            "runId": "job_a_persona_1", "status": "live", "elapsedMs": 31200, "frames": 7,
+            "frame": frame, "frameName": "001-click-e21-after.png",
+            "reasoning": [{"elapsedMs": 900, "text": "The page has loaded."},
+                          {"elapsedMs": 7400, "text": "That opened a tool panel, not a description."}]},
+    })
+    monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        assert [run["runId"] for run in gradio_app.fetch_live_runs()] == ["job_a_persona_1"]
+
+        image, thoughts, note, timer = gradio_app.poll_live_run("job_a_persona_1", True)
+
+        assert image["visible"] is True and frame in image["value"]
+        assert "001-click-e21-after.png" in image["value"]
+        # Newest thought first: it is the one that explains what is on screen now.
+        assert thoughts.index("That opened a tool panel") < thoughts.index("The page has loaded.")
+        assert "7 frame(s)" in note and "2 thought(s)" in note and "31s" in note
+        assert timer["active"] is True
+    finally:
+        server.shutdown()
+
+
+def test_the_live_view_stops_polling_when_the_run_ends(monkeypatch):
+    """A finished run's capture is cleared, so its absence is exactly the end of
+    the run -- the view must stop polling rather than spin forever."""
+    import app as gradio_app
+
+    server = _live_worker({"/v1/runs/job_a_persona_1/live": {
+        "runId": "job_a_persona_1", "status": "finished", "frames": 0, "frame": None, "reasoning": []}})
+    monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        image, _, note, timer = gradio_app.poll_live_run("job_a_persona_1", True)
+        assert image["visible"] is False
+        assert "finished" in note and "Video" in note
+        assert timer["active"] is False
+    finally:
+        server.shutdown()
+
+
+def test_an_unreachable_worker_is_reported_and_does_not_spin(monkeypatch):
+    import app as gradio_app
+
+    # Nothing listening on this port.
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://127.0.0.1:9")
+    assert gradio_app.fetch_live_runs() == []
+
+    image, _, note, timer = gradio_app.poll_live_run("job_a_persona_1", True)
+    assert image["visible"] is False
+    assert "Could not reach the journey worker" in note
+    assert timer["active"] is False
+
+
+def test_a_live_run_that_has_not_written_a_frame_yet_still_follows(monkeypatch):
+    import app as gradio_app
+
+    server = _live_worker({"/v1/runs/r/live": {
+        "runId": "r", "status": "live", "elapsedMs": 1200, "frames": 0, "frame": None,
+        "reasoning": [{"elapsedMs": 500, "text": "Opening the base URL."}]}})
+    monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
+    try:
+        image, thoughts, note, timer = gradio_app.poll_live_run("r", True)
+        assert image["visible"] is False
+        assert "has not written a frame yet" in note
+        assert "Opening the base URL." in thoughts
+        assert timer["active"] is True, "still live, so keep following"
+    finally:
+        server.shutdown()

@@ -5,6 +5,8 @@ const { randomUUID } = require("node:crypto");
 const { BehaviorController } = require("./behavior");
 const { EvidenceCoordinator, normalizeStepEvidence } = require("./evidence");
 const { runWithJourneyTest } = require("./journeytest");
+const { liveRunState } = require("./liveRun");
+const { listLiveRuns } = require("./reasoningCapture");
 const { replayFromEvidence } = require("./replay");
 const { validateBrowserSafety } = require("./safety");
 
@@ -96,6 +98,19 @@ async function runJourney(input, options = {}) {
 const server = http.createServer(async (request, response) => {
   try {
     if (request.method === "GET" && request.url === "/healthz") return json(response, 200, { service: "journey-worker", status: "ready", behaviorController: true, engine: process.env.JOURNEY_ENGINE || "fixture", journeyTestVersion: "0.1.2" });
+    // Follow a journey while it runs. The recording is only finalized when the run
+    // ends, so this serves what does exist mid-flight: the newest screenshot the
+    // driver has written, and the model's reasoning so far.
+    // Which runs are in flight. Checked before the per-run route below, which
+    // would otherwise match this path with an empty run id.
+    if (request.method === "GET" && request.url === "/v1/runs/live") {
+      return json(response, 200, { runs: listLiveRuns() });
+    }
+    if (request.method === "GET" && request.url.startsWith("/v1/runs/") && request.url.endsWith("/live")) {
+      const runId = decodeURIComponent(request.url.slice("/v1/runs/".length, -"/live".length));
+      if (!runId) return json(response, 422, { error: "invalid_request", message: "runId is required" });
+      return json(response, 200, await liveRunState(runId));
+    }
     if (request.method === "POST" && request.url === "/v1/runs") return json(response, 201, await runJourney(await body(request)));
     if (request.method === "POST" && request.url === "/v1/replays") return json(response, 201, replayFromEvidence(await body(request)));
     return json(response, 404, { error: "not_found" });

@@ -93,7 +93,9 @@ async function runWithJourneyTest(input) {
   // assistant turn, so the model's real thinking never reaches the run
   // artifacts. Capture it from the completions responses instead.
   const captureId = String(input.runId || `run-${Date.now()}`);
-  startRunCapture(captureId);
+  // The output directory is registered with the capture so a live view can find
+  // the frames journeytest-core is writing while the run is still going.
+  startRunCapture(captureId, { outputDir: path.resolve(outputDir) });
   const result = await core.runJourney({
     journey: journeyContract(input),
     profile: testerContract(input.profile),

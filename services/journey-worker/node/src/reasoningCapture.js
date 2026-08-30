@@ -145,10 +145,33 @@ function installReasoningCapture() {
   };
 }
 
-function startRunCapture(runId) {
+function startRunCapture(runId, context = {}) {
   installReasoningCapture();
-  captures.set(runId, { startedAt: Date.now(), thoughts: [] });
+  captures.set(runId, { startedAt: Date.now(), thoughts: [], ...context });
   activeRunId = runId;
+}
+
+/**
+ * The reasoning captured for a run *so far*, without ending the capture -- what a
+ * live view needs while the run is still going.
+ */
+function peekRunReasoning(runId) {
+  const capture = captures.get(runId);
+  if (!capture) return [];
+  return [...capture.thoughts].sort((left, right) => left.elapsedMs - right.elapsedMs);
+}
+
+/** The runs currently registered -- i.e. still going -- oldest first. */
+function listLiveRuns() {
+  return [...captures.entries()]
+    .map(([runId, capture]) => ({ runId, startedAt: capture.startedAt, thoughts: capture.thoughts.length }))
+    .sort((left, right) => left.startedAt - right.startedAt);
+}
+
+/** Where a run is writing its artifacts, and when it started. */
+function getRunContext(runId) {
+  const capture = captures.get(runId);
+  return capture ? { startedAt: capture.startedAt, outputDir: capture.outputDir } : null;
 }
 
 /** The reasoning captured for a run, in the order the model produced it. */
@@ -163,6 +186,9 @@ function takeRunReasoning(runId) {
 module.exports = {
   installReasoningCapture,
   startRunCapture,
+  peekRunReasoning,
+  listLiveRuns,
+  getRunContext,
   takeRunReasoning,
   parseStreamedReasoning,
   parseWholeBodyReasoning,
