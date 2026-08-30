@@ -5,7 +5,7 @@ from datetime import datetime, timedelta, timezone
 from fastapi.testclient import TestClient
 
 from apps.api.main import create_app
-from apps.api.executor import JobExecutor
+from apps.api.executor import JobExecutor, _reads_as_praise
 from apps.api.store import Store
 
 
@@ -1361,3 +1361,30 @@ def test_the_client_waits_out_the_workers_own_retries(monkeypatch):
     assert JobExecutor._vision_timeout() >= 186
     monkeypatch.setenv("EYESON_VISION_TIMEOUT", "45")
     assert JobExecutor._vision_timeout() == 45
+
+
+def test_vision_stage_praise_is_preserved_not_filed_as_an_issue():
+    """The vision model has a "strengths" array of its own and still puts praise in
+    "issues": a live run published "Familiar and clean layout" as a medium-severity
+    usability issue alongside a real navigation problem."""
+    praise = {"title": "Familiar and clean layout", "severity": "medium",
+              "summary": "The login interface is centered, clean, and uses highly recognizable form "
+                         "patterns, which reduces cognitive friction for returning users.",
+              "source": "eyeson-vision-synthesis", "affectedPersonaIds": ["p1", "p2"],
+              "route": "https://example.com", "screenshotRef": "/run/shot.png", "elements": []}
+    issue = {"title": "Confusing workflow navigation", "severity": "medium",
+             "summary": "The page features two different sets of navigation controls for the same "
+                        "workflow steps, which creates cognitive load and confusion.",
+             "source": "eyeson-vision-synthesis", "affectedPersonaIds": ["p1"]}
+
+    assert _reads_as_praise(praise["title"], praise["summary"])
+    assert not _reads_as_praise(issue["title"], issue["summary"])
+
+    strengths = JobExecutor._praise_as_strengths([praise])
+    # One entry per persona the synthesis credited, so _merge_strengths can count them.
+    assert [item["personaId"] for item in strengths] == ["p1", "p2"]
+    assert strengths[0]["description"].startswith("The login interface is centered")
+
+    merged = JobExecutor._merge_strengths(strengths)
+    assert len(merged) == 1
+    assert merged[0]["observedByPersonas"] == 2

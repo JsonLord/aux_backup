@@ -74,7 +74,16 @@ class IdentityProvider:
             account = fallback.json()
             if account.get("type") != "user" or not account.get("name"):
                 raise ValueError("whoami response has no user identity")
-            return {"sub": str(account["name"]), "preferred_username": account["name"],
+            # The subject must be the account's stable id, which is exactly what the
+            # OAuth userinfo path above returns as `sub` -- not the username. Using
+            # the username put the same person in two different workspaces depending
+            # on which credential they presented: a session created with a personal
+            # access token landed in "hf:user:<username>" while the browser, signed
+            # in through OAuth, asked for "hf:user:<id>" and got 404 for every one of
+            # them.
+            if not account.get("id"):
+                raise ValueError("whoami response has no account id")
+            return {"sub": str(account["id"]), "preferred_username": account["name"],
                     "name": account.get("fullname") or account["name"], "orgs": []}
         except (requests.RequestException, ValueError) as error:
             raise HTTPException(401, "invalid Hugging Face user access token") from error

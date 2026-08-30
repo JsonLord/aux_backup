@@ -56,6 +56,37 @@ def validate_and_list_repos(pat: str) -> tuple[str, list[str]]:
     return username, repos
 
 
+def confirm_backup_repo(pat: str, repo_full_name: str) -> dict:
+    """Verify that this exact repo can actually receive a backup, and describe it.
+
+    Listing repos with push access (validate_and_list_repos) is a snapshot taken at
+    connect time; it does not prove the chosen one is still writable now, and it
+    says nothing about a repo being archived -- GitHub accepts the token, lists the
+    repo with push permission, and then rejects every write to it. Checking the one
+    repo the user is committing to is what makes "fixed for backup" a statement
+    about reality rather than about a dropdown.
+    """
+    if not pat:
+        raise GitHubAuthError("Connect GitHub first.")
+    if not repo_full_name:
+        raise GitHubAuthError("Choose a repository first.")
+    response = requests.get(f"{GITHUB_API}/repos/{repo_full_name}", headers=_headers(pat), timeout=_TIMEOUT)
+    if response.status_code == 401:
+        raise GitHubAuthError("GitHub rejected this token (invalid or expired).")
+    if response.status_code in (403, 404):
+        raise GitHubAuthError(f"`{repo_full_name}` is not reachable with this token. "
+                              "Check the token still grants it **Contents: Read and write**.")
+    response.raise_for_status()
+    repo = response.json()
+    if not repo.get("permissions", {}).get("push"):
+        raise GitHubAuthError(f"This token can read `{repo_full_name}` but cannot write to it. "
+                              "It needs **Contents: Read and write**.")
+    if repo.get("archived"):
+        raise GitHubAuthError(f"`{repo_full_name}` is archived, so GitHub will reject every write to it.")
+    return {"full_name": repo["full_name"], "default_branch": repo.get("default_branch") or "main",
+            "private": bool(repo.get("private")), "html_url": repo.get("html_url") or f"https://github.com/{repo_full_name}"}
+
+
 def _existing_file_sha(pat: str, repo_full_name: str, path: str) -> str | None:
     response = requests.get(f"{GITHUB_API}/repos/{repo_full_name}/contents/{path}", headers=_headers(pat), timeout=_TIMEOUT)
     if response.status_code == 404:

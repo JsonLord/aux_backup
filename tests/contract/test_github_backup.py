@@ -3,6 +3,7 @@ import requests
 
 from apps.gradio.github_backup import (
     GitHubAuthError,
+    confirm_backup_repo,
     push_file,
     push_session_to_github,
     validate_and_list_repos,
@@ -140,3 +141,56 @@ def test_push_session_to_github_collects_errors_without_aborting(monkeypatch):
     assert result["pushed"] == ["sessions/ses_1/slides.html"]
     assert len(result["errors"]) == 1
     assert "report.json" in result["errors"][0]
+
+
+def _repo_response(status=200, payload=None):
+    class Response:
+        status_code = status
+        def raise_for_status(self):
+            if status >= 400:
+                raise requests.HTTPError(str(status))
+        def json(self):
+            return payload or {}
+    return Response()
+
+
+def test_fixing_a_backup_repo_verifies_this_repo_can_actually_receive_a_push(monkeypatch):
+    """Listing repos with push access is a snapshot taken at connect time. It does
+    not prove the chosen repo is still writable, and says nothing about the repo
+    being archived -- GitHub lists an archived repo with push permission and then
+    rejects every write to it."""
+    monkeypatch.setattr("apps.gradio.github_backup.requests.get", lambda *a, **k: _repo_response(
+        payload={"full_name": "ada/backups", "default_branch": "trunk", "private": True,
+                 "archived": False, "permissions": {"push": True},
+                 "html_url": "https://github.com/ada/backups"}))
+
+    details = confirm_backup_repo("ghp_x", "ada/backups")
+
+    assert details == {"full_name": "ada/backups", "default_branch": "trunk", "private": True,
+                       "html_url": "https://github.com/ada/backups"}
+
+
+@pytest.mark.parametrize("payload,expected", [
+    ({"full_name": "ada/backups", "permissions": {"push": False}}, "cannot write"),
+    ({"full_name": "ada/backups", "permissions": {"push": True}, "archived": True}, "archived"),
+])
+def test_fixing_a_backup_repo_refuses_a_repo_that_cannot_be_written_to(monkeypatch, payload, expected):
+    monkeypatch.setattr("apps.gradio.github_backup.requests.get",
+                        lambda *a, **k: _repo_response(payload=payload))
+    with pytest.raises(GitHubAuthError, match=expected):
+        confirm_backup_repo("ghp_x", "ada/backups")
+
+
+@pytest.mark.parametrize("status", [403, 404])
+def test_fixing_a_backup_repo_reports_an_unreachable_repo(monkeypatch, status):
+    monkeypatch.setattr("apps.gradio.github_backup.requests.get",
+                        lambda *a, **k: _repo_response(status=status))
+    with pytest.raises(GitHubAuthError, match="not reachable"):
+        confirm_backup_repo("ghp_x", "ada/backups")
+
+
+def test_fixing_a_backup_repo_needs_a_token_and_a_repo():
+    with pytest.raises(GitHubAuthError, match="Connect GitHub"):
+        confirm_backup_repo("", "ada/backups")
+    with pytest.raises(GitHubAuthError, match="Choose a repository"):
+        confirm_backup_repo("ghp_x", "")

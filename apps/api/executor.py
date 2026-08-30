@@ -271,8 +271,16 @@ class JobExecutor:
             cohort_runs, screenshot_bytes, raw_strengths, vision_error = self._collect_vision_pain_points(
                 journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
+            # The vision model has a "strengths" array and still puts praise in
+            # "issues" -- a live run published "Familiar and clean layout" as a
+            # medium-severity usability issue. Same rule as JourneyTest's mixed
+            # uxFindings bucket, applied to the other stage.
+            vision_praise = [item for item in vision_findings
+                             if _reads_as_praise(item.get("title"), item.get("summary"))]
+            vision_findings = [item for item in vision_findings if item not in vision_praise]
             findings.extend(vision_findings)
-            preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys))
+            preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys)
+                                              + self._praise_as_strengths(vision_praise))
                         + self._preserved_from_verdicts(journeys))
             evidence_language, journey_status = "observed", "completed"
             limitations = [
@@ -679,6 +687,22 @@ class JobExecutor:
                 finding["screenshotCrop"] = crop
                 finding["screenshotIsRegion"] = False
                 finding["screenshotRef"] = path
+
+    @staticmethod
+    def _praise_as_strengths(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Reshape synthesized findings that turned out to be praise into the record
+        _merge_strengths groups, keeping every persona the synthesis credited."""
+        strengths = []
+        for finding in findings:
+            persona_ids = finding.get("affectedPersonaIds") or (
+                [finding["personaId"]] if finding.get("personaId") else [None])
+            for persona_id in persona_ids:
+                strengths.append({"title": finding.get("title") or "Design decision that works",
+                                  "description": finding.get("summary") or "",
+                                  "elements": finding.get("elements") or [], "personaId": persona_id,
+                                  "route": finding.get("route"), "screenshotRef": finding.get("screenshotRef"),
+                                  "source": "eyeson-vision-synthesis"})
+        return strengths
 
     @staticmethod
     def _praise_from_verdicts(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:

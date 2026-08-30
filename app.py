@@ -16,7 +16,8 @@ import shutil
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
-from apps.gradio.github_backup import GitHubAuthError, push_session_to_github, validate_and_list_repos
+from apps.gradio.github_backup import (GitHubAuthError, confirm_backup_repo, push_session_to_github,
+                                        validate_and_list_repos)
 
 import gradio as gr
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -127,6 +128,14 @@ def workspace_access_message(error: Exception) -> str:
     if status in (401, 403):
         return ("\U0001f512 Your Hugging Face sign-in has expired. Reload the Space and sign in "
                 "again to see this workspace's sessions.")
+    if status == 404:
+        # The control plane answers 404 for a session that exists but belongs to a
+        # different workspace, so "not found" almost always means "not yours".
+        # Hugging Face OAuth identifies you by an opaque account id, not your
+        # username, so a session created under a differently-named workspace is
+        # invisible here even though it is the same person.
+        return ("\u26a0\ufe0f That session is not in the selected workspace. Check the Workspace "
+                "dropdown, or refresh the session list.")
     if status is not None:
         return f"\u26a0\ufe0f The control plane rejected the request (HTTP {status})."
     return f"\u26a0\ufe0f The control plane is unreachable: {error}."
@@ -777,11 +786,67 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         # server-side choices list is shared across concurrent sessions.
         github_repo_select = gr.Dropdown(label="Backup repository", choices=[], interactive=True,
                                          allow_custom_value=True, scale=3)
+        github_lock_btn = gr.Button("Fix repo for backup", scale=1)
     github_connect_status = gr.Markdown(
         "Optional. Bring a [fine-grained personal access token](https://github.com/settings/tokens?type=beta) "
         "with **Contents: Read and write** to back workspace sessions up to your own repo. The token is used "
         "live for each sync and is **never stored** on the server, so re-enter it after a page reload.")
     github_pat_state = gr.State("")
+    # The repository a backup will actually be written to, once verified. The
+    # dropdown is a choice; this is a commitment, and the sync reads *this* -- so a
+    # stray change to the dropdown afterwards cannot silently redirect a backup to
+    # the wrong repo.
+    github_locked_repo = gr.State("")
+    github_lock_banner = gr.HTML(visible=False)
+
+    _LOCK_BANNER = """
+    <style>
+      @keyframes aux-lock-in {{ from {{ opacity: 0; transform: translateY(-4px); }}
+                                to {{ opacity: 1; transform: none; }} }}
+      @keyframes aux-tick {{ to {{ stroke-dashoffset: 0; }} }}
+      @keyframes aux-ring {{ from {{ transform: scale(.6); opacity: 0; }}
+                             60% {{ transform: scale(1.08); opacity: 1; }}
+                             to {{ transform: scale(1); opacity: 1; }} }}
+      .aux-lock {{ display: flex; align-items: center; gap: .75rem; padding: .7rem .9rem;
+                   border: 1px solid #16794c; border-radius: .6rem; background: #ecfdf3; color: #12303f;
+                   animation: aux-lock-in .35s ease-out both; font-size: .95rem; }}
+      .aux-lock svg {{ flex: none; animation: aux-ring .45s cubic-bezier(.2,.8,.3,1) both; }}
+      .aux-lock .tick {{ stroke-dasharray: 26; stroke-dashoffset: 26;
+                         animation: aux-tick .5s .25s ease-out forwards; }}
+      .aux-lock code {{ background: #d6f5e3; padding: .1rem .35rem; border-radius: .25rem; }}
+      @media (prefers-color-scheme: dark) {{
+        .aux-lock {{ background: #06281b; border-color: #2f9e6b; color: #d6f5e3; }}
+        .aux-lock code {{ background: #0d3a28; }}
+      }}
+    </style>
+    <div class="aux-lock" role="status">
+      <svg width="26" height="26" viewBox="0 0 26 26" aria-hidden="true">
+        <circle cx="13" cy="13" r="11.5" fill="none" stroke="#16794c" stroke-width="2"></circle>
+        <path class="tick" d="M7.5 13.5 L11.3 17.2 L18.5 9.4" fill="none" stroke="#16794c"
+              stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"></path>
+      </svg>
+      <div>Backups are fixed to <code>{repo}</code>
+        <span style="opacity:.75">&middot; {visibility} &middot; default branch <code>{branch}</code></span>
+      </div>
+    </div>"""
+
+    def lock_backup_repo(pat, repo):
+        """Commit to one repository, having checked it can actually receive a push."""
+        try:
+            details = confirm_backup_repo(pat, repo)
+        except GitHubAuthError as error:
+            return gr.update(visible=False), "", f"Could not fix the repository: {error}"
+        except requests.exceptions.RequestException as error:
+            return gr.update(visible=False), "", f"GitHub request failed: {error}"
+        banner = _LOCK_BANNER.format(repo=escape(details["full_name"]),
+                                     visibility="private" if details["private"] else "public",
+                                     branch=escape(details["default_branch"]))
+        return (gr.update(visible=True, value=banner), details["full_name"],
+                f"Verified write access to [{details['full_name']}]({details['html_url']}).")
+
+    def unlock_backup_repo():
+        # The banner must never outlive the choice it describes.
+        return gr.update(visible=False), "", "Repository changed -- press **Fix repo for backup** to verify it."
 
     def connect_github(pat):
         try:
@@ -797,6 +862,10 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
     github_connect_btn.click(connect_github, [github_pat_input],
                              [github_repo_select, github_connect_status, github_pat_state])
+    github_lock_btn.click(lock_backup_repo, [github_pat_state, github_repo_select],
+                          [github_lock_banner, github_locked_repo, github_connect_status])
+    github_repo_select.change(unlock_backup_repo, None,
+                              [github_lock_banner, github_locked_repo, github_connect_status])
 
     def load_hf_workspaces(profile: gr.OAuthProfile | None):
         workspaces = workspaces_from_profile(dict(profile) if profile else None)
@@ -1403,7 +1472,8 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 if not pat:
                     return "Connect GitHub at the top of the page first."
                 if not repo:
-                    return "Choose a backup repository at the top of the page first."
+                    return ("Fix a backup repository at the top of the page first -- choose it, then press "
+                            "**Fix repo for backup**.")
                 if not session_id:
                     return "Choose a workspace session first."
                 session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
@@ -1418,7 +1488,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 return "\n".join(lines)
 
             github_sync_btn.click(sync_session_to_github,
-                                  [github_pat_state, github_repo_select, github_backup_session, workspace_selector],
+                                  [github_pat_state, github_locked_repo, github_backup_session, workspace_selector],
                                   [github_sync_status], api_name="sync_session_to_github")
 
         with gr.Tab("Agents.txt"):
