@@ -1306,3 +1306,26 @@ def test_one_design_decision_praised_two_ways_becomes_one_preserved_element():
     # The progress stepper is a different design decision, however similarly worded.
     assert "Effective progress indicator" in titles
     assert "Consistent color palette" in titles
+
+
+def test_the_quote_corpus_includes_non_interactive_page_text(tmp_path):
+    """The ".json" DOM captures carry only interactive elements, so checking a quote
+    against those alone would reject a true finding that quotes a heading. The
+    ".txt" accessibility trees journeytest-core writes beside them include the
+    non-interactive nodes, one per line with its visible text quoted."""
+    import json as json_module
+
+    dom = tmp_path / "001-click-e9-after-dom.json"
+    dom.write_text(json_module.dumps({"elements": [
+        {"selector": "#signin", "role": "button", "text": "Sign in with HF"}]}))
+    tree = tmp_path / "001-snapshot.txt"
+    tree.write_text('- generic "Run audits with synthetic users" [ref=e1] clickable\n'
+                    '  - heading "What UserSync does" [ref=e2]\n'
+                    '  - button "Sign in with HF" [ref=e9]\n')
+
+    corpus = JobExecutor._visible_text_corpus([{"artifacts": {"snapshots": [str(dom), str(tree)]}}])
+
+    assert "What UserSync does" in corpus  # a heading, absent from the DOM capture
+    assert JobExecutor._quote_is_on_page("What UserSync does", corpus)
+    assert JobExecutor._quote_is_on_page("Run audits", corpus)  # the start of a longer node
+    assert not JobExecutor._quote_is_on_page("Simulation Results", corpus)

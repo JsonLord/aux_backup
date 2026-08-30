@@ -574,16 +574,33 @@ class JobExecutor:
     # visible text, so the claim can simply be checked.
     _QUOTED_TEXT = re.compile(r"""['"\u201c\u2018]([^'"\u201c\u201d\u2018\u2019]{2,60})['"\u201d\u2019]""")
 
-    @staticmethod
-    def _visible_text_corpus(journeys: list[dict[str, Any]]) -> list[str]:
+    # journeytest-core's ".txt" snapshots are accessibility-tree dumps, one node per
+    # line with its visible text quoted:
+    #   - button "Sign in with HF" [ref=e9]
+    _ACCESSIBILITY_NODE_TEXT = re.compile(r'"([^"]*)"')
+
+    @classmethod
+    def _visible_text_corpus(cls, journeys: list[dict[str, Any]]) -> list[str]:
         """Every piece of text journeytest-core actually saw on the page, one entry
-        per captured element, across every snapshot of every run."""
+        per captured node, across every snapshot of every run.
+
+        Both snapshot kinds count. The ".json" DOM captures carry only interactive
+        elements, so checking a quote against those alone would reject a true finding
+        that quotes a heading or a paragraph; the ".txt" accessibility trees include
+        the non-interactive nodes too.
+        """
         corpus: list[str] = []
         for journey in journeys:
             for snapshot_path in (journey.get("artifacts") or {}).get("snapshots") or []:
                 try:
-                    snapshot = json.loads(Path(snapshot_path).read_text())
-                except (OSError, json.JSONDecodeError):
+                    body = Path(snapshot_path).read_text()
+                except OSError:
+                    continue
+                try:
+                    snapshot = json.loads(body)
+                except json.JSONDecodeError:
+                    corpus.extend(text.strip() for text in cls._ACCESSIBILITY_NODE_TEXT.findall(body)
+                                  if text.strip())
                     continue
                 if not isinstance(snapshot, dict):
                     continue
