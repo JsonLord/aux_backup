@@ -42,6 +42,11 @@ _CRITERION_TITLES = {
     ("tasks-blocked", "met"): "The journey was blocked before completion",
     ("tasks-blocked", "blocked"): "The journey was blocked before completion",
 }
+# The same rule for the criteria that were met: an "elements to preserve" entry
+# is a sentence about what works, not the engine's criterion id.
+_MET_CRITERION_TITLES = {
+    "tasks-completed": "Users can finish the tasks they came to do",
+}
 # Failures of the test harness itself. Real, worth reporting, but they are not
 # usability findings about the product and must not be numbered among them.
 _RUN_DIAGNOSTIC_PATTERNS = (
@@ -282,9 +287,12 @@ class JobExecutor:
                 if criterion_id in _FAIL_CRITERION_IDS or criterion.get("result") != "met":
                     continue
                 entry = preserved.setdefault(criterion_id, {
-                    "title": f"Flow completes: {criterion_id}",
-                    "description": criterion.get("explanation") or "The agent completed this criterion.",
-                    "elements": [], "personaIds": [], "routes": [], "screenshotRefs": [], "source": "verdict"})
+                    # Same rule as the findings: state it as something about the
+                    # user, not as the engine's own criterion label.
+                    "title": _MET_CRITERION_TITLES.get(criterion_id, "The flow completes as intended"),
+                    "description": criterion.get("explanation") or "Synthetic users completed this flow end to end.",
+                    "elements": [], "personaIds": [], "routes": [], "screenshotRefs": [], "source": "verdict",
+                    "criterionId": criterion_id})
                 persona_id = journey.get("profileId") or journey.get("testerProfileId")
                 if persona_id and persona_id not in entry["personaIds"]:
                     entry["personaIds"].append(persona_id)

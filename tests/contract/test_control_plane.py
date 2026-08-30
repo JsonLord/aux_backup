@@ -721,7 +721,9 @@ def test_preserved_from_verdicts_uses_met_pass_criteria_only():
         {"profileId": "p2", "verdict": {"criteria": [{"id": "tasks-completed", "result": "met"}]}},
     ])
 
-    assert [item["title"] for item in preserved] == ["Flow completes: tasks-completed"]
+    # Stated as something about the user, not as the engine's criterion label.
+    assert [item["title"] for item in preserved] == ["Users can finish the tasks they came to do"]
+    assert preserved[0]["criterionId"] == "tasks-completed"
     assert preserved[0]["observedByPersonas"] == 2
 
 
