@@ -1,7 +1,8 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique } = require("../src/visionCritique");
+const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
+  VisionUnavailableError } = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
 
 test("buildPrompt includes the real element list so findings can reference actual selectors", () => {
@@ -207,4 +208,43 @@ test("buildPrompt asks for strengths as well as issues", () => {
   const { system } = buildPrompt({ url: "https://example.com", task: "Buy", elements: [] });
   assert.match(system, /"strengths"/);
   assert.match(system, /preserved/);
+});
+
+
+test("a provider outage is reported as unavailable, not as an invalid request", async (t) => {
+  // A live run's report said only "Vision-based UX critique was attempted but
+  // failed: HTTP Error 422: Unprocessable Entity". 422 reads as "your request was
+  // malformed", so it sent the reader looking at the payload while the real cause
+  // -- the model endpoint -- went unnamed. An outage and a bad request must not
+  // answer with the same status.
+  t.mock.method(globalThis, "fetch", async () => ({ ok: false, status: 502,
+    text: async () => "Bad Gateway" }));
+  const failure = await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "t", elements: [],
+    options: { apiKey: "k", baseUrl: "https://router.invalid/v1", maxAttempts: 1, retryWaitMs: 0 },
+  }).then(() => null, (error) => error);
+
+  assert.ok(failure instanceof VisionUnavailableError);
+  assert.equal(failure.status, 502);
+  assert.equal(failure.code, "vision_upstream_failed");
+  assert.match(failure.message, /vision critique failed after 1 attempts/);
+});
+
+test("a missing credential is reported as not configured, not as an invalid request", async () => {
+  const original = { key: process.env.OPENAI_API_KEY, blablador: process.env.BLABLADOR_API_KEY };
+  delete process.env.OPENAI_API_KEY;
+  delete process.env.BLABLADOR_API_KEY;
+  try {
+    const failure = await critiqueScreenshot({
+      imageBase64: "Zm9v", url: "https://example.com", task: "t", elements: [],
+      options: { baseUrl: "https://router.invalid/v1" },
+    }).then(() => null, (error) => error);
+
+    assert.ok(failure instanceof VisionUnavailableError);
+    assert.equal(failure.status, 503);
+    assert.equal(failure.code, "vision_not_configured");
+  } finally {
+    if (original.key !== undefined) process.env.OPENAI_API_KEY = original.key;
+    if (original.blablador !== undefined) process.env.BLABLADOR_API_KEY = original.blablador;
+  }
 });

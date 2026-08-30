@@ -1329,3 +1329,35 @@ def test_the_quote_corpus_includes_non_interactive_page_text(tmp_path):
     assert JobExecutor._quote_is_on_page("What UserSync does", corpus)
     assert JobExecutor._quote_is_on_page("Run audits", corpus)  # the start of a longer node
     assert not JobExecutor._quote_is_on_page("Simulation Results", corpus)
+
+
+def test_a_worker_failure_is_reported_with_what_the_worker_said():
+    """A live run's report explained a missing vision critique with nothing but
+    "failed: HTTP Error 422: Unprocessable Entity" -- urllib's rendering of the
+    status line. The worker's own explanation was in the response body, and the
+    body was being thrown away."""
+    import json as json_module
+    from io import BytesIO
+    from urllib import request as urllib_request
+
+    detailed = urllib_request.HTTPError(
+        "http://127.0.0.1:8081/v1/journey-evidence-analyses", 502, "Bad Gateway", {},
+        BytesIO(json_module.dumps({"error": "vision_upstream_failed",
+                                   "message": "vision critique failed after 3 attempts: fetch failed"}).encode()))
+    bodyless = urllib_request.HTTPError(
+        "http://127.0.0.1:8081/v1/journey-evidence-analyses", 500, "Server Error", {}, BytesIO(b"not json"))
+
+    assert JobExecutor._worker_error(detailed) == (
+        "HTTP 502 from the eyeson worker: vision critique failed after 3 attempts: fetch failed")
+    assert "500" in JobExecutor._worker_error(bodyless)
+    assert JobExecutor._worker_error(OSError("connection refused")) == "connection refused"
+
+
+def test_the_client_waits_out_the_workers_own_retries(monkeypatch):
+    """visionCritique.js makes up to 3 attempts at a 60s timeout with backoff --
+    about 186s in the worst case. The previous 90s wait cut the worker off
+    mid-retry and turned a slow-but-recoverable call into a client-side timeout."""
+    monkeypatch.delenv("EYESON_VISION_TIMEOUT", raising=False)
+    assert JobExecutor._vision_timeout() >= 186
+    monkeypatch.setenv("EYESON_VISION_TIMEOUT", "45")
+    assert JobExecutor._vision_timeout() == 45

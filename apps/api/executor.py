@@ -863,6 +863,36 @@ class JobExecutor:
 
     _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
 
+    @staticmethod
+    def _vision_timeout() -> float:
+        """Long enough to outlast the worker's own retries.
+
+        visionCritique.js makes up to 3 attempts at a 60s timeout with backoff
+        between them -- about 186s in the worst case. Waiting the previous 90s cut
+        the worker off mid-retry and turned a slow-but-recoverable model call into
+        a client-side timeout with nothing to show for it.
+        """
+        return float(os.getenv("EYESON_VISION_TIMEOUT", "200"))
+
+    @staticmethod
+    def _worker_error(error: Exception) -> str:
+        """What the worker actually said went wrong.
+
+        `str(HTTPError)` is only "HTTP Error 422: Unprocessable Entity"; the reason
+        is in the response body. A live run's report carried exactly that string as
+        its entire explanation of why the vision critique produced nothing, which
+        reads as a malformed request and named neither the real cause nor where to
+        look for it.
+        """
+        if not isinstance(error, request.HTTPError):
+            return str(error)
+        try:
+            detail = json.loads(error.read())
+            message = detail.get("message") or detail.get("error") or ""
+        except (OSError, ValueError, AttributeError):
+            message = ""
+        return f"HTTP {error.code} from the eyeson worker: {message}" if message else str(error)
+
     @classmethod
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
                                      personas: list[dict[str, Any]], url: str | None
@@ -916,10 +946,10 @@ class JobExecutor:
                     call = request.Request(f"{worker_url.rstrip('/')}/v1/journey-evidence-analyses",
                         data=payload, headers={"content-type": "application/json"}, method="POST")
                     try:
-                        with request.urlopen(call, timeout=float(os.getenv("EYESON_VISION_TIMEOUT", "90"))) as response:
+                        with request.urlopen(call, timeout=cls._vision_timeout()) as response:
                             result = json.loads(response.read())
                     except (request.HTTPError, OSError, ValueError) as error:
-                        last_error = str(error)
+                        last_error = cls._worker_error(error)
                         continue
                     pain_points.extend(result.get("painPoints", []))
                     for strength in result.get("strengths", []):
@@ -1204,7 +1234,10 @@ class JobExecutor:
         try:
             with request.urlopen(call, timeout=float(os.getenv("EYESON_VISION_TIMEOUT", "90"))) as response:
                 root_causes = json.loads(response.read()).get("rootCauses", [])
-        except (request.HTTPError, OSError, ValueError):
+        except (request.HTTPError, OSError, ValueError) as error:
+            # Cross-persona synthesis failing silently turned every vision finding
+            # into nothing at all, with no trace of why.
+            print(f"[executor] cohort aggregation failed: {cls._worker_error(error)}", flush=True)
             return []
         pain_point_by_id = {point["id"]: point for run in cohort_runs for point in run["painPoints"]}
         findings = []

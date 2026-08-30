@@ -124,7 +124,11 @@ const server = http.createServer(async (request, response) => {
     }
     return json(response, 404, { error: "not_found" });
   } catch (error) {
-    return json(response, 422, { error: "invalid_evidence", message: error.message });
+    // A vision-provider outage or a missing credential is not a malformed request.
+    // Answering 422 "invalid_evidence" for it sent callers looking at their own
+    // payload while the real cause -- the model endpoint -- went unnamed.
+    return json(response, error.status || 422,
+      { error: error.code || "invalid_evidence", message: error.message });
   }
 });
 if (require.main === module) server.listen(Number(process.env.PORT || 8081), "0.0.0.0");

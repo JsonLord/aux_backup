@@ -34,6 +34,23 @@
 const { createHash } = require("node:crypto");
 const { CuratedUXKnowledgeProvider, groundPainPoint } = require("./knowledge");
 
+/**
+ * A vision critique that could not be produced because the model endpoint was
+ * unavailable or not configured -- not because the caller sent a bad request.
+ * Carries the HTTP status the worker should answer with, so an upstream outage
+ * is not reported to the caller as "invalid_evidence" (it was: a live run's
+ * report said only "failed: HTTP Error 422: Unprocessable Entity", which reads
+ * as our request being malformed and hid a provider failure entirely).
+ */
+class VisionUnavailableError extends Error {
+  constructor(message, status, code) {
+    super(message);
+    this.name = "VisionUnavailableError";
+    this.status = status;
+    this.code = code;
+  }
+}
+
 const FINDING_CATEGORIES = ["accessibility", "usability", "visual_design", "copy", "navigation"];
 const ELEMENT_ROLES = ["trigger", "cause", "feedback", "obstacle", "recovery"];
 // Maps this module's finding categories onto knowledge.js's curated-source
@@ -182,7 +199,8 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
       clearTimeout(timeout);
     }
   }
-  throw new Error(`vision critique failed after ${maxAttempts} attempts: ${lastError?.message}`);
+  throw new VisionUnavailableError(
+    `vision critique failed after ${maxAttempts} attempts: ${lastError?.message}`, 502, "vision_upstream_failed");
 }
 
 /**
@@ -194,7 +212,11 @@ async function critiqueScreenshot({ imageBase64, elements = [], url, task, perso
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY || process.env.BLABLADOR_API_KEY;
   const baseUrl = options.baseUrl || process.env.OPENAI_COMPATIBLE_ENDPOINT || process.env.OPENAI_BASE_URL || process.env.BLABLADOR_BASE_URL;
   const model = options.model || process.env.OPENAI_MODEL || "auto";
-  if (!apiKey || !baseUrl) throw new Error("OPENAI_API_KEY/OPENAI_BASE_URL (or BLABLADOR_* aliases) are required for vision critique");
+  if (!apiKey || !baseUrl) {
+    throw new VisionUnavailableError(
+      "OPENAI_API_KEY/OPENAI_BASE_URL (or BLABLADOR_* aliases) are required for vision critique",
+      503, "vision_not_configured");
+  }
   const { system, user } = buildPrompt({ url, task, personaSummary, elements });
   const content = await completeVision({ systemPrompt: system, userText: user, imageBase64, model, apiKey, baseUrl,
     maxAttempts: options.maxAttempts, retryWaitMs: options.retryWaitMs, timeoutMs: options.timeoutMs });
@@ -253,4 +275,4 @@ function toPainPoint(finding, context) {
 }
 
 module.exports = { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
-  FINDING_CATEGORIES, ELEMENT_ROLES };
+  VisionUnavailableError, FINDING_CATEGORIES, ELEMENT_ROLES };
