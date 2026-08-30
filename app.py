@@ -1886,8 +1886,11 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             live_follow.change(lambda mode, following: gr.update(active=bool(mode == "Live" and following)),
                                [recordings_mode, live_follow], [live_timer])
             live_refresh.click(live_run_choices, None, [live_run, live_note], api_name="list_live_runs")
+            # api_name so the live view can be exercised against a real running
+            # journey, not only through the browser.
             live_timer.tick(poll_live_run, [live_run, live_follow],
-                            [live_frame, live_thoughts, live_note, live_timer])
+                            [live_frame, live_thoughts, live_note, live_timer],
+                            api_name="poll_live_run")
             evidence_session.change(discover_recordings, [evidence_session, workspace_selector],
                                     [journey_runs_state, recording_slider, compare_pick, gallery_run, journey_status],
                                     api_name="list_journey_runs")
