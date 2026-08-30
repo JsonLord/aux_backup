@@ -1388,3 +1388,46 @@ def test_vision_stage_praise_is_preserved_not_filed_as_an_issue():
     merged = JobExecutor._merge_strengths(strengths)
     assert len(merged) == 1
     assert merged[0]["observedByPersonas"] == 2
+
+
+def test_persona_thoughts_prefer_the_models_real_reasoning_over_verdict_prose():
+    """The report used to quote the agent's end-of-run verdict prose, which reads as
+    generic UX commentary written after the fact rather than what the model was
+    thinking while it drove the browser. journeytest-core keeps only `text` content
+    blocks when recording an assistant turn and drops the `thinking` blocks a
+    reasoning model returns, so the journey worker now captures the reasoning from
+    the completions responses themselves."""
+    journey = {
+        "runId": "run_1",
+        "reasoning": [
+            {"elapsedMs": 4200, "text": "The header says 'SyncUsers' which tells me nothing about "
+                                        "what this does. I will click it to find out.", "model": "auto"},
+            {"elapsedMs": 900, "text": "The page has loaded. I need to find a way in.", "model": "auto"},
+        ],
+        "timeline": [{"type": "browser.click", "summary": "Clicked 'SyncUsers'", "elapsedMs": 5000}],
+        "verdict": {"summary": "Completed all tasks.",
+                    "uxFindings": [{"title": "Jargon", "description": "The heading uses technical jargon."}]},
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+    reasoning = [item for item in thoughts if item["kind"] == "reasoning"]
+
+    assert [item["source"] for item in reasoning] == ["model.reasoning", "model.reasoning"]
+    # In the order the model produced it, and it is the model's words, not the verdict's.
+    assert reasoning[0]["text"].startswith("The header says 'SyncUsers'")
+    assert all("technical jargon" not in item["text"] for item in reasoning)
+    # The browser action is still there, so the log reads as a journey.
+    assert any(item["kind"] == "action" for item in thoughts)
+
+
+def test_verdict_prose_is_still_used_when_no_reasoning_was_captured():
+    """A run whose provider returned no reasoning must not report that the persona
+    thought nothing -- but it must say where the words came from."""
+    journey = {"runId": "run_1", "reasoning": [], "timeline": [],
+               "verdict": {"summary": "Completed all tasks.",
+                           "uxFindings": [{"title": "Jargon", "description": "The heading uses jargon."}]}}
+
+    sources = {item["source"] for item in JobExecutor._persona_thoughts(journey)}
+
+    assert sources == {"verdict", "verdict.uxFindings"}
+    assert "model.reasoning" not in sources

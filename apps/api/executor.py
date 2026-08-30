@@ -344,14 +344,23 @@ class JobExecutor:
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
         self._attach_verdict_screenshots(findings, journeys)
         self._attach_redesigns(findings, data.get("url"))
-        if any(item.get("source", "").startswith("verdict")
-               for thoughts in thoughts_by_persona.values() for item in thoughts):
+        sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
+        if "model.reasoning" in sources:
             limitations.append(
-                "Persona quotes on these findings come from each agent's own end-of-run verdict prose, "
-                "not its live per-step reasoning: journeytest-core records only assistant `text` content "
-                "blocks into the timeline, and the configured model returns its reasoning in `thinking` "
-                "blocks, which are dropped before the event is written. The quotes are the agent's own "
-                "words about what it hit; they are just written at the end of the run rather than during it."
+                "Persona quotes are the director model's own reasoning tokens for each request, captured "
+                "from the completions responses themselves. journeytest-core records only assistant `text` "
+                "content blocks into the timeline and drops the `thinking` blocks a reasoning model returns, "
+                "so this is read one layer lower, where nothing discards it. It is what the model was "
+                "actually thinking while it drove the browser -- not a summary of it, and not written after "
+                "the fact."
+            )
+        if any(source.startswith("verdict") for source in sources):
+            limitations.append(
+                "Some persona quotes come from an agent's own end-of-run verdict prose rather than its live "
+                "reasoning, because no reasoning was captured for that run. Those are retrospective review "
+                "written after the fact -- the agent's own words about what it hit, but not what it was "
+                "thinking at the time. Every quote carries the source it came from (`model.reasoning`, "
+                "`timeline`, or `verdict*`); they are not interchangeable."
             )
         return {"schema_version": "1.1", "mode": "user_journey", "url": data.get("url"),
                 "executive_summary": self._executive_summary(data.get("url"), tasks, personas, findings, preserve),
@@ -1178,13 +1187,29 @@ class JobExecutor:
         the assistant message's `content.type === "text"` blocks; a reasoning model
         returns its thinking in `thinking` blocks instead, which are dropped before
         the event is written. Verified against a live two-persona run: 12 `thinking`
-        blocks across the run, and zero events carrying `data.text`. So this reads
-        `data.text` when the provider does emit text blocks, and otherwise falls
-        back to the agent's own prose that *is* recorded -- its verdict summary and
-        the descriptions it wrote for each finding -- rather than reporting that the
-        persona thought nothing. Every item says which of the two it came from.
+        blocks across the run, and zero events carrying `data.text`.
+
+        So the journey worker now captures the model's reasoning from the
+        completions responses themselves, below the layer that discards it
+        (services/journey-worker/node/src/reasoningCapture.js), and returns it on
+        the run as `reasoning`. Those are the model's real thinking tokens for that
+        request -- what it was actually thinking while it drove the browser -- and
+        they are preferred over everything else here.
+
+        The two fallbacks remain for a run that has none: `data.text` when the
+        provider emits ordinary text blocks, and otherwise the agent's own
+        end-of-run prose (its verdict summary and finding descriptions). That last
+        one is retrospective review written after the fact, not live thought, so it
+        reads as generic UX commentary -- every item is labelled with which of the
+        three it came from, and nothing else in the report may present them as
+        equivalent.
         """
-        thoughts: list[dict[str, Any]] = []
+        thoughts: list[dict[str, Any]] = [
+            {"kind": "reasoning", "source": "model.reasoning", "text": str(item.get("text") or "").strip(),
+             "elapsedMs": item.get("elapsedMs"), "model": item.get("model")}
+            for item in (journey.get("reasoning") or [])
+            if str(item.get("text") or "").strip()
+        ]
         for event in journey.get("timeline") or []:
             event_type, data = event.get("type", ""), event.get("data") or {}
             elapsed, task_id = event.get("elapsedMs"), event.get("taskId")

@@ -10,7 +10,7 @@
     "agent-browser": "0.31.1"
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/behavior.js && node --check src/evidence.js && node --check src/physical.js && node --check src/replay.js && node --check src/safety.js && node --check src/journeytest.js",
+    "check": "node --check src/index.js && node --check src/behavior.js && node --check src/evidence.js && node --check src/physical.js && node --check src/replay.js && node --check src/safety.js && node --check src/journeytest.js && node --check src/reasoningCapture.js",
     "start": "node src/index.js",
     "test": "node --test test/*.test.js"
   }

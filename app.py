@@ -1193,7 +1193,18 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     lines = [f"## {status_emoji} {name} — run `{run.get('runId', '?')}`",
                               f"**Verdict:** {verdict.get('status', 'unknown')} ({verdict.get('confidence', 'n/a')} confidence)",
                               f"\n{verdict.get('summary', '_No summary recorded._')}\n"]
-                    timeline = run.get("timeline") or []
+                    # The model's real reasoning is captured from the completions
+                    # responses (services/journey-worker/node/src/reasoningCapture.js)
+                    # because journeytest-core drops `thinking` blocks before writing
+                    # the timeline. Interleave it by elapsed time so the log reads as
+                    # one journey rather than two parallel streams.
+                    timeline = sorted(
+                        list(run.get("timeline") or []) + [
+                            {"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
+                             "data": {"text": item.get("text")}}
+                            for item in (run.get("reasoning") or [])
+                            if str(item.get("text") or "").strip()],
+                        key=lambda event: event.get("elapsedMs") or 0)
                     if timeline:
                         lines.append("**What happened, in the persona's own words:**\n")
                         for event in timeline:
@@ -1205,7 +1216,12 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                             # "Assistant message ended" -- the model's actual reasoning
                             # lives in data.text. Rendering `summary` alone (as this
                             # did) showed none of the thinking the tab exists for.
-                            if event_type == "agent.message.end" and str(event_data.get("text") or "").strip():
+                            if event_type == "model.reasoning":
+                                # The model's own thinking tokens for that request,
+                                # read off the wire -- not a summary of them.
+                                thought = str(event_data["text"]).strip()
+                                lines.append(f"> 💭 {thought}\n>\n> — _model reasoning{when}_\n")
+                            elif event_type == "agent.message.end" and str(event_data.get("text") or "").strip():
                                 thought = str(event_data["text"]).strip()
                                 lines.append(f"> 💭 {thought}\n>\n> — _thinking{when}_\n")
                             elif event_type == "agent.message.error" and event_data.get("errorMessage"):

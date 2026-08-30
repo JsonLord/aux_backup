@@ -2,6 +2,8 @@
 
 const path = require("node:path");
 
+const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
+
 function safeId(value, fallback) {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, "-");
   return (normalized || fallback).slice(0, 24);
@@ -72,13 +74,26 @@ async function runWithJourneyTest(input) {
     // Pi's built-in catalog cannot know arbitrary OpenAI-compatible model IDs.
     // Supply the documented model contract while retaining the pinned director.
     director = new core.PiSdkDirector({
+      // pi-ai gates the `reasoning_effort` request parameter and the
+      // provider-specific thinking formats on this flag
+      // (dist/api/openai-completions.js). Off by default: the configured router
+      // already returns reasoning without being asked -- a live run recorded 12
+      // `thinking` blocks with this false -- and asking for reasoning_effort on a
+      // route that rejects the parameter would fail the whole journey.
+      // JOURNEY_MODEL_REASONING=1 turns it on for a router known to accept it.
       model: { id: modelId, name: modelId, provider, api: "openai-completions", baseUrl,
-        reasoning: false, input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+        reasoning: process.env.JOURNEY_MODEL_REASONING === "1",
+        input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
         contextWindow: 128000, maxTokens: 16384 },
       getApiKey: () => apiKey,
     });
   }
   const outputDir = input.artifactDirectory || process.env.JOURNEY_ARTIFACT_ROOT || "/tmp/aux-journeys";
+  // journeytest-core keeps only `text` content blocks when it records an
+  // assistant turn, so the model's real thinking never reaches the run
+  // artifacts. Capture it from the completions responses instead.
+  const captureId = String(input.runId || `run-${Date.now()}`);
+  startRunCapture(captureId);
   const result = await core.runJourney({
     journey: journeyContract(input),
     profile: testerContract(input.profile),
@@ -89,7 +104,8 @@ async function runWithJourneyTest(input) {
     browserEnvironment: input.browserEnvironment,
     uiChangeRecording: true,
   });
-  return { ...result, profileId: input.profile.id, simulationProfile: input.profile };
+  return { ...result, profileId: input.profile.id, simulationProfile: input.profile,
+    reasoning: takeRunReasoning(captureId) };
 }
 
 module.exports = { journeyContract, loadJourneyTest, runWithJourneyTest, testerContract };
