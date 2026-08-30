@@ -2,6 +2,7 @@ import os
 import sys
 
 import base64
+from io import BytesIO
 import subprocess
 import importlib.util
 import re
@@ -876,6 +877,90 @@ def frame_document(document: str, title: str, height: str = "78vh") -> str:
             'border-radius:.5rem;display:block;background:#fff"></iframe>')
 
 
+def _thumbnail_data_uri(image_bytes: bytes, max_width: int = 1100, quality: int = 70,
+                        max_height: int = 2600) -> str:
+    """A screenshot, downscaled and JPEG-encoded for inlining.
+
+    The evidence viewer inlines a whole run's screenshots into one document, and a
+    run's full-page PNGs are 100-250 KB each (two nova-test pages were over
+    8,000px tall after scaling). Measured on a real seven-frame run: 2,146 KB
+    unbounded, 877 KB with the height capped here.
+
+    The cap costs nothing to read. The viewer fits each frame to the window with
+    `object-fit:contain`, so an 8,000px page renders about 500px tall either way --
+    keeping the visible top at a legible scale is strictly better than shrinking
+    the whole thing into an unreadable strip.
+    """
+    try:
+        from PIL import Image
+    except ImportError:
+        return "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+    try:
+        with Image.open(BytesIO(image_bytes)) as image:
+            if image.width > max_width:
+                ratio = max_width / float(image.width)
+                image = image.resize((max_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+            if max_height and image.height > max_height:
+                image = image.crop((0, 0, image.width, max_height))
+            buffer = BytesIO()
+            image.convert("RGB").save(buffer, format="JPEG", quality=quality, optimize=True)
+            return "data:image/jpeg;base64," + base64.b64encode(buffer.getvalue()).decode("ascii")
+    except (OSError, ValueError):
+        return "data:image/png;base64," + base64.b64encode(image_bytes).decode("ascii")
+
+
+def build_evidence_series(frames: list[dict]) -> str:
+    """A run's screenshots as a click-through series, one per view.
+
+    The Evidence tab shows a single artifact chosen from a dropdown of fifty-odd,
+    which is the wrong shape for what these are: consecutive frames of one journey.
+    Same interaction as the slide deck -- click anywhere, the arrow buttons, or the
+    arrow keys -- so both viewers behave alike.
+    """
+    if not frames:
+        return ""
+    slides = "".join(
+        f'<figure class="frame{" active" if index == 0 else ""}">'
+        f'<img src="{escape(frame["src"], quote=True)}" alt="{escape(frame["caption"], quote=True)}">'
+        f'<figcaption><span class="step">{index + 1} / {len(frames)}</span>'
+        f'<strong>{escape(frame["caption"])}</strong>'
+        + (f'<span class="run">{escape(frame["run"])}</span>' if frame.get("run") else "")
+        + "</figcaption></figure>"
+        for index, frame in enumerate(frames))
+    return f"""<!doctype html><html><head><meta charset=utf-8>
+<meta name=viewport content='width=device-width,initial-scale=1'><title>Journey evidence</title><style>
+*{{box-sizing:border-box}}
+body{{margin:0;font:15px/1.5 system-ui,sans-serif;background:#0f172a;color:#e2e8f0;overflow:hidden}}
+.series{{position:relative;height:100vh;width:100vw;cursor:pointer}}
+.frame{{position:absolute;inset:0;margin:0;display:none;flex-direction:column;align-items:center;
+       justify-content:flex-start;gap:.6rem;padding:1rem 1rem 3.4rem}}
+.frame.active{{display:flex}}
+.frame img{{max-width:100%;max-height:calc(100vh - 6rem);object-fit:contain;
+           border-radius:.4rem;border:1px solid #334155;background:#fff}}
+figcaption{{display:flex;align-items:baseline;gap:.7rem;flex-wrap:wrap;justify-content:center}}
+.step{{font-variant-numeric:tabular-nums;opacity:.6}}
+.run{{opacity:.45;font-size:.8rem}}
+.nav{{position:fixed;left:0;right:0;bottom:.6rem;display:flex;gap:.5rem;justify-content:center}}
+.nav button{{font-size:1rem;padding:.35rem 1.1rem;border-radius:999px;border:1px solid #334155;
+            background:#1e293b;color:#e2e8f0;cursor:pointer}}
+.nav button:hover{{background:#334155}}
+</style></head><body>
+<div class="series">{slides}</div>
+<div class="nav"><button id="prev" aria-label="Previous frame">&larr;</button>
+<button id="next" aria-label="Next frame">&rarr;</button></div>
+<script>
+const frames=document.querySelectorAll('.frame');let current=0;
+function show(index){{current=Math.max(0,Math.min(frames.length-1,index));
+  frames.forEach((f,i)=>f.classList.toggle('active',i===current));}}
+document.querySelector('#next').onclick=(e)=>{{e.stopPropagation();show(current+1);}};
+document.querySelector('#prev').onclick=(e)=>{{e.stopPropagation();show(current-1);}};
+document.addEventListener('keydown',(e)=>{{if(e.key==='ArrowRight'||e.key===' ')show(current+1);
+  if(e.key==='ArrowLeft')show(current-1);}});
+document.querySelector('.series').addEventListener('click',()=>show(current+1));
+show(0);
+</script></body></html>"""
+
+
 # The Persona Thought Logs tab opens on the first of these kinds.
 log_choices_kinds = ("journey.log", "persona.profile")
 
@@ -1485,6 +1570,109 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             evidence_video = gr.Video(label="Session recording", visible=False)
             with gr.Accordion("Raw content", open=False):
                 evidence_viewer = gr.Code(label="Evidence content", lines=24)
+
+            gr.Markdown("### Watch the journey\nEvery run is recorded, and its screenshots are consecutive "
+                        "frames of one journey rather than fifty unrelated files. Pick a persona run to play "
+                        "its recording, or step through its screenshots one at a time.")
+            with gr.Row():
+                journey_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
+                journey_refresh = gr.Button("Find runs")
+                journey_play = gr.Button("Play recording", variant="primary")
+                journey_series_btn = gr.Button("Step through screenshots")
+            journey_status = gr.Markdown()
+            journey_video = gr.Video(label="Journey recording", visible=False)
+            journey_series = gr.HTML(visible=False)
+
+            def journey_run_choices(session_id, workspace_id,
+                                    oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                """One entry per persona run, from the run id every capture carries."""
+                if not session_id:
+                    return gr.update(choices=[], value=None), "Select a workspace session first."
+                try:
+                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    artifacts = session_client.list_artifacts(session_id)
+                except (PermissionError, requests.RequestException) as error:
+                    return gr.update(choices=[], value=None), workspace_access_message(error)
+                runs = {}
+                for artifact in artifacts:
+                    if artifact["kind"] not in ("browser.video", "browser.screenshot"):
+                        continue
+                    run_id = (artifact.get("metadata") or {}).get("run_id")
+                    if not run_id:
+                        continue
+                    entry = runs.setdefault(run_id, {"shots": 0, "video": None})
+                    if artifact["kind"] == "browser.video":
+                        entry["video"] = artifact["artifact_id"]
+                    else:
+                        entry["shots"] += 1
+                if not runs:
+                    return gr.update(choices=[], value=None), "No browser recordings or screenshots on this session."
+                choices = [(f"Run {position} \u00b7 {entry['shots']} screenshot(s)"
+                            + ("" if entry["video"] else " \u00b7 no recording"), run_id)
+                           for position, (run_id, entry) in enumerate(sorted(runs.items()), start=1)]
+                return gr.update(choices=choices, value=choices[0][1]), f"Found {len(choices)} persona run(s)."
+
+            def _run_artifacts(session_id, run_id, kind, workspace_id, oauth_profile, oauth_token):
+                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                artifacts = [item for item in session_client.list_artifacts(session_id)
+                             if item["kind"] == kind and (item.get("metadata") or {}).get("run_id") == run_id]
+                # Capture order: journeytest-core numbers each action's captures, and
+                # the un-numbered framing shots bracket the run.
+                def order(item):
+                    stem = str((item.get("metadata") or {}).get("capture_stem") or "")
+                    if stem.startswith("initial"):
+                        return (0, stem)
+                    if stem.startswith("final"):
+                        return (2, stem)
+                    return (1, stem)
+                return session_client, sorted(artifacts, key=order)
+
+            def play_journey_video(session_id, run_id, workspace_id,
+                                   oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                if not session_id or not run_id:
+                    return "Pick a persona run first.", gr.update(visible=False)
+                try:
+                    session_client, videos = _run_artifacts(session_id, run_id, "browser.video",
+                                                            workspace_id, oauth_profile, oauth_token)
+                    if not videos:
+                        return "This run has no recording stored.", gr.update(visible=False)
+                    path = session_client.download_artifact(videos[0])
+                except (PermissionError, requests.RequestException) as error:
+                    return workspace_access_message(error), gr.update(visible=False)
+                return f"Recording of run `{run_id}`.", gr.update(visible=True, value=path)
+
+            def show_journey_series(session_id, run_id, workspace_id,
+                                    oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                if not session_id or not run_id:
+                    return "Pick a persona run first.", gr.update(visible=False)
+                try:
+                    session_client, shots = _run_artifacts(session_id, run_id, "browser.screenshot",
+                                                           workspace_id, oauth_profile, oauth_token)
+                    frames = []
+                    for artifact in shots:
+                        path = session_client.download_artifact(artifact)
+                        try:
+                            image_bytes = Path(path).read_bytes()
+                        except OSError:
+                            continue
+                        frames.append({"src": _thumbnail_data_uri(image_bytes),
+                                       "caption": (artifact.get("metadata") or {}).get("capture_stem")
+                                                  or artifact["artifact_id"],
+                                       "run": run_id})
+                except (PermissionError, requests.RequestException) as error:
+                    return workspace_access_message(error), gr.update(visible=False)
+                if not frames:
+                    return "This run has no screenshots stored.", gr.update(visible=False)
+                document = build_evidence_series(frames)
+                return (f"{len(frames)} frame(s) from run `{run_id}` \u2014 click, or use the arrow keys.",
+                        gr.update(visible=True, value=frame_document(document, "Journey evidence series")))
+
+            journey_refresh.click(journey_run_choices, [evidence_session, workspace_selector],
+                                  [journey_run, journey_status], api_name="list_journey_runs")
+            journey_play.click(play_journey_video, [evidence_session, journey_run, workspace_selector],
+                               [journey_status, journey_video], api_name="play_journey_video")
+            journey_series_btn.click(show_journey_series, [evidence_session, journey_run, workspace_selector],
+                                     [journey_status, journey_series], api_name="show_journey_series")
 
             def load_evidence(session_id, artifact_id, workspace_id,
                               oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):

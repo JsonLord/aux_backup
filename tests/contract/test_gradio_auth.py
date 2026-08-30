@@ -191,3 +191,50 @@ def test_a_framed_document_gets_its_own_viewport_instead_of_leaking_onto_the_pag
     assert 'title="Saved UX presentation"' in framed
     # Sized by style, not a fixed pixel attribute, so it fits the window.
     assert "width=" not in framed and "height=" not in framed.replace("height:78vh", "")
+
+
+def test_the_evidence_series_shows_one_frame_per_view_in_capture_order():
+    """A run's screenshots are consecutive frames of one journey, not fifty
+    unrelated files picked from a dropdown."""
+    import app as gradio_app
+
+    frames = [{"src": "data:image/jpeg;base64,AAA", "caption": "initial-view", "run": "run_1"},
+              {"src": "data:image/jpeg;base64,BBB", "caption": "001-click-e21-after", "run": "run_1"},
+              {"src": "data:image/jpeg;base64,CCC", "caption": "final-view", "run": "run_1"}]
+
+    document = gradio_app.build_evidence_series(frames)
+
+    assert document.count('class="frame') == 3
+    # Exactly one starts active, and only the active one is displayed.
+    assert document.count('class="frame active"') == 1
+    assert ".frame{" in document.replace("\n", "") or "display:none" in document
+    assert ".frame.active{display:flex}" in document
+    # Click, buttons and arrow keys, the same interaction as the slide deck.
+    assert "addEventListener('click'" in document
+    assert "ArrowRight" in document and "ArrowLeft" in document
+    assert 'id="next"' in document and 'id="prev"' in document
+    # Captions carry the capture name, so a frame can be traced to its artifact.
+    assert "001-click-e21-after" in document
+    assert "1 / 3" in document and "3 / 3" in document
+    assert gradio_app.build_evidence_series([]) == ""
+
+
+def test_inlined_evidence_frames_are_bounded_in_size():
+    """Unbounded, a real seven-frame run came to 2,146 KB of base64 in one page
+    because two captures were full-page screenshots over 8,000px tall."""
+    from io import BytesIO
+
+    from PIL import Image
+
+    import app as gradio_app
+
+    tall = BytesIO()
+    Image.new("RGB", (2400, 24000), color="white").save(tall, format="PNG")
+
+    uri = gradio_app._thumbnail_data_uri(tall.getvalue())
+
+    assert uri.startswith("data:image/jpeg;base64,")
+    import base64 as b64
+    with Image.open(BytesIO(b64.b64decode(uri.split(",", 1)[1]))) as scaled:
+        assert scaled.width == 1100
+        assert scaled.height == 2600, "a very tall page must be bounded, not shrunk to a strip"
