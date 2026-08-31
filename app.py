@@ -2010,8 +2010,11 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                             "**Fix repo for backup**.")
                 if not session_id:
                     return "Choose a workspace session first."
-                session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                result = push_session_to_github(pat, repo, session_id, session_client)
+                try:
+                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    result = push_session_to_github(pat, repo, session_id, session_client)
+                except (PermissionError, requests.RequestException) as error:
+                    return workspace_access_message(error)
                 lines = [f"Pushed {len(result['pushed'])} file(s) to `{repo}`."]
                 lines.extend(f"- `{path}`" for path in result["pushed"])
                 if result["errors"]:
@@ -2078,14 +2081,22 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             local_system_status = gr.JSON(label="Diagnostics")
 
             def local_system_test(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-                session_client, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                return {
-                    "identity": session_client.me(),
-                    "sessions": len(session_client.list_sessions()),
-                    "personas": len(personas_client.list()),
-                    "storage": "workspace-scoped control-plane artifacts",
-                    "github_runtime_dependency": False,
-                }
+                # A diagnostics panel must report a failure, not become one: signed
+                # out or with an expired token this raised straight out of me() and
+                # put a traceback on screen.
+                try:
+                    session_client, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+                    return {
+                        "identity": session_client.me(),
+                        "sessions": len(session_client.list_sessions()),
+                        "personas": len(personas_client.list()),
+                        "storage": "workspace-scoped control-plane artifacts",
+                        "github_runtime_dependency": False,
+                    }
+                except (PermissionError, requests.RequestException) as error:
+                    return {"status": workspace_access_message(error),
+                            "storage": "workspace-scoped control-plane artifacts",
+                            "github_runtime_dependency": False}
 
             local_system_refresh.click(local_system_test, [workspace_selector], [local_system_status], api_name="workspace_storage_diagnostics")
 
@@ -2169,9 +2180,15 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         return profile, json.dumps(profile, indent=2), "Tweaks applied locally. Save to persist them."
 
     def save_manual_persona(profile_json, personas, index, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-        profile = json.loads(profile_json)
-        _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-        saved = personas_client.update(profile)
+        try:
+            profile = json.loads(profile_json)
+        except (json.JSONDecodeError, TypeError):
+            return gr.update(), profile_json, personas, "That is not valid JSON, so nothing was saved."
+        try:
+            _, personas_client = authenticated_clients(workspace_id, oauth_profile, oauth_token)
+            saved = personas_client.update(profile)
+        except (PermissionError, requests.RequestException) as error:
+            return gr.update(), profile_json, personas, workspace_access_message(error)
         updated = normalize_personas(personas)
         updated[int(index or 0)] = saved
         return saved, json.dumps(saved, indent=2), updated, f"Saved `{saved['id']}` as a manually edited profile."

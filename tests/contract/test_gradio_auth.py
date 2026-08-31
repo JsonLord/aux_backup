@@ -515,3 +515,52 @@ def test_the_handoff_does_nothing_while_the_run_is_still_live(monkeypatch):
 
     assert all(update == gradio_app.gr.update() for update in result)
     assert calls == [], "a live tick must not hit the control plane"
+
+
+def test_the_diagnostics_panel_reports_a_failure_rather_than_becoming_one(monkeypatch):
+    """Signed out, or with an expired token, this raised straight out of me() and
+    put a traceback on screen -- from the panel whose whole job is to report
+    system state."""
+    import requests
+
+    import app as gradio_app
+
+    class Rejecting:
+        def me(self):
+            response = requests.Response()
+            response.status_code = 401
+            raise requests.exceptions.HTTPError("401 Client Error", response=response)
+
+    monkeypatch.setattr(gradio_app, "authenticated_clients", lambda *a, **k: (Rejecting(), None))
+    fn = next(dep.fn for dep in gradio_app.demo.fns.values()
+              if getattr(dep.fn, "__name__", "") == "local_system_test")
+
+    result = fn("ws", None, None)
+
+    assert isinstance(result, dict)
+    assert "sign in" in result["status"].lower()
+    assert result["github_runtime_dependency"] is False
+
+
+def test_saving_a_persona_reports_a_rejected_token_and_keeps_the_edit(monkeypatch):
+    import requests
+
+    import app as gradio_app
+
+    def rejecting(*args, **kwargs):
+        response = requests.Response()
+        response.status_code = 401
+        raise requests.exceptions.HTTPError("401 Client Error", response=response)
+
+    monkeypatch.setattr(gradio_app, "authenticated_clients", rejecting)
+
+    _, editor, personas, status = gradio_app.save_manual_persona(
+        '{"id": "p1"}', [], 0, "ws", None, None)
+
+    assert "sign in" in status.lower()
+    # The edit the user typed must survive a failed save.
+    assert editor == '{"id": "p1"}'
+
+    _, editor, _, status = gradio_app.save_manual_persona("not json", [], 0, "ws", None, None)
+    assert "not valid JSON" in status
+    assert editor == "not json"
