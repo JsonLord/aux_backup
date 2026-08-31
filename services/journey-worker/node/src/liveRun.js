@@ -10,11 +10,17 @@
  * about it.
  *
  * Frames are read from the run's own output directory. journeytest-core names it
- * `<outputDir>/journeys/<ISO timestamp>-<safeId(runId)>`, and safeId truncates to
- * 24 characters -- which for this deployment's `<jobId>_<personaId>` run ids means
- * every persona of one job produces the *same* suffix. The registered start time
- * disambiguates them: a run's directory is the one whose timestamp is closest to
- * when that run began.
+ * `<outputDir>/<ISO timestamp>-<safeId(runId)>` -- directly under the output
+ * directory it was given. The "journeys" segment visible in this deployment's
+ * artifact paths comes from JOURNEY_ARTIFACT_ROOT ("/home/user/artifacts/
+ * journeys"), not from the library, so both layouts are searched rather than
+ * assuming either: looking only under `<outputDir>/journeys` found nothing at all
+ * here, because that would be `.../journeys/journeys`.
+ *
+ * safeId truncates to 24 characters -- which for this deployment's
+ * `<jobId>_<personaId>` run ids means every persona of one job produces the *same*
+ * suffix. The registered start time disambiguates them: a run's directory is the
+ * one whose timestamp is closest to when that run began.
  */
 
 const { readdir, readFile, stat } = require("node:fs/promises");
@@ -39,23 +45,29 @@ function directoryStartedAt(name) {
 }
 
 async function findRunDirectory(outputDir, runId, startedAt) {
-  const journeys = path.join(outputDir, "journeys");
-  let entries;
-  try {
-    entries = await readdir(journeys, { withFileTypes: true });
-  } catch {
-    return null;
-  }
   const suffix = `-${safeId(runId)}`;
-  const candidates = entries
-    .filter((entry) => entry.isDirectory() && entry.name.endsWith(suffix))
-    .map((entry) => ({ name: entry.name, at: directoryStartedAt(entry.name) }))
-    .filter((entry) => entry.at !== null);
+  const candidates = [];
+  // The run directory sits directly under the output directory; the nested
+  // "journeys" form is tolerated so a deployment whose root omits that segment
+  // works too.
+  for (const base of [outputDir, path.join(outputDir, "journeys")]) {
+    let entries;
+    try {
+      entries = await readdir(base, { withFileTypes: true });
+    } catch {
+      continue;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory() || !entry.name.endsWith(suffix)) continue;
+      const at = directoryStartedAt(entry.name);
+      if (at !== null) candidates.push({ full: path.join(base, entry.name), at });
+    }
+  }
   if (!candidates.length) return null;
   // Several personas of one job share the suffix; the one that began nearest this
   // run's registered start is this run's.
   candidates.sort((left, right) => Math.abs(left.at - startedAt) - Math.abs(right.at - startedAt));
-  return path.join(journeys, candidates[0].name);
+  return candidates[0].full;
 }
 
 async function latestScreenshot(runDirectory) {
