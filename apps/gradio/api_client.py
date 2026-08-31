@@ -3,10 +3,40 @@
 PLACEHOLDER: callbacks in the legacy root app are migrated tab-by-tab. New callbacks
 must use this client rather than import control-plane or worker implementations.
 """
+import json
 import os
+from pathlib import Path
+import tempfile
 import time
 
 import requests
+
+
+def normalize_personas(personas):
+    """Normalize Gradio JSON values without treating mapping keys as profiles."""
+    if personas in (None, ""):
+        return []
+    if isinstance(personas, str):
+        try:
+            personas = json.loads(personas)
+        except json.JSONDecodeError as error:
+            raise ValueError("Personas must be a JSON array or profile object.") from error
+    if isinstance(personas, dict):
+        nested = personas.get("personas", personas.get("items"))
+        personas = nested if isinstance(nested, list) else [personas]
+    if not isinstance(personas, list):
+        raise ValueError("Personas must be a JSON array or profile object.")
+    normalized = []
+    for index, item in enumerate(personas):
+        if isinstance(item, str):
+            try:
+                item = json.loads(item)
+            except json.JSONDecodeError as error:
+                raise ValueError(f"Persona {index + 1} is not a JSON object.") from error
+        if not isinstance(item, dict):
+            raise ValueError(f"Persona {index + 1} must be a JSON object.")
+        normalized.append(item)
+    return normalized
 
 
 class ControlPlaneClient:
@@ -75,6 +105,16 @@ class ControlPlaneClient:
         response.raise_for_status()
         return response.text
 
+    def download_artifact(self, artifact):
+        response = requests.get(f"{self.base_url}/v1/artifacts/{artifact['artifact_id']}/content",
+                                headers=self.headers, timeout=120)
+        response.raise_for_status()
+        name = artifact.get("metadata", {}).get("download_name") or f"{artifact['artifact_id']}.bin"
+        directory = Path(tempfile.mkdtemp(prefix="aux-download-"))
+        path = directory / Path(name).name
+        path.write_bytes(response.content)
+        return str(path)
+
     def create_artifact(self, session_id, kind, content, content_type="application/json", metadata=None, retention_class="structured"):
         response = requests.post(f"{self.base_url}/v1/artifacts", headers=self.headers, json={"session_id": session_id, "kind": kind, "content_type": content_type, "content": content, "metadata": metadata or {}, "retention_class": retention_class}, timeout=30)
         response.raise_for_status()
@@ -93,8 +133,27 @@ class PersonaRuntimeClient:
         authorization = authorization or os.getenv("PERSONA_AUTHORIZATION") or (f"Bearer {os.environ['HF_OIDC_TOKEN']}" if os.getenv("HF_OIDC_TOKEN") else None)
         if authorization: self.headers["Authorization"] = authorization
 
-    def generate(self, theme, customer_profile, count, scenario="", seed=1):
-        response = requests.post(f"{self.base_url}/v1/personas/generate", headers=self.headers, json={"theme": theme, "customer_profile": customer_profile, "count": int(count), "scenario": scenario, "seed": int(seed)}, timeout=120)
+    def generate(self, theme, customer_profile, count, scenario="", seed=1, allow_offline_fallback=False):
+        response = requests.post(f"{self.base_url}/v1/personas/generate", headers=self.headers, json={"theme": theme, "customer_profile": customer_profile, "count": int(count), "scenario": scenario, "seed": int(seed), "allow_offline_fallback": bool(allow_offline_fallback)}, timeout=float(os.getenv("PERSONA_GENERATION_TIMEOUT", "900")))
+        response.raise_for_status()
+        return response.json()
+
+    def compile(self, persona, scenario="", seed=1, source="preset"):
+        # The compile endpoint runs its own internal retry/backoff against the
+        # model router (services/persona_service/semantic.py's _complete, up to
+        # SEMANTIC_ENGINE_MAX_ATTEMPTS attempts with growing backoff) for two
+        # concurrent calls (behavior + abilities); a flat 60s timeout here can
+        # fire before that legitimate retry has finished, especially under
+        # router load (observed live: a 429-recovering router took >60s to
+        # answer even a single compile call). Matches generate()'s pattern of a
+        # generous, overridable timeout rather than a tight hardcoded one.
+        timeout = float(os.getenv("PERSONA_COMPILE_TIMEOUT", "180"))
+        response = requests.post(f"{self.base_url}/v1/personas/compile", headers=self.headers, json={"persona": persona, "scenario": scenario, "seed": int(seed), "source": source}, timeout=timeout)
+        response.raise_for_status()
+        return response.json()
+
+    def pool_lookup(self, theme, customer_profile, count, behavior_targets=None):
+        response = requests.post(f"{self.base_url}/v1/personas/pool-lookup", headers=self.headers, json={"theme": theme, "customer_profile": customer_profile, "count": int(count), "behavior_targets": behavior_targets}, timeout=30)
         response.raise_for_status()
         return response.json()
 

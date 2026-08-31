@@ -5,6 +5,8 @@ const { randomUUID } = require("node:crypto");
 const { BehaviorController } = require("./behavior");
 const { EvidenceCoordinator, normalizeStepEvidence } = require("./evidence");
 const { runWithJourneyTest } = require("./journeytest");
+const { liveRunState } = require("./liveRun");
+const { listLiveRuns } = require("./reasoningCapture");
 const { replayFromEvidence } = require("./replay");
 const { validateBrowserSafety } = require("./safety");
 
@@ -19,29 +21,31 @@ async function body(request) {
   return JSON.parse(Buffer.concat(chunks).toString("utf8") || "{}");
 }
 
+function timelineToEvents(timeline, runId) {
+  return (timeline || []).map((entry) => ({
+    type: `journeytest.${entry.type}`, runId, timestamp: entry.wallTime,
+    data: { taskId: entry.taskId, summary: entry.summary, elapsedMs: entry.elapsedMs, ...entry.data },
+  }));
+}
+
 async function runJourney(input, options = {}) {
   if (!input.url || !Array.isArray(input.tasks) || !input.profile?.behavior) throw new Error("url, tasks, and profile.behavior are required");
   const browserSafety = validateBrowserSafety(input);
   if (process.env.JOURNEY_ENGINE === "journeytest") {
     const result = await runWithJourneyTest(input);
     result.browserSafety = browserSafety;
-    const coordinator = options.evidenceCoordinator || new EvidenceCoordinator();
-    result.events ||= [];
-    for (const step of result.steps || []) {
-      const items = Array.isArray(step.evidence) ? step.evidence : step.evidence ? [step.evidence] : [];
-      const selected = items.filter((item) => item?.screenshot);
-      step.evidence = await Promise.all(selected.map(async (evidence) => {
-        result.events.push({ type: "ux.analysis.requested", runId: result.runId,
-          data: { evidenceId: evidence.id, stepId: evidence.stepId, timestampMs: evidence.timestampMs } });
-        const completed = await coordinator.enqueue(evidence);
-        if (completed.eyeson.status !== "pending") result.events.push({
-          type: completed.eyeson.status === "completed" ? "ux.analysis.completed" : "ux.analysis.failed",
-          runId: result.runId, data: { evidenceId: completed.id, stepId: completed.stepId,
-            timestampMs: completed.timestampMs, eyeson: completed.eyeson },
-        });
-        return completed;
-      }));
-    }
+    // journeytest-core's real RunResult (see @baguette-studios/journeytest-core's
+    // core/schemas.ts RunResultSchema) has no `.steps` field -- it reports
+    // `timeline` (real per-action events) and `artifacts.screenshots`/`snapshots`
+    // (file paths on disk), not the fixture engine's elementMap-based step
+    // evidence below. Surface the real timeline as events instead of the
+    // previous no-op loop over a field that never existed on a live run.
+    result.events = timelineToEvents(result.timeline, result.runId);
+    // Eyeson evidence enqueueing (ux.analysis.*) requires the elementMap +
+    // behavior-transition evidence contract built below for the native fixture
+    // engine; live JourneyTest screenshots don't carry that yet (see
+    // apps/api/executor.py's _pain_points_from_journeys limitations for the
+    // user-facing note). Not wired here until that bridge exists.
     return result;
   }
   const controller = new BehaviorController(input.profile);
@@ -94,6 +98,19 @@ async function runJourney(input, options = {}) {
 const server = http.createServer(async (request, response) => {
   try {
     if (request.method === "GET" && request.url === "/healthz") return json(response, 200, { service: "journey-worker", status: "ready", behaviorController: true, engine: process.env.JOURNEY_ENGINE || "fixture", journeyTestVersion: "0.1.2" });
+    // Follow a journey while it runs. The recording is only finalized when the run
+    // ends, so this serves what does exist mid-flight: the newest screenshot the
+    // driver has written, and the model's reasoning so far.
+    // Which runs are in flight. Checked before the per-run route below, which
+    // would otherwise match this path with an empty run id.
+    if (request.method === "GET" && request.url === "/v1/runs/live") {
+      return json(response, 200, { runs: listLiveRuns() });
+    }
+    if (request.method === "GET" && request.url.startsWith("/v1/runs/") && request.url.endsWith("/live")) {
+      const runId = decodeURIComponent(request.url.slice("/v1/runs/".length, -"/live".length));
+      if (!runId) return json(response, 422, { error: "invalid_request", message: "runId is required" });
+      return json(response, 200, await liveRunState(runId));
+    }
     if (request.method === "POST" && request.url === "/v1/runs") return json(response, 201, await runJourney(await body(request)));
     if (request.method === "POST" && request.url === "/v1/replays") return json(response, 201, replayFromEvidence(await body(request)));
     return json(response, 404, { error: "not_found" });
@@ -103,4 +120,4 @@ const server = http.createServer(async (request, response) => {
 });
 if (require.main === module) server.listen(Number(process.env.PORT || 8080), "0.0.0.0");
 
-module.exports = { runJourney, replayFromEvidence };
+module.exports = { runJourney, replayFromEvidence, timelineToEvents };

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hmac
 import os
 from typing import Any
 
@@ -19,7 +20,29 @@ class IdentityProvider:
         self.audience = os.getenv("HF_OIDC_AUDIENCE")
         self.jwks_url = os.getenv("HF_OIDC_JWKS_URL")
         self.userinfo_url = os.getenv("HF_OIDC_USERINFO_URL", "https://huggingface.co/oauth/userinfo")
+        self.whoami_url = os.getenv("HF_TOKEN_USERINFO_URL", "https://huggingface.co/api/whoami-v2")
         self.membership_store = membership_store
+        # Operator break-glass credential. When ``ADMIN_API_TOKEN`` is configured
+        # (Hugging Face Space secret), a request presenting ``Authorization: Admin
+        # <token>`` is authenticated as an administrator without Hugging Face OAuth.
+        # This lets maintainers exercise the app and API before sign-in works.
+        self.admin_token = os.getenv("ADMIN_API_TOKEN") or None
+        self.admin_workspace = os.getenv("ADMIN_WORKSPACE_ID", "admin")
+
+    def _is_admin_authorization(self, authorization: str | None) -> bool:
+        if not self.admin_token or not authorization:
+            return False
+        scheme, _, token = authorization.partition(" ")
+        if scheme != "Admin" or not token:
+            return False
+        return hmac.compare_digest(token, self.admin_token)
+
+    def _admin_identity(self, workspace: str | None) -> dict[str, Any]:
+        requested = workspace or self.admin_workspace
+        user = {"id": "admin", "username": "admin", "name": "Administrator", "picture": None}
+        workspaces = [{"id": requested, "name": "Administrator", "type": "admin", "role": "admin"}]
+        return {"workspace_id": requested, "owner_user_id": "admin", "role": "admin",
+                "user": user, "workspaces": workspaces}
 
     @staticmethod
     def personal_workspace(subject: str) -> str:
@@ -31,16 +54,39 @@ class IdentityProvider:
 
     def _hf_userinfo(self, authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):
-            raise HTTPException(401, "Hugging Face OAuth access token required")
+            raise HTTPException(401, "Hugging Face user access token required")
         try:
             response = requests.get(self.userinfo_url, headers={"Authorization": authorization}, timeout=15)
-            response.raise_for_status()
-            result = response.json()
-            if not result.get("sub"):
-                raise ValueError("userinfo response has no subject")
-            return result
+            try:
+                response.raise_for_status()
+                result = response.json()
+                if not result.get("sub"):
+                    raise ValueError("userinfo response has no subject")
+                return result
+            except requests.RequestException:
+                pass
+            # HF personal access tokens are intentionally not OAuth tokens, but are
+            # valid user credentials for versioned API clients. Restrict this
+            # fallback to the verified personal workspace; organization membership
+            # continues to require the richer OAuth claims above.
+            fallback = requests.get(self.whoami_url, headers={"Authorization": authorization}, timeout=15)
+            fallback.raise_for_status()
+            account = fallback.json()
+            if account.get("type") != "user" or not account.get("name"):
+                raise ValueError("whoami response has no user identity")
+            # The subject must be the account's stable id, which is exactly what the
+            # OAuth userinfo path above returns as `sub` -- not the username. Using
+            # the username put the same person in two different workspaces depending
+            # on which credential they presented: a session created with a personal
+            # access token landed in "hf:user:<username>" while the browser, signed
+            # in through OAuth, asked for "hf:user:<id>" and got 404 for every one of
+            # them.
+            if not account.get("id"):
+                raise ValueError("whoami response has no account id")
+            return {"sub": str(account["id"]), "preferred_username": account["name"],
+                    "name": account.get("fullname") or account["name"], "orgs": []}
         except (requests.RequestException, ValueError) as error:
-            raise HTTPException(401, "invalid Hugging Face OAuth access token") from error
+            raise HTTPException(401, "invalid Hugging Face user access token") from error
 
     def _claims(self, authorization: str | None) -> dict[str, Any]:
         if not authorization or not authorization.startswith("Bearer "):
@@ -73,6 +119,10 @@ class IdentityProvider:
         return result
 
     def resolve(self, authorization: str | None, workspace: str | None, local_user: str) -> dict[str, Any]:
+        # Administrator break-glass takes precedence in every mode so operators can
+        # reach the app and API before Hugging Face sign-in is available.
+        if self._is_admin_authorization(authorization):
+            return self._admin_identity(workspace)
         if self.mode == "local":
             selected = workspace or "local"
             return {"workspace_id": selected, "owner_user_id": local_user}

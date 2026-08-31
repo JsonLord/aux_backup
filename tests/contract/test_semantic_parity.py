@@ -20,4 +20,4 @@ def test_parity_metadata_records_freeze_point(tmp_path):
     metadata = run_metadata("tests/fixtures/semantic_parity_v1.jsonl", lock)
     assert metadata["dspy_package"] == "3.3.0"
     assert len(metadata["uv_lock_sha256"]) == 64
-    assert metadata["direct_baseline"] == "DirectLLMSemanticEngine/alias-huge"
+    assert metadata["direct_baseline"] == "DirectLLMSemanticEngine/auto"
