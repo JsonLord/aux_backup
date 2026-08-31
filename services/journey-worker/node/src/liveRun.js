@@ -106,7 +106,12 @@ async function liveRunState(runId) {
     return { runId, status: "live", elapsedMs, frames: 0, frame: null, frameName: null, reasoning };
   }
   const { frames, frame, name } = await latestScreenshot(directory);
-  return { runId, status: "live", elapsedMs, frames, frame, frameName: name, reasoning };
+  // The directory basename *is* journeytest-core's own run id, which is what the
+  // stored artifacts are tagged with -- the caller's run id is a different
+  // identifier. Reporting it is what lets a finished live run be matched to its
+  // recording.
+  return { runId, journeyRunId: path.basename(directory), status: "live", elapsedMs,
+    frames, frame, frameName: name, reasoning };
 }
 
 module.exports = { liveRunState, findRunDirectory, directoryStartedAt, safeId };

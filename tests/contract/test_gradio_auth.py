@@ -400,7 +400,7 @@ def test_the_live_view_reads_frames_and_thoughts_from_the_worker(monkeypatch):
     try:
         assert [run["runId"] for run in gradio_app.fetch_live_runs()] == ["job_a_persona_1"]
 
-        image, thoughts, note, timer = gradio_app.poll_live_run("job_a_persona_1", True)
+        image, thoughts, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
 
         assert image["visible"] is True and frame in image["value"]
         assert "001-click-e21-after.png" in image["value"]
@@ -421,9 +421,10 @@ def test_the_live_view_stops_polling_when_the_run_ends(monkeypatch):
         "runId": "job_a_persona_1", "status": "finished", "frames": 0, "frame": None, "reasoning": []}})
     monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
     try:
-        image, _, note, timer = gradio_app.poll_live_run("job_a_persona_1", True)
+        image, _, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
         assert image["visible"] is False
-        assert "finished" in note and "Video" in note
+        # The note is the signal the handoff keys on.
+        assert "has finished" in note
         assert timer["active"] is False
     finally:
         server.shutdown()
@@ -436,7 +437,7 @@ def test_an_unreachable_worker_is_reported_and_does_not_spin(monkeypatch):
     monkeypatch.setenv("JOURNEY_WORKER_URL", "http://127.0.0.1:9")
     assert gradio_app.fetch_live_runs() == []
 
-    image, _, note, timer = gradio_app.poll_live_run("job_a_persona_1", True)
+    image, _, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
     assert image["visible"] is False
     assert "Could not reach the journey worker" in note
     assert timer["active"] is False
@@ -450,10 +451,67 @@ def test_a_live_run_that_has_not_written_a_frame_yet_still_follows(monkeypatch):
         "reasoning": [{"elapsedMs": 500, "text": "Opening the base URL."}]}})
     monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
     try:
-        image, thoughts, note, timer = gradio_app.poll_live_run("r", True)
+        image, thoughts, note, timer, journey = gradio_app.poll_live_run("r", True, "")
         assert image["visible"] is False
         assert "has not written a frame yet" in note
         assert "Opening the base URL." in thoughts
         assert timer["active"] is True, "still live, so keep following"
     finally:
         server.shutdown()
+
+
+def test_a_finished_stream_becomes_the_ordinary_recording_of_the_same_run(monkeypatch):
+    """The live view is a stand-in for a recording that does not exist yet. When the
+    run ends, the view should turn into that recording rather than leaving the
+    reader on a dead frame."""
+    import app as gradio_app
+
+    artifacts = [
+        _artifact("browser.video", "art_v1", "2026-08-30T14-58-52-774Z-job_abc"),
+        _artifact("browser.screenshot", "art_s1", "2026-08-30T14-58-52-774Z-job_abc", "initial-view"),
+        _artifact("browser.video", "art_v2", "2026-08-30T15-02-46-493Z-job_abc"),
+    ]
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: (_recordings_session(artifacts), None))
+
+    mode, runs, slider, video, picker, status = gradio_app.hand_off_finished_run(
+        "✔️ This run has finished — loading its recording…",
+        "2026-08-30T15-02-46-493Z-job_abc", "ses_1", "ws", object(), object())
+
+    assert mode["value"] == "Video", "the live view hands over to the normal recordings view"
+    # The *second* run's recording, matched by journeytest-core's own run id.
+    assert video["value"] == "/tmp/art_v2.webm" and video["visible"] is True
+    assert slider["label"] == "Recording 2 / 2"
+    assert "Stream finished" in status
+
+
+def test_the_handoff_waits_when_the_recording_is_not_stored_yet(monkeypatch):
+    """The executor writes artifacts when the whole job completes, so the first
+    persona's recording is not on disk the moment its own stream ends. Switching to
+    an empty Video view would be worse than saying so."""
+    import app as gradio_app
+
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: (_recordings_session([]), None))
+
+    mode, runs, slider, video, picker, status = gradio_app.hand_off_finished_run(
+        "✔️ This run has finished — loading its recording…",
+        "2026-08-30T15-02-46-493Z-job_abc", "ses_1", "ws", object(), object())
+
+    assert mode == gradio_app.gr.update(), "stays put rather than switching to nothing"
+    assert "saved once the whole job completes" in status
+
+
+def test_the_handoff_does_nothing_while_the_run_is_still_live(monkeypatch):
+    import app as gradio_app
+
+    calls = []
+    monkeypatch.setattr(gradio_app, "authenticated_clients",
+                        lambda *a, **k: calls.append(1) or (_recordings_session([]), None))
+
+    result = gradio_app.hand_off_finished_run(
+        "Live · 7 frame(s) captured · 2 thought(s) · running 31s",
+        "run", "ses_1", "ws", object(), object())
+
+    assert all(update == gradio_app.gr.update() for update in result)
+    assert calls == [], "a live tick must not hit the control plane"

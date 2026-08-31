@@ -1654,6 +1654,10 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                     live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
                 live_note = gr.Markdown()
                 live_timer = gr.Timer(2.0, active=False)
+                # journeytest-core's own run id for the live run, which is what the
+                # stored artifacts are tagged with. Remembered while the run is live
+                # because the worker forgets the run the moment it ends.
+                live_journey_run = gr.State("")
 
             with gr.Group(visible=False) as gallery_group:
                 gallery_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
@@ -1847,35 +1851,37 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 return (gr.update(choices=choices, value=choices[0][1]),
                         f"{len(choices)} run(s) in flight.")
 
-            def poll_live_run(run_id, following):
+            def poll_live_run(run_id, following, journey_run):
                 """One tick of the live view."""
                 if not run_id:
-                    return gr.update(visible=False), "_Pick a live run._", "", gr.update()
+                    return gr.update(visible=False), "_Pick a live run._", "", gr.update(), journey_run
                 state = fetch_live_state(run_id)
                 thoughts = render_live_thoughts(state.get("reasoning") or [])
                 if state.get("status") == "unreachable":
                     return (gr.update(visible=False), thoughts,
                             f"\u26a0\ufe0f Could not reach the journey worker: {state.get('error', '')}",
-                            gr.update(active=False))
+                            gr.update(active=False), journey_run)
                 if state.get("status") == "finished":
                     # The capture is cleared when a run ends, so its absence *is* the
-                    # end of the run -- stop polling and send the reader to the video.
+                    # end of the run. Stop polling; the handoff below turns the live
+                    # view into the ordinary recording of the same run.
                     return (gr.update(visible=False), thoughts,
-                            "\u2714\ufe0f This run has finished. Its recording is under **Video**.",
-                            gr.update(active=False))
+                            "\u2714\ufe0f This run has finished \u2014 loading its recording\u2026",
+                            gr.update(active=False), journey_run)
                 frame = state.get("frame")
                 elapsed = (state.get("elapsedMs") or 0) / 1000
                 note = (f"Live \u00b7 {state.get('frames', 0)} frame(s) captured \u00b7 "
                         f"{len(state.get('reasoning') or [])} thought(s) \u00b7 running {elapsed:.0f}s")
+                journey_run = state.get("journeyRunId") or journey_run
                 if not frame:
                     return (gr.update(visible=False), thoughts,
                             note + " \u2014 the browser has not written a frame yet.",
-                            gr.update(active=bool(following)))
+                            gr.update(active=bool(following)), journey_run)
                 image = (f'<img src="{escape(frame, quote=True)}" alt="Newest frame of the running journey" '
                          'style="width:100%;border-radius:.5rem;border:1px solid #334155;background:#fff">')
                 caption = escape(str(state.get("frameName") or ""))
                 return (gr.update(visible=True, value=f'{image}<p style="opacity:.6;font-size:.85em">{caption}</p>'),
-                        thoughts, note, gr.update(active=bool(following)))
+                        thoughts, note, gr.update(active=bool(following)), journey_run)
 
             recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout, live_follow],
                                    [single_video_group, compare_group, live_group, gallery_group,
@@ -1886,11 +1892,43 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             live_follow.change(lambda mode, following: gr.update(active=bool(mode == "Live" and following)),
                                [recordings_mode, live_follow], [live_timer])
             live_refresh.click(live_run_choices, None, [live_run, live_note], api_name="list_live_runs")
+            def hand_off_finished_run(note, journey_run, session_id, workspace_id,
+                                       oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
+                """When the stream ends, become the ordinary recording of that run.
+
+                Only the artifacts can show a finished run, and the executor writes
+                them when the whole job completes -- so for a multi-persona job the
+                first persona's recording is not stored the moment its own stream
+                ends. When it is not there yet this stays put and says so, rather
+                than switching to an empty view.
+                """
+                unchanged = (gr.update(), gr.update(), gr.update(), gr.update(), gr.update(), gr.update())
+                if "has finished" not in (note or ""):
+                    return unchanged
+                if not session_id:
+                    return (*unchanged[:5],
+                            "\u2714\ufe0f This run has finished. Pick its workspace session to load the recording.")
+                runs, slider, picker, gallery, _ = discover_recordings(session_id, workspace_id,
+                                                                      oauth_profile, oauth_token)
+                position = next((index for index, run in enumerate(runs, start=1)
+                                 if run["runId"] == journey_run and run.get("video")), None)
+                if position is None:
+                    return (*unchanged[:5],
+                            "\u2714\ufe0f This run has finished. Its recording is saved once the whole job "
+                            "completes \u2014 switch to **Video** and press **Refresh sessions** in a moment.")
+                video, status, slider_update = show_recording(position, runs, session_id, workspace_id,
+                                                              oauth_profile, oauth_token)
+                return (gr.update(value="Video"), runs, slider_update, video, picker,
+                        f"\u2714\ufe0f Stream finished. {status}")
+
             # api_name so the live view can be exercised against a real running
             # journey, not only through the browser.
-            live_timer.tick(poll_live_run, [live_run, live_follow],
-                            [live_frame, live_thoughts, live_note, live_timer],
-                            api_name="poll_live_run")
+            live_timer.tick(poll_live_run, [live_run, live_follow, live_journey_run],
+                            [live_frame, live_thoughts, live_note, live_timer, live_journey_run],
+                            api_name="poll_live_run").then(
+                hand_off_finished_run, [live_note, live_journey_run, evidence_session, workspace_selector],
+                [recordings_mode, journey_runs_state, recording_slider, journey_video, compare_pick, journey_status],
+                api_name="hand_off_finished_run")
             evidence_session.change(discover_recordings, [evidence_session, workspace_selector],
                                     [journey_runs_state, recording_slider, compare_pick, gallery_run, journey_status],
                                     api_name="list_journey_runs")
@@ -2050,51 +2088,6 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 }
 
             local_system_refresh.click(local_system_test, [workspace_selector], [local_system_status], api_name="workspace_storage_diagnostics")
-
-        with gr.Tab("Live Monitoring"):
-            gr.Markdown("### Live workspace jobs and artifacts")
-            with gr.Row():
-                session_id_live = gr.Textbox(label="Session ID", placeholder="Enter Session ID...")
-                session_id_sync_list.append(session_id_live)
-            live_log = gr.Textbox(label="Workspace activity log", lines=5, interactive=False)
-            refresh_feed_btn = gr.Button("Refresh Feed Now")
-            global_feed = gr.Markdown(value="Waiting for new reports...")
-            
-            def monitor_and_log(workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
-                # This fires on a 60s background timer for every open tab, signed
-                # in or not, so an expired HF OAuth token (a long-idle browser tab)
-                # or an anonymous visitor without ADMIN_API_TOKEN configured must
-                # not raise an unhandled exception here -- that would spam the
-                # server log every minute per stale tab. Show a clear status
-                # instead of crashing.
-                try:
-                    session_client, _ = authenticated_clients(workspace_id, oauth_profile, oauth_token)
-                    sessions = session_client.list_sessions()
-                except PermissionError as error:
-                    return f"_{error}_", ""
-                except requests.exceptions.HTTPError as error:
-                    status = error.response.status_code if error.response is not None else "?"
-                    return f"_Could not refresh (HTTP {status}) -- sign in again if this persists._", ""
-                except requests.exceptions.RequestException as error:
-                    return f"_Could not reach the control plane: {error}_", ""
-                rows, logs, snapshots = [], [], []
-                for session in sessions[:20]:
-                    jobs = session_client.list_jobs(session["session_id"])
-                    rows.extend(f"- `{job['job_id']}` — **{job['status']}** ({job['type']})" for job in jobs)
-                    for artifact in session_client.list_artifacts(session["session_id"]):
-                        if artifact["kind"] == "persona.profile":
-                            profile = json.loads(session_client.get_artifact_content(artifact["artifact_id"]))
-                            snapshots.append(f"### {profile.get('persona', {}).get('name', profile['id'])}\n```json\n{json.dumps(profile, indent=2)}\n```")
-                    logs.append(f"{session['session_id']}: {len(jobs)} persisted jobs")
-                feed = "## Jobs\n" + ("\n".join(rows) or "No persisted jobs yet.")
-                if snapshots: feed += "\n\n## Immutable persona snapshots\n" + "\n\n".join(snapshots)
-                return feed, "\n".join(logs)
-
-            # Use a Timer to poll every 60 seconds
-            timer = gr.Timer(value=60)
-            timer.tick(fn=monitor_and_log, inputs=[workspace_selector], outputs=[global_feed, live_log])
-            refresh_feed_btn.click(fn=monitor_and_log, inputs=[workspace_selector], outputs=[global_feed, live_log])
-
 
         with gr.Tab("Alternative Styling"):
             gr.Markdown("### Design Automation & Iteration")

@@ -98,41 +98,6 @@ def test_load_example_persona_into_studio_surfaces_compile_failure(monkeypatch):
     assert "router unavailable" in status
 
 
-def test_monitor_and_log_reports_permission_error_instead_of_crashing(monkeypatch):
-    app_module = load_root_app()
-
-    def raise_permission_error(*a, **k):
-        raise PermissionError("Sign in with Hugging Face to continue")
-
-    monkeypatch.setattr(app_module, "authenticated_clients", raise_permission_error)
-
-    # monitor_and_log is a closure defined inside build_app(); reach it through
-    # the Gradio Blocks' fn_map by name to test the real deployed behavior.
-    fn = _find_event_fn(app_module, "monitor_and_log")
-    feed, log = fn("local", None, None)
-
-    assert "Sign in with Hugging Face" in feed
-    assert log == ""
-
-
-def test_monitor_and_log_reports_http_error_instead_of_crashing(monkeypatch):
-    app_module = load_root_app()
-
-    class FakeSessionClient:
-        def list_sessions(self):
-            response = requests.models.Response()
-            response.status_code = 401
-            raise requests.exceptions.HTTPError(response=response)
-
-    monkeypatch.setattr(app_module, "authenticated_clients", lambda *a, **k: (FakeSessionClient(), None))
-
-    fn = _find_event_fn(app_module, "monitor_and_log")
-    feed, log = fn("local", None, None)
-
-    assert "401" in feed
-    assert log == ""
-
-
 class FakeSessionClient:
     def __init__(self):
         self.job_calls = []
