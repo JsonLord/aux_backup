@@ -18,6 +18,7 @@ import shutil
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
+from apps.gradio import credentials_panel
 from apps.gradio.github_backup import (GitHubAuthError, confirm_backup_repo, push_session_to_github,
                                         validate_and_list_repos)
 
@@ -1015,7 +1016,20 @@ log_choices_kinds = ("journey.log", "persona.profile")
 
 
 # Gradio UI
-with gr.Blocks(title="UX Analysis Orchestrator") as demo:
+_CREDENTIAL_STORE = None
+
+
+def _credential_store():
+    """Opened lazily so importing this module never touches the database."""
+    global _CREDENTIAL_STORE
+    if _CREDENTIAL_STORE is None:
+        from apps.api.credentials import CredentialStore
+
+        _CREDENTIAL_STORE = CredentialStore()
+    return _CREDENTIAL_STORE
+
+
+with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as demo:
     gr.Markdown("# UX Analysis Orchestrator")
     with gr.Row():
         login_button = gr.LoginButton()
@@ -1030,6 +1044,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         # the actual OAuth token, so this dropdown only needs to offer choices, not
         # gate them.
         workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True, allow_custom_value=True)
+        credentials_panel.render(_credential_store(), workspace_selector)
     login_status = gr.Markdown("Sign in with Hugging Face to load your personal and organization workspaces.")
 
     # Connecting GitHub belongs with signing in, not buried in the backup tab: it is
