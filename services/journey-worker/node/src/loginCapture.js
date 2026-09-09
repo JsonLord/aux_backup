@@ -26,10 +26,11 @@
  * alternative, `fill <selector> <password>`, would not.
  */
 
-const { execFile } = require("node:child_process");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
+
+const { batch, evaluateInPage, runAgentBrowser } = require("./agentBrowser");
 
 // A sign-in that is going to work redirects quickly; this only has to outlast a
 // slow auth round trip.
@@ -72,42 +73,13 @@ const SECOND_FACTOR_PROBE = `(() => {
 const PASSWORD_PROBE =
   `Boolean(document.querySelector("input[type='password']"))`;
 
-function agentBrowserCommand() {
-  return process.env.AGENT_BROWSER_COMMAND
-    || path.join(__dirname, "..", "node_modules", ".bin", "agent-browser");
-}
-
 function positiveInt(value, fallback) {
   const parsed = Number.parseInt(String(value ?? ""), 10);
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function run(args, { input } = {}) {
-  return new Promise((resolve) => {
-    const child = execFile(agentBrowserCommand(), args, { timeout: COMMAND_TIMEOUT_MS },
-      (error, stdout, stderr) => resolve({
-        ok: !error,
-        stdout: String(stdout || ""),
-        // Never interpolate the credential into an error; only agent-browser's
-        // own output reaches a caller.
-        stderr: String(stderr || (error ? error.message : "")),
-      }));
-    if (input !== undefined) {
-      child.stdin.end(input);
-    }
-  });
-}
-
-async function evaluate(expression) {
-  // Through stdin as well: an expression is not secret, but keeping one path
-  // means the quoting rules cannot differ between them.
-  const result = await run(["batch", "--json"], { input: JSON.stringify([["eval", expression]]) });
-  if (!result.ok) return { ok: false, value: null, detail: result.stderr };
-  const text = result.stdout.trim();
-  if (/\btrue\b/i.test(text)) return { ok: true, value: true };
-  if (/\bfalse\b/i.test(text)) return { ok: true, value: false };
-  return { ok: true, value: text };
-}
+const run = (args, options) => runAgentBrowser(args, options);
+const evaluate = (expression) => evaluateInPage(expression);
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -186,7 +158,7 @@ async function captureLogin(options = {}) {
     commands.push(["click", submitSelector]);
 
     // stdin, so the password is not in this process's argv.
-    const filled = await run(["batch", "--json"], { input: JSON.stringify(commands) });
+    const filled = await batch(commands);
     if (!filled.ok) {
       return { status: STATUS_FAILED,
         detail: `could not fill the sign-in form: ${filled.stderr}` };
@@ -219,5 +191,5 @@ module.exports = {
   DEFAULT_POLL_INTERVAL_MS, DEFAULT_SECOND_FACTOR_WAIT_MS, DEFAULT_SUBMIT_WAIT_MS,
   PASSWORD_PROBE, SECOND_FACTOR_PROBE, STATUS_AWAITING_SECOND_FACTOR, STATUS_FAILED,
   STATUS_SECOND_FACTOR_TIMED_OUT, STATUS_SUCCEEDED,
-  captureLogin, waitForSignIn, __run: run, __evaluate: evaluate,
+  captureLogin, waitForSignIn,
 };

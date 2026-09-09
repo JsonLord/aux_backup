@@ -5,6 +5,7 @@ const path = require("node:path");
 
 const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
 const { configureStreamPort, startViewportStream } = require("./viewportStream");
+const { cursorKeeperStatus, startCursorKeeper } = require("./cursorKeeper");
 
 function safeId(value, fallback) {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -85,10 +86,11 @@ const CURSOR_OVERLAY_SCRIPT = path.join(__dirname, "..", "assets", "cursor-overl
  * the feature and a `removeinitscript` command the binary does not have, so that
  * README describes a later build than the pinned one.
  *
- * The request is still made because it costs nothing and starts working the day
- * the pin moves. What it must not do is claim success: `requested` says the
- * environment was set, not that a cursor will appear. Until the pin moves, the
- * pointer has to be drawn viewer-side from the run timeline instead.
+ * The request is still made because it costs nothing and, once the pin moves,
+ * installs the overlay before the first navigation -- earlier than the keeper
+ * below can. What it must not do is claim success: `requested` says the
+ * environment was set, not that a cursor will appear. cursorKeeper.js is what
+ * actually decorates the page on 0.31.1, by evaluating the same script in.
  *
  * Set AUX_CURSOR_OVERLAY=0 to leave the page untouched -- the overlay is a real
  * DOM node, and a page that inspects itself can see it.
@@ -194,6 +196,9 @@ async function runWithJourneyTest(input) {
   // port the worker has no way to learn.
   configureStreamPort();
   startViewportStream();
+  // `eval` is the one injection path 0.31.1 honours, and a navigation takes the
+  // overlay with the old document, so it has to be put back rather than set once.
+  startCursorKeeper();
   const result = await core.runJourney({
     journey: journeyContract(input),
     profile: testerContract(input.profile),
@@ -210,7 +215,7 @@ async function runWithJourneyTest(input) {
     // one from an anonymous run are about different products, so the report has to
     // be able to say which it saw.
     authenticatedSession: Boolean(statePath),
-    cursorOverlay,
+    cursorOverlay: { ...cursorOverlay, keeper: cursorKeeperStatus() },
     reasoning: takeRunReasoning(captureId) };
 }
 
