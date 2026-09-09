@@ -218,7 +218,9 @@ class Store:
         path = self.artifact_root / workspace_id / payload["session_id"] / artifact_id
         path.parent.mkdir(parents=True, exist_ok=True)
         content = payload.pop("content")
-        if isinstance(content, (dict, list)):
+        if isinstance(content, bytes):
+            path.write_bytes(content)
+        elif isinstance(content, (dict, list)):
             path.write_text(json.dumps(content, indent=2), encoding="utf-8")
         else:
             path.write_text(str(content), encoding="utf-8")

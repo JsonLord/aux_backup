@@ -73,8 +73,19 @@ Deploy the control plane, Journey worker, persona runtime, and Eyeson worker, th
     return json.dumps(run, indent=2), timeline, report, json.dumps(readiness, indent=2)
 
 
+def run_started():
+    """Give browser users immediate feedback while the queued callback runs."""
+    return "⏳ **Generating the deterministic contract preview…**"
+
+
+def run_finished():
+    """Point browser users to the tabs populated by the completed callback."""
+    return "✅ **Preview ready.** Open **Live trace**, **Report**, or **Readiness** below."
+
+
 with gr.Blocks(title="AUX Synthetic UX Demo", theme=gr.themes.Soft()) as demo:
     gr.Markdown("# 🧭 AUX Synthetic UX Demo\nA transparent preview of the local folder's versioned contracts.")
+    status = gr.Markdown("Ready to generate a deterministic contract preview.")
     with gr.Tab("Configure"):
         gr.Markdown("This Space runs a deterministic **offline contract demo**, not a live browser study.")
         url = gr.Textbox(label="Website URL", value="https://example.com")
@@ -90,7 +101,26 @@ with gr.Blocks(title="AUX Synthetic UX Demo", theme=gr.themes.Soft()) as demo:
         run_json = gr.Code(label="run.json preview", language="json")
     with gr.Tab("Readiness"):
         readiness = gr.Code(label="Deployment readiness", language="json")
-    start.click(run_contract_demo, [url, task, user_count, seed], [run_json, timeline, report, readiness])
+    submitted = start.click(
+        run_started,
+        outputs=status,
+        api_name=False,
+        queue=False,
+        show_progress="hidden",
+    )
+    completed = submitted.then(
+        run_contract_demo,
+        [url, task, user_count, seed],
+        [run_json, timeline, report, readiness],
+        api_name="run_contract_demo",
+    )
+    completed.then(
+        run_finished,
+        outputs=status,
+        api_name=False,
+        queue=False,
+        show_progress="hidden",
+    )
 
 
 app = FastAPI(title="AUX Space Demo", version="1.0.0")

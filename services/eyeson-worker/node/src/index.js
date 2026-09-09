@@ -10,6 +10,8 @@ const { AnalysisQueue, selectScreenBudget } = require("./scheduler");
 const { createAlternativeLineage, addValidationRun } = require("./lineage");
 const { StructuredTracer } = require("./observability");
 const { redactArtifact } = require("./privacy");
+const { critiqueScreenshot, toPainPoint } = require("./visionCritique");
+const { aggregateCohort } = require("./aggregate");
 
 const tracer = new StructuredTracer();
 const analysisQueue = new AnalysisQueue({ concurrency: Number(process.env.ANALYSIS_CONCURRENCY || 2),
@@ -57,6 +59,39 @@ const server = http.createServer(async (request, response) => {
       const evidence = redactArtifact(payload.evidence);
       return json(response, 201, await analysisQueue.enqueue({ runId: evidence.runId, evidence, options: payload.options }));
     }
+    if (request.method === "POST" && request.url === "/v1/journey-evidence-analyses") {
+      // Real vision-based UX critique of a live JourneyTest screenshot -- see
+      // visionCritique.js. Distinct from /v1/evidence-analyses, which requires
+      // the native fixture engine's elementMap/behavior-transition evidence
+      // contract that live JourneyTest runs don't produce.
+      const payload = await body(request);
+      if (!payload.imageBase64) return json(response, 422, { error: "invalid_request", message: "imageBase64 is required" });
+      const { findings, strengths } = await critiqueScreenshot({ imageBase64: payload.imageBase64, elements: payload.elements,
+        url: payload.url, task: payload.task, personaSummary: payload.personaSummary, options: payload.options });
+      const context = { runId: payload.runId, userId: payload.userId, route: payload.url,
+        stepId: payload.stepId, screenshotRef: payload.screenshotRef, videoTimestampMs: payload.videoTimestampMs };
+      const painPoints = findings.map((finding) => toPainPoint(finding, context));
+      // strengths are the "elements to preserve" side of a UX review: design
+      // decisions that already work and must survive a redesign. Same critique
+      // call, so they cost nothing extra and come from the same real screenshot.
+      return json(response, 201, { schemaVersion: "1.0", findings, painPoints,
+        strengths: strengths.map((item) => ({ ...item, route: payload.url, userId: payload.userId,
+          screenshotRef: payload.screenshotRef })) });
+    }
+    if (request.method === "POST" && request.url === "/v1/cohort-aggregation") {
+      // Real cross-persona synthesis (aggregate.js's aggregateCohort, already
+      // built and tested, previously unused since it targets the native fixture
+      // engine's run shape). Accepts one "cohort run" per persona --
+      // {runId, profileId, iterationId, verdict, simulationProfile, painPoints}
+      // -- painPoints being the UXPainPoint records visionCritique.js's
+      // toPainPoint() already produces. Groups pain points into root causes by
+      // shared route/elements/category/mechanism, across every persona in the
+      // run: this is the "synthesized data analysis, not individual persona
+      // testing thought citations" result, not a per-persona listing.
+      const payload = await body(request);
+      const runs = Array.isArray(payload.runs) ? payload.runs : [];
+      return json(response, 201, { schemaVersion: "1.0", rootCauses: aggregateCohort(runs) });
+    }
     if (request.method === "POST" && request.url === "/v1/evidence-batches") {
       const payload = await body(request);
       const selected = selectScreenBudget(redactArtifact(payload.candidates || []), payload.screenBudget);
@@ -89,7 +124,11 @@ const server = http.createServer(async (request, response) => {
     }
     return json(response, 404, { error: "not_found" });
   } catch (error) {
-    return json(response, 422, { error: "invalid_evidence", message: error.message });
+    // A vision-provider outage or a missing credential is not a malformed request.
+    // Answering 422 "invalid_evidence" for it sent callers looking at their own
+    // payload while the real cause -- the model endpoint -- went unnamed.
+    return json(response, error.status || 422,
+      { error: error.code || "invalid_evidence", message: error.message });
   }
 });
 if (require.main === module) server.listen(Number(process.env.PORT || 8081), "0.0.0.0");

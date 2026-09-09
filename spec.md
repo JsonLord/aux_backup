@@ -2901,6 +2901,16 @@ The application is considered functionally complete when a user can:
 
 ## 51. Future roadmap
 
+### Persona pool (GitHub Actions)
+
+Replace live per-request TinyTroupe generation as the default path with a
+pre-generated, continuously-refreshed pool: a dedicated GitHub repository of
+personas, kept diverse and current by a scheduled GitHub Actions workflow
+(daily), with in-app lookup that finds the closest-ranged group of pool
+personas for a given theme/customer-profile/trait request instead of
+generating fresh ones synchronously. Full plan, phases, and open questions:
+[`docs/persona-pool-plan.md`](persona-pool-plan.md).
+
 ### RAG/knowledge
 
 - curated WCAG/WAI corpus;

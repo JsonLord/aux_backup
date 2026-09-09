@@ -205,7 +205,8 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
         storage = getattr(store, "artifact_storage", None)
         if storage and storage.backend == "r2":
             return RedirectResponse(storage.presign_download(artifact["path"]), status_code=307)
-        return FileResponse(artifact["path"], media_type=artifact["content_type"])
+        return FileResponse(artifact["path"], media_type=artifact["content_type"],
+                            filename=artifact.get("metadata", {}).get("download_name"))
 
     @app.post("/v1/artifacts/uploads", status_code=201)
     def create_upload(body: PresignedArtifactCreate, auth=Depends(identity)):
