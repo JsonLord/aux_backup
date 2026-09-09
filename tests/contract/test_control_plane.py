@@ -1,6 +1,9 @@
+import base64
 from pathlib import Path
 import sqlite3
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -363,6 +366,50 @@ def test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point(tmp_path
     findings = report["critical_pain_points"]
     assert not any(item["source"] == "criteria" for item in findings), findings
     assert findings[0]["title"] == "No pain points detected"
+
+
+def test_vision_image_payload_fits_a_proxy_body_limit():
+    """A full-page capture must not be sent at its original size.
+
+    A live run failed with HTTP 413 "request entity too large" because the
+    screenshot went to the model router as raw base64 PNG. JourneyTest writes
+    full-page captures (one was 2.4 MB / 12000px), and base64 adds a third on
+    top, so the body passed the proxy's cap before the model ever saw it.
+    """
+    pytest.importorskip("PIL")
+    from io import BytesIO
+    from PIL import Image
+
+    # Photographic density: the case PNG cannot squeeze, which is how a real
+    # capture reaches megabytes. A flat synthetic page would not reproduce it.
+    import random
+    random.seed(11)
+    tall = Image.new("RGB", (1440, 6000))
+    tall.putdata([(random.randrange(256), random.randrange(256), random.randrange(256))
+                  for _ in range(1440 * 6000)])
+    buffer = BytesIO()
+    tall.save(buffer, format="PNG")
+    raw = buffer.getvalue()
+
+    budget = JobExecutor._vision_image_budget()
+    assert len(raw) > budget, "fixture must be large enough to exercise the shrink path"
+
+    encoded, mime = JobExecutor._vision_image_payload(raw)
+
+    assert mime == "image/jpeg"
+    assert len(encoded) * 3 // 4 <= budget
+    # base64 of the original would have been several MB; the sent body is the
+    # thing the proxy measures.
+    assert len(encoded) < len(base64.b64encode(raw))
+
+
+def test_vision_image_payload_leaves_a_small_capture_alone():
+    """Nothing to gain from re-encoding a screenshot already under budget."""
+    pytest.importorskip("PIL")
+    small = b"x" * 128
+    encoded, mime = JobExecutor._vision_image_payload(small)
+    assert mime == "image/png"
+    assert encoded == base64.b64encode(small).decode("ascii")
 
 
 def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path, monkeypatch):
@@ -873,6 +920,48 @@ def test_page_wide_finding_falls_back_to_the_full_screenshot():
         assert (scaled.width, scaled.height) == (700, 1500)
 
     assert JobExecutor._screenshot_data_uri(b"not an image") is None
+
+
+def test_deck_bounds_evidence_images_to_the_slide():
+    """An evidence image must not be taller than the slide showing it.
+
+    .slide is exactly 100vh with overflow-y:auto, so an image with only a width
+    rule renders at its natural height and scrolls off a landscape screen -- a
+    600x3000 crop measured 3020px tall inside a 900px slide. The sibling
+    iframe.redesign was already capped; the img was not.
+    """
+    deck = JobExecutor._slide_deck({
+        "url": "https://example.com", "executive_summary": "s",
+        "critical_pain_points": [{
+            "title": "Nav is unclear", "summary": "s", "severity": "high",
+            "screenshotCrop": "data:image/png;base64,Zm9v", "screenshotIsRegion": True,
+        }],
+        "synthetic_users": [{"id": "p1"}],
+    })
+
+    image_rule = next(rule for rule in deck.split("}") if rule.strip().startswith(".shot img{"))
+    assert "max-height" in image_rule, "evidence image needs a height bound"
+    # Without object-fit the height clamp squashes the image instead of scaling it.
+    assert "object-fit:contain" in image_rule
+
+
+def test_element_crop_is_capped_so_a_large_region_cannot_dominate_a_slide():
+    pytest.importorskip("PIL")
+    from io import BytesIO
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1600, 4000), (10, 20, 30)).save(buffer, format="PNG")
+    box = {"x": 0, "y": 0, "width": 1600, "height": 4000}
+
+    uri = JobExecutor._crop_element_data_uri(buffer.getvalue(), box, max_edge=1200)
+
+    assert uri is not None
+    payload = base64.b64decode(uri.split(",", 1)[1])
+    with Image.open(BytesIO(payload)) as cropped:
+        assert max(cropped.width, cropped.height) <= 1200
+        # Proportions must survive the cap.
+        assert abs((cropped.width / cropped.height) - (1600 / 4000)) < 0.01
 
 
 def test_finding_slide_labels_a_full_page_shot_distinctly_from_a_region_crop():

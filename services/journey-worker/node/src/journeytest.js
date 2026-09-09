@@ -9,6 +9,21 @@ function safeId(value, fallback) {
   return (normalized || fallback).slice(0, 24);
 }
 
+// journeytest-core's director prompt names the criterion ids and tells the model
+// to use "inconclusive" when evidence is weak, but never states the vocabulary
+// `verdict.criteria[].result` actually accepts -- "met" | "not-met" | "blocked" |
+// "not-observed" (AgentVerdictType, dist/directors/pi/tools.js). A live run had
+// the model answer with the verdict *status* words instead, so journey_finish was
+// rejected by schema validation with one "must be equal to constant" per allowed
+// literal plus "must match a schema in anyOf", and the whole journey aborted with
+// no verdict. runJourney() exposes no prompt hook, but it serialises the journey
+// contract into the prompt verbatim -- so the criterion the model is assessing is
+// where the vocabulary can be restated.
+const CRITERION_RESULT_VOCABULARY =
+  ' Report this criterion with result exactly one of "met", "not-met", "blocked", or'
+  + ' "not-observed" -- never "passed", "failed", or "inconclusive", which are verdict'
+  + " status values rather than criterion results.";
+
 function journeyContract(input) {
   const profileId = safeId(input.profile.id, "persona");
   const tasks = input.tasks.map((task, index) => ({
@@ -24,8 +39,12 @@ function journeyContract(input) {
     testerProfile: profileId,
     objective: tasks.map((task) => task.instruction).join("; "),
     tasks,
-    passCriteria: [{ id: "tasks-completed", statement: "The requested tasks can be completed", requiredEvidence: ["screenshot"] }],
-    failCriteria: [{ id: "tasks-blocked", statement: "A requested task cannot be completed", requiredEvidence: ["screenshot"], severity: "major" }],
+    passCriteria: [{ id: "tasks-completed",
+      statement: `The requested tasks can be completed.${CRITERION_RESULT_VOCABULARY}`,
+      requiredEvidence: ["screenshot"] }],
+    failCriteria: [{ id: "tasks-blocked",
+      statement: `A requested task cannot be completed.${CRITERION_RESULT_VOCABULARY}`,
+      requiredEvidence: ["screenshot"], severity: "major" }],
     evidenceRequirements: [
       { kind: "screenshot", description: "Observed browser state", required: true },
       { kind: "snapshot", description: "Observed semantic browser state", required: true },

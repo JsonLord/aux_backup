@@ -230,6 +230,43 @@ test("a provider outage is reported as unavailable, not as an invalid request", 
   assert.match(failure.message, /vision critique failed after 1 attempts/);
 });
 
+test("a payload the endpoint will always reject is not retried", async (t) => {
+  // A live run spent three attempts and both backoffs on an HTTP 413 before
+  // reporting a 502: the same oversized body cannot become acceptable on a
+  // retry, and the retries hid the real cause behind "after 3 attempts".
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    return { ok: false, status: 413,
+      text: async () => '{"error":{"message":"request entity too large","type":"PayloadTooLargeError"}}' };
+  });
+
+  const failure = await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "t", elements: [],
+    options: { apiKey: "k", baseUrl: "https://router.invalid/v1", maxAttempts: 3, retryWaitMs: 1000 },
+  }).then(() => null, (error) => error);
+
+  assert.ok(failure instanceof VisionUnavailableError);
+  assert.equal(calls, 1, "413 must not be retried");
+  assert.match(failure.message, /vision critique failed after 1 attempts/);
+  assert.match(failure.message, /HTTP 413/);
+});
+
+test("a transient upstream failure is still retried", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    return { ok: false, status: 503, text: async () => "Service Unavailable" };
+  });
+
+  await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "t", elements: [],
+    options: { apiKey: "k", baseUrl: "https://router.invalid/v1", maxAttempts: 3, retryWaitMs: 0 },
+  }).then(() => null, (error) => error);
+
+  assert.equal(calls, 3, "5xx keeps its retry budget");
+});
+
 test("a missing credential is reported as not configured, not as an invalid request", async () => {
   const original = { key: process.env.OPENAI_API_KEY, blablador: process.env.BLABLADOR_API_KEY };
   delete process.env.OPENAI_API_KEY;

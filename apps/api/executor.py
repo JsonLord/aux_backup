@@ -831,7 +831,76 @@ class JobExecutor:
         return []
 
     @staticmethod
-    def _crop_element_data_uri(image_bytes: bytes, box: dict[str, Any] | None) -> str | None:
+    def _vision_image_budget() -> int:
+        """Encoded image bytes the vision request may carry.
+
+        The observed rejection was HTTP 413 "request entity too large", which is
+        what a reverse proxy in front of the model router answers when the body
+        passes its cap -- nginx defaults that cap to 1 MB. Budgeting the image
+        well under it leaves room for the prompt and the element list in the
+        same body.
+        """
+        return int(os.getenv("EYESON_VISION_MAX_IMAGE_BYTES", "450000"))
+
+    @classmethod
+    def _vision_image_payload(cls, image_bytes: bytes) -> tuple[str, str]:
+        """Shrink a screenshot until the vision endpoint will accept it.
+
+        JourneyTest writes full-page captures -- one nova-test page was 2.4 MB
+        and 12000px tall (see _screenshot_data_uri) -- and base64 adds a third on
+        top of that. Sent unmodified the router answered 413, and because the
+        worker retried a request that could never succeed, the run surfaced a
+        generic "failed after 3 attempts" 502 with the real cause buried.
+
+        Scales the whole page down rather than cropping it: the prompt lists
+        every detected element and tells the model not to invent anything it
+        cannot see, so a crop would hide elements it is being asked about.
+
+        Returns (base64, mime). Falls back to the original bytes when Pillow is
+        missing so such an environment degrades to today's behavior instead of
+        losing the critique.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return base64.b64encode(image_bytes).decode("ascii"), "image/png"
+
+        budget = cls._vision_image_budget()
+        if len(image_bytes) <= budget:
+            return base64.b64encode(image_bytes).decode("ascii"), "image/png"
+
+        try:
+            with Image.open(BytesIO(image_bytes)) as opened:
+                image = opened.convert("RGB")
+                # Vision models resample to a few hundred pixels per tile, so
+                # width beyond a normal desktop viewport buys nothing.
+                max_width = int(os.getenv("EYESON_VISION_MAX_IMAGE_WIDTH", "1400"))
+                if image.width > max_width:
+                    ratio = max_width / float(image.width)
+                    image = image.resize((max_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+
+                best = None
+                for quality in (82, 70, 58, 45):
+                    buffer = BytesIO()
+                    image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+                    best = buffer.getvalue()
+                    if len(best) <= budget:
+                        return base64.b64encode(best).decode("ascii"), "image/jpeg"
+
+                # Still over budget: a very tall page needs fewer pixels, not
+                # just coarser ones. Halve until it fits or gets too small to read.
+                while len(best) > budget and image.width > 320 and image.height > 320:
+                    image = image.resize((max(320, image.width // 2), max(320, image.height // 2)), Image.LANCZOS)
+                    buffer = BytesIO()
+                    image.save(buffer, format="JPEG", quality=70, optimize=True, progressive=True)
+                    best = buffer.getvalue()
+                return base64.b64encode(best).decode("ascii"), "image/jpeg"
+        except (OSError, ValueError):
+            return base64.b64encode(image_bytes).decode("ascii"), "image/png"
+
+    @staticmethod
+    def _crop_element_data_uri(image_bytes: bytes, box: dict[str, Any] | None,
+                               max_edge: int = 1200) -> str | None:
         """Crop the specific region a vision finding refers to out of the full
         screenshot, so the UI can show exactly what the finding is about instead
         of just a wall of text. Returns None (caller shows no image) rather than
@@ -851,6 +920,16 @@ class JobExecutor:
                 if right <= left or bottom <= top:
                     return None
                 cropped = image.crop((left, top, right, bottom))
+                # A finding can point at a large region (a hero, a whole nav
+                # column), and an uncapped crop is emitted at natural size --
+                # which is how a slide ended up with an image taller than the
+                # screen. Small crops, where sharp text matters, are untouched.
+                longest = max(cropped.width, cropped.height)
+                if longest > max_edge:
+                    ratio = max_edge / float(longest)
+                    cropped = cropped.resize(
+                        (max(1, int(cropped.width * ratio)), max(1, int(cropped.height * ratio))),
+                        Image.LANCZOS)
                 buffer = BytesIO()
                 cropped.save(buffer, format="PNG")
                 return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
@@ -970,8 +1049,9 @@ class JobExecutor:
                         continue
                     screenshot_bytes[screenshot_path] = image_bytes
                     elements = cls._elements_for_screenshot(screenshot_path, snapshots)
+                    image_b64, image_mime = cls._vision_image_payload(image_bytes)
                     payload = json.dumps({
-                        "imageBase64": base64.b64encode(image_bytes).decode("ascii"),
+                        "imageBase64": image_b64, "imageMimeType": image_mime,
                         "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
                         "runId": journey.get("runId"), "userId": persona.get("id"),
                         "stepId": f"vision-{step_index + 1}", "screenshotRef": screenshot_path,
@@ -1497,7 +1577,8 @@ class JobExecutor:
     def _presentation(report: dict[str, Any]) -> str:
         def render_finding(item: dict[str, Any]) -> str:
             image = (f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="Screenshot region for this finding" '
-                     'style="max-width:min(100%,420px);border-radius:.5rem;border:1px solid #334155;margin-top:.5rem">'
+                     'style="max-width:min(100%,420px);max-height:52vh;object-fit:contain;object-position:top;'
+                     'border-radius:.5rem;border:1px solid #334155;margin-top:.5rem">'
                      if item.get("screenshotCrop") else "")
             recommendation = (f'<p style="opacity:.85"><strong>Recommendation:</strong> {escape(item["recommendation"])}</p>'
                               if item.get("recommendation") else "")
@@ -1693,7 +1774,7 @@ body{{margin:0;font:20px/1.55 "Helvetica Neue",Helvetica,Arial,system-ui,sans-se
 .evidence{{display:flex;flex-direction:column;gap:.7rem;min-width:0}}
 .shots{{display:grid;grid-template-columns:1fr;gap:.7rem}}
 .shot figcaption{{font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:#5b6b7c;margin-bottom:.28rem;font-weight:700}}
-.shot img{{width:100%;border-radius:.35rem;border:1px solid #d6dde5;display:block;background:#fff}}
+.shot img{{width:100%;height:auto;max-height:42vh;object-fit:contain;object-position:top;border-radius:.35rem;border:1px solid #d6dde5;display:block;background:#fff}}
 .shot iframe.redesign{{width:100%;height:14rem;border-radius:.35rem;border:1px solid #d6dde5;background:#fff;display:block}}
 figure{{margin:0}}
 blockquote{{margin:0;padding:.55rem .85rem;border-left:3px solid #12303f;background:#f4f6f8;border-radius:0 .3rem .3rem 0;font-size:.88rem;color:#39485a}}

@@ -16,6 +16,7 @@ python-docx
 markdown
 jupyter
 matplotlib
+Pillow
 pydantic
 textdistance
 scipy

@@ -51,6 +51,11 @@ class VisionUnavailableError extends Error {
   }
 }
 
+// Statuses where the identical request is rejected every time. Retrying one
+// burns the attempt budget, delays the failure by the backoff, and buries the
+// real cause (a 413 payload, a bad key) behind a generic "after 3 attempts".
+const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
+
 const FINDING_CATEGORIES = ["accessibility", "usability", "visual_design", "copy", "navigation"];
 const ELEMENT_ROLES = ["trigger", "cause", "feedback", "obstacle", "recovery"];
 // Maps this module's finding categories onto knowledge.js's curated-source
@@ -178,7 +183,9 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
     max_tokens: 2500,
   };
   let lastError;
+  let attemptsSpent = 0;
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    attemptsSpent = attempt;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -187,20 +194,26 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
         body: JSON.stringify(payload),
       });
-      if (!response.ok) throw new Error(`vision endpoint returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+      if (!response.ok) {
+        const failure = new Error(
+          `vision endpoint returned HTTP ${response.status}: ${(await response.text()).slice(0, 500)}`);
+        failure.status = response.status;
+        throw failure;
+      }
       const data = await response.json();
       const content = data.choices?.[0]?.message?.content;
       if (!content || !content.trim()) throw new Error("vision endpoint returned an empty completion");
       return content;
     } catch (error) {
       lastError = error;
+      if (NON_RETRYABLE_STATUS.has(error?.status)) break;
       if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, retryWaitMs * attempt));
     } finally {
       clearTimeout(timeout);
     }
   }
   throw new VisionUnavailableError(
-    `vision critique failed after ${maxAttempts} attempts: ${lastError?.message}`, 502, "vision_upstream_failed");
+    `vision critique failed after ${attemptsSpent} attempts: ${lastError?.message}`, 502, "vision_upstream_failed");
 }
 
 /**
@@ -208,7 +221,8 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
  * finding.elements that matched a real detected element carries its `box`
  * (boundingBox) so the caller can crop the specific region it refers to.
  */
-async function critiqueScreenshot({ imageBase64, elements = [], url, task, personaSummary, options = {} }) {
+async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], url, task,
+  personaSummary, options = {} }) {
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY || process.env.BLABLADOR_API_KEY;
   const baseUrl = options.baseUrl || process.env.OPENAI_COMPATIBLE_ENDPOINT || process.env.OPENAI_BASE_URL || process.env.BLABLADOR_BASE_URL;
   const model = options.model || process.env.OPENAI_MODEL || "auto";
@@ -218,7 +232,10 @@ async function critiqueScreenshot({ imageBase64, elements = [], url, task, perso
       503, "vision_not_configured");
   }
   const { system, user } = buildPrompt({ url, task, personaSummary, elements });
+  // The producer downscales and re-encodes before sending, so the bytes are not
+  // necessarily PNG any more; mislabelling them breaks strict providers.
   const content = await completeVision({ systemPrompt: system, userText: user, imageBase64, model, apiKey, baseUrl,
+    mimeType: imageMimeType || "image/png",
     maxAttempts: options.maxAttempts, retryWaitMs: options.retryWaitMs, timeoutMs: options.timeoutMs });
   const { issues, strengths } = parseCritique(content);
   const byId = new Map(elements.map((element) => [element.selector, element]));
