@@ -994,6 +994,58 @@ def fetch_live_state(run_id: str) -> dict:
                 "reasoning": [], "error": str(error)}
 
 
+def render_live_panes(frame: str, cursor: dict | None, caption: str = "", zoom: float = 2.75) -> str:
+    """The running browser, twice: the whole viewport, and a close-up of the pointer.
+
+    The full pane answers "where is it" and the close-up answers "what is it
+    actually touching" -- at viewport scale a 22px marker over a small control is
+    too coarse to tell a near miss from a hit, which is exactly what a usability
+    reader is trying to see.
+
+    Both panes are the same frame, so the close-up costs no extra capture, no
+    second browser and no second stream. It is a background-position crop of the
+    image already on screen.
+
+    Without a pointer there is nothing to centre on, so the close-up says so
+    rather than magnifying the middle of the page and implying that is where the
+    agent is looking.
+    """
+    image = escape(frame, quote=True)
+    pane = ("flex:1 1 0;min-width:0;border-radius:.5rem;border:1px solid #334155;"
+            "background:#fff;overflow:hidden")
+    label = "font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;opacity:.6;margin:.3rem 0 0"
+
+    full = (f'<div style="{pane}"><img src="{image}" alt="The running browser" '
+            'style="display:block;width:100%"></div>')
+
+    if cursor and cursor.get("viewport", {}).get("width"):
+        viewport = cursor["viewport"]
+        # Percentage background-position pans the magnified image with the
+        # pointer and clamps itself at the edges, so no pane pixel size is needed.
+        x = max(0.0, min(100.0, float(cursor["x"]) / float(viewport["width"]) * 100))
+        y = max(0.0, min(100.0, float(cursor["y"]) / float(viewport["height"]) * 100))
+        close_up = (
+            f'<div style="{pane};aspect-ratio:{viewport["width"]}/{viewport["height"]};'
+            f'background-image:url({image});background-repeat:no-repeat;'
+            f'background-size:{zoom * 100:.0f}% auto;background-position:{x:.2f}% {y:.2f}%"></div>')
+        close_up_caption = f'pointer at {int(cursor["x"])}, {int(cursor["y"])} · {zoom:g}×'
+    else:
+        close_up = (f'<div style="{pane};aspect-ratio:16/10;display:flex;align-items:center;'
+                    'justify-content:center;color:#64748b;font-size:.85rem">'
+                    "The pointer has not moved yet</div>")
+        close_up_caption = "waiting for the pointer"
+
+    return (
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">'
+        f'<div style="flex:1 1 320px;min-width:0">{full}'
+        f'<p style="{label}">Full viewport</p></div>'
+        f'<div style="flex:1 1 320px;min-width:0">{close_up}'
+        f'<p style="{label}">Pointer close-up — {escape(close_up_caption)}</p></div>'
+        "</div>"
+        + (f'<p style="opacity:.6;font-size:.85em">{escape(caption)}</p>' if caption else "")
+    )
+
+
 def render_live_thoughts(reasoning: list[dict]) -> str:
     """The agent's thinking as it arrives, newest first.
 
@@ -1657,16 +1709,19 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as d
             compare_videos = [compare_video_1, compare_video_2, compare_video_3, compare_video_4]
 
             with gr.Group(visible=False) as live_group:
-                gr.Markdown("**Following a run as it happens.** The recording is only finalized when the run "
-                            "ends, so there is no video to stream yet \u2014 this is the newest frame the "
-                            "browser has written, beside the model's thinking as it arrives.")
+                gr.Markdown("**Following a run as it happens.** The recording is only finalized when the "
+                            "run ends, so there is no video yet \u2014 this is the browser's own viewport "
+                            "as it paints, with a close-up of what the pointer is touching, and the "
+                            "model's thinking as it arrives.")
                 with gr.Row():
                     live_run = gr.Dropdown(label="Live run", choices=[], interactive=True, allow_custom_value=True)
                     live_refresh = gr.Button("Find live runs")
                     live_follow = gr.Checkbox(label="Follow", value=True)
-                with gr.Row():
-                    live_frame = gr.HTML(visible=False)
-                    live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
+                # The two browser panes take the full width between them; the
+                # model's thinking reads as a column underneath rather than
+                # squeezed into a third of the row beside them.
+                live_frame = gr.HTML(visible=False)
+                live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
                 live_note = gr.Markdown()
                 live_timer = gr.Timer(2.0, active=False)
                 # journeytest-core's own run id for the live run, which is what the
@@ -1892,10 +1947,9 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as d
                     return (gr.update(visible=False), thoughts,
                             note + " \u2014 the browser has not written a frame yet.",
                             gr.update(active=bool(following)), journey_run)
-                image = (f'<img src="{escape(frame, quote=True)}" alt="Newest frame of the running journey" '
-                         'style="width:100%;border-radius:.5rem;border:1px solid #334155;background:#fff">')
-                caption = escape(str(state.get("frameName") or ""))
-                return (gr.update(visible=True, value=f'{image}<p style="opacity:.6;font-size:.85em">{caption}</p>'),
+                panes = render_live_panes(frame, state.get("cursor"),
+                                          caption=str(state.get("frameName") or ""))
+                return (gr.update(visible=True, value=panes),
                         thoughts, note, gr.update(active=bool(following)), journey_run)
 
             recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout, live_follow],

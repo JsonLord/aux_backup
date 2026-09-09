@@ -28,6 +28,7 @@ const path = require("node:path");
 
 const { getRunContext, peekRunReasoning } = require("./reasoningCapture");
 const { latestFrame } = require("./viewportStream");
+const { readCursorPosition } = require("./cursorKeeper");
 
 // journeytest-core's own safeId(): non-portable characters replaced, capped at 24.
 function safeId(value, fallback = "run") {
@@ -125,7 +126,12 @@ async function liveRunState(runId) {
   // where the run deliberately captured one. Prefer the stream, fall back to the
   // files when nothing has arrived recently.
   const streamed = latestFrame();
-  const { frames, frame, name } = await latestScreenshot(directory, { skipBytes: Boolean(streamed) });
+  const [{ frames, frame, name }, cursor] = await Promise.all([
+    latestScreenshot(directory, { skipBytes: Boolean(streamed) }),
+    // Where the on-page marker is drawn, so a viewer can magnify around it
+    // rather than around the middle of the page.
+    readCursorPosition().catch(() => null),
+  ]);
   // The directory basename *is* journeytest-core's own run id, which is what the
   // stored artifacts are tagged with -- the caller's run id is a different
   // identifier. Reporting it is what lets a finished live run be matched to its
@@ -138,6 +144,7 @@ async function liveRunState(runId) {
     // reports -- a cursor overlay drawn client-side needs it to scale.
     frameSource: streamed ? "stream" : "screenshot",
     frameMetadata: streamed ? streamed.metadata : undefined,
+    cursor,
     reasoning };
 }
 

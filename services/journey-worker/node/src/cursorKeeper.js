@@ -71,6 +71,34 @@ async function installOnce(runner = batch) {
   return true;
 }
 
+// Reads the marker's own position rather than tracking mouse events a second
+// time in the worker: the overlay is the thing the viewer can see, so where it
+// is drawn is the honest answer to where the pointer is.
+const CURSOR_POSITION_PROBE = `(() => {
+  const c = document.getElementById("__aux_cursor_overlay__");
+  if (!c) return "";
+  const r = c.getBoundingClientRect();
+  if (!r.width || r.left < -1000) return "";
+  return Math.round(r.left + r.width / 2) + "," + Math.round(r.top + r.height / 2)
+    + "," + Math.round(innerWidth) + "," + Math.round(innerHeight);
+})()`;
+
+/**
+ * Where the pointer is, in CSS pixels, with the viewport it is relative to.
+ *
+ * Returns null before anything has moved it, or when the page has no overlay
+ * yet -- a magnifier centred on a guess is worse than one that waits.
+ */
+async function readCursorPosition(runner = batch) {
+  const result = await runner([["eval", CURSOR_POSITION_PROBE]]);
+  if (!result.ok) return null;
+  const match = String(result.stdout).match(/(\d+),(\d+),(\d+),(\d+)/);
+  if (!match) return null;
+  const [, x, y, width, height] = match.map(Number);
+  if (!width || !height) return null;
+  return { x, y, viewport: { width, height } };
+}
+
 function startCursorKeeper({ intervalMs, env = process.env, runner = batch } = {}) {
   if (!enabled(env)) return { running: false, reason: "disabled" };
   if (timer) return { running: true, reason: "already-running" };
@@ -104,6 +132,6 @@ function __resetCursorKeeper() {
 }
 
 module.exports = {
-  DEFAULT_INTERVAL_MS, OVERLAY_SCRIPT, cursorKeeperStatus, enabled, installOnce,
-  startCursorKeeper, stopCursorKeeper, __resetCursorKeeper,
+  CURSOR_POSITION_PROBE, DEFAULT_INTERVAL_MS, OVERLAY_SCRIPT, cursorKeeperStatus, enabled,
+  installOnce, readCursorPosition, startCursorKeeper, stopCursorKeeper, __resetCursorKeeper,
 };
