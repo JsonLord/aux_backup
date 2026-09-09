@@ -1,7 +1,7 @@
 """Versioned API contracts shared by the first control-plane implementation."""
 from datetime import datetime, timezone
 from enum import Enum
-from typing import Any
+from typing import Any, Literal
 
 from pydantic import BaseModel, Field
 
@@ -43,3 +43,33 @@ class ArtifactCreate(BaseModel):
     content_type: str = "application/json"
     content: Any
     metadata: dict[str, Any] = Field(default_factory=dict)
+    retention_class: Literal["raw", "structured"] = "structured"
+
+
+class ArtifactPin(BaseModel):
+    pinned: bool
+
+
+class PresignedArtifactCreate(BaseModel):
+    session_id: str
+    kind: str
+    content_type: str
+    size: int = Field(gt=25 * 1024 * 1024, le=1024 * 1024 * 1024)
+    metadata: dict[str, Any] = Field(default_factory=dict)
+    retention_class: Literal["raw", "structured"] = "raw"
+    multipart: bool = False
+
+
+class MultipartPart(BaseModel):
+    ETag: str
+    PartNumber: int = Field(ge=1, le=10_000)
+
+
+class MultipartComplete(BaseModel):
+    upload_id: str | None = None
+    parts: list[MultipartPart] = Field(default_factory=list)
+
+
+class LegacyGitHubImport(BaseModel):
+    repository: str
+    branch: str

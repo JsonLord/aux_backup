@@ -11,3 +11,4 @@ data/
 .pytest_cache/
 *.py[cod]
 .venv/
+tinytroupe.*.log
