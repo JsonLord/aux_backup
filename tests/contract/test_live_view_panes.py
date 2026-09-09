@@ -50,3 +50,18 @@ def test_the_frame_and_caption_are_escaped_into_the_markup():
     assert 'onerror="alert(1)' not in html
     assert "<script>bad</script>" not in html
     assert "&lt;script&gt;" in html
+
+
+def test_the_close_up_scales_against_the_page_viewport_not_the_stream_metadata():
+    """A real frame measured 1280x633 while its metadata reported 1280x720.
+
+    The screencast's deviceWidth/deviceHeight describe the device, not the image,
+    so scaling against them would push the close-up off the pointer vertically.
+    cursor.viewport is read from the same page the image is a render of.
+    """
+    cursor = {"x": 1072, "y": 161, "viewport": {"width": 1280, "height": 633}}
+    html = app.render_live_panes(FRAME, cursor)
+
+    # 161 / 633, not 161 / 720 (which would be 22.36%).
+    assert "background-position:83.75% 25.43%" in html
+    assert "aspect-ratio:1280/633" in html

@@ -140,8 +140,12 @@ async function liveRunState(runId) {
     frames,
     frame: streamed ? `data:image/jpeg;base64,${streamed.data}` : frame,
     frameName: name,
-    // Which of the two a viewer is looking at, and the geometry the stream
-    // reports -- a cursor overlay drawn client-side needs it to scale.
+    // Which of the two a viewer is looking at. frameMetadata is the stream's own
+    // report and is passed through as-is, but do NOT scale against it: its
+    // deviceWidth/deviceHeight describe the device, not the image. A real frame
+    // measured 1280x633 -- the page viewport -- while its metadata said
+    // 1280x720. Scale against `cursor.viewport`, which is read from the same
+    // page and does match the image.
     frameSource: streamed ? "stream" : "screenshot",
     frameMetadata: streamed ? streamed.metadata : undefined,
     cursor,
