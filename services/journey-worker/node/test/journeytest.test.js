@@ -122,3 +122,29 @@ test("the overlay can be turned off so the page under test is untouched", () => 
   assert.equal(outcome.reason, "disabled");
   assert.equal(env.AGENT_BROWSER_INIT_SCRIPTS, undefined);
 });
+
+test("an issued account is handed to the agent so nothing is invented mid-run", () => {
+  // An account the agent made up and nobody recorded is one no later run can get
+  // back into, so the values are decided up front and the agent is told them.
+  const journey = journeyContract({
+    runId: "run_1", url: "https://shop.example.com", tasks: ["Create an account"],
+    profile: { id: "persona_1", persona: {}, behavior: {}, abilities: {} },
+    identity: { email: "p.9f2@aux-test.invalid", password: "Aux-abc123-DEAD", name: "Persona One" },
+  });
+
+  assert.match(journey.objective, /email p\.9f2@aux-test\.invalid/);
+  assert.match(journey.objective, /password Aux-abc123-DEAD/);
+  assert.match(journey.objective, /invent nothing/);
+  // The task itself still leads.
+  assert.match(journey.objective, /^Create an account/);
+});
+
+test("a run with no issued account is not told to register", () => {
+  const journey = journeyContract({
+    runId: "run_1", url: "https://shop.example.com", tasks: ["Find pricing"],
+    profile: { id: "persona_1", persona: {}, behavior: {}, abilities: {} },
+  });
+
+  assert.equal(journey.objective, "Find pricing");
+  assert.doesNotMatch(journey.objective, /register|password/i);
+});

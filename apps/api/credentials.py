@@ -39,7 +39,7 @@ from uuid import uuid4
 KIND_REFERENCE = "reference"
 KIND_STATE = "state"
 KIND_PASSWORD = "password"
-KINDS = (KIND_REFERENCE, KIND_STATE, KIND_PASSWORD)
+KINDS = (KIND_REFERENCE, KIND_STATE, KIND_PASSWORD, "self-issued")
 
 ENCRYPTION_KEY_ENV = "AUX_CREDENTIAL_KEY"
 
@@ -78,6 +78,44 @@ def encryption_available() -> bool:
     except CredentialError:
         return False
     return True
+
+
+KIND_SELF_ISSUED = "self-issued"
+
+
+def issue_identity(persona_id: str, origin: str = "", *, domain: str | None = None,
+                   seed: str | None = None) -> dict[str, str]:
+    """Invent an account for a persona to register with.
+
+    Testing a sign-up flow means creating an account, and an account the agent
+    invented mid-run is one nobody can log back into: the run ends, the password
+    goes with it, and the next run cannot check what the first one created.
+
+    So the identity is issued up front rather than improvised. The run is told
+    exactly what to type, which means the credential is known before the browser
+    opens instead of having to be recovered from a transcript afterwards.
+
+    Derived from the persona and the site so a re-run reaches the same account
+    rather than piling up a new one each time, and salted with a per-deployment
+    secret so the addresses are not guessable from the persona name alone.
+    """
+    import hashlib
+    import re as _re
+
+    salt = seed if seed is not None else os.getenv("AUX_IDENTITY_SEED", "aux-local-seed")
+    person = _re.sub(r"[^a-z0-9]+", "-", str(persona_id or "persona").lower()).strip("-") or "persona"
+    site = _re.sub(r"^https?://", "", str(origin or "")).split("/")[0].lower()
+    digest = hashlib.sha256(f"{salt}|{person}|{site}".encode("utf-8")).hexdigest()
+    # A mailbox domain that cannot receive mail by accident. Override it when the
+    # flow under test sends a confirmation that has to be opened.
+    mailbox = domain or os.getenv("AUX_IDENTITY_DOMAIN", "aux-test.invalid")
+    return {
+        "email": f"{person}.{digest[:8]}@{mailbox}",
+        # Mixed classes and length, so a sign-up form's own password policy is
+        # not what fails the test.
+        "password": f"Aux-{digest[8:20]}-{digest[20:24].upper()}",
+        "name": str(persona_id or "persona").replace("_", " ").title(),
+    }
 
 
 class CredentialStore:
@@ -162,7 +200,7 @@ class CredentialStore:
             except (TypeError, ValueError):
                 raise CredentialError("the storage state is not valid JSON") from None
             encrypted = _cipher().encrypt(secret.encode("utf-8")).decode("ascii")
-        elif kind == KIND_PASSWORD:
+        elif kind in (KIND_PASSWORD, KIND_SELF_ISSUED):
             if not str(secret or "").strip():
                 raise CredentialError("a password credential needs a password")
             encrypted = _cipher().encrypt(secret.encode("utf-8")).decode("ascii")

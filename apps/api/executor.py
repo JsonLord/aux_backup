@@ -12,6 +12,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 from urllib import request
 
@@ -243,29 +244,43 @@ class JobExecutor:
         # field was never included, so any such task failed unconditionally
         # with no way to opt in.
         browser_safety = data.get("browserSafety") or {}
+        # A run browses signed in when it is handed a session file. Without this
+        # the credentials a workspace has stored were unreachable from a run, so
+        # every run tested the logged-out product however many were saved.
+        session_state_path, issued = self._prepare_run_session(job, data, personas)
         if worker_url:
-            for persona in personas:
-                payload = json.dumps({"runId": f"{job['job_id']}_{persona.get('id', len(journeys))}", "url": data.get("url"),
-                    "tasks": tasks, "profile": persona, "browserSafety": browser_safety}).encode()
-                call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
-                try:
-                    with request.urlopen(call, timeout=float(os.getenv("JOURNEY_RUN_TIMEOUT", "600"))) as response:
-                        journey = json.loads(response.read())
-                        if journey.get("runStatus") == "error" or journey.get("error"):
-                            message = (journey.get("error") or {}).get("message", "unknown JourneyTest error")
-                            raise RuntimeError(f"JourneyTest run failed: {message}")
-                        journeys.append(journey)
-                except request.HTTPError as error:
-                    detail = error.read().decode("utf-8", errors="replace")[:2000]
-                    if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
-                        raise RuntimeError(
-                            "Journey worker rejected run (422): one of the configured tasks reads as a "
-                            "potentially irreversible action (purchase, account deletion, submission, "
-                            "production deploy, ...). This run did not opt in to allow it -- re-run with "
-                            "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
-                            "allow_irreversible_actions: true (API) if the task is genuinely meant to "
-                            f"perform it. Raw detail: {detail}") from error
-                    raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
+            try:
+                for persona in personas:
+                    run_identity = issued.get(persona.get("id")) if issued else None
+                    payload = json.dumps({"runId": f"{job['job_id']}_{persona.get('id', len(journeys))}", "url": data.get("url"),
+                        "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
+                        **({"sessionStatePath": session_state_path} if session_state_path else {}),
+                        **({"identity": run_identity} if run_identity else {})}).encode()
+                    call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
+                    try:
+                        with request.urlopen(call, timeout=float(os.getenv("JOURNEY_RUN_TIMEOUT", "600"))) as response:
+                            journey = json.loads(response.read())
+                            if journey.get("runStatus") == "error" or journey.get("error"):
+                                message = (journey.get("error") or {}).get("message", "unknown JourneyTest error")
+                                raise RuntimeError(f"JourneyTest run failed: {message}")
+                            journeys.append(journey)
+                    except request.HTTPError as error:
+                        detail = error.read().decode("utf-8", errors="replace")[:2000]
+                        if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
+                            raise RuntimeError(
+                                "Journey worker rejected run (422): one of the configured tasks reads as a "
+                                "potentially irreversible action (purchase, account deletion, submission, "
+                                "production deploy, ...). This run did not opt in to allow it -- re-run with "
+                                "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
+                                "allow_irreversible_actions: true (API) if the task is genuinely meant to "
+                                f"perform it. Raw detail: {detail}") from error
+                        raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
+            finally:
+                # The session file is a live login. It exists for the runs that
+                # need it and not a moment longer -- including when one of them
+                # raises, which is exactly when it would otherwise be left behind.
+                if session_state_path:
+                    shutil.rmtree(Path(session_state_path).parent, ignore_errors=True)
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)
             cohort_runs, screenshot_bytes, raw_strengths, vision_error = self._collect_vision_pain_points(
@@ -974,6 +989,58 @@ class JobExecutor:
             return None
 
     _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+
+    @classmethod
+    def _prepare_run_session(cls, job, data, personas):
+        """Everything a run needs in order to be somebody.
+
+        Returns the session file to browse with, and any accounts issued for this
+        run. Both are optional: a run with neither browses the logged-out product
+        as an anonymous visitor, which is still the common case.
+
+        A failure here is not allowed to take the run down with it. A run that
+        browses signed out is a worse run; a run that does not happen is no run
+        at all, and the reason is recorded either way.
+        """
+        from .credentials import CredentialError, CredentialStore, KIND_SELF_ISSUED, issue_identity
+
+        workspace_id = job.get("workspace_id") or "local"
+        session_state_path, issued = None, {}
+        credential_id = str(data.get("credentialId") or "").strip()
+        wants_signup = bool(data.get("issueAccounts") or data.get("signUp"))
+        if not credential_id and not wants_signup:
+            return None, issued
+
+        store = CredentialStore()
+        if credential_id:
+            try:
+                session_state_path = store.write_state_file(
+                    credential_id, Path(cls._run_session_dir(job)), workspace_id=workspace_id)
+            except CredentialError as error:
+                data.setdefault("warnings", []).append(f"Signed-out run: {error}")
+
+        if wants_signup:
+            for persona in personas:
+                persona_id = persona.get("id") or "persona"
+                identity = issue_identity(persona_id, data.get("url") or "")
+                issued[persona_id] = identity
+                try:
+                    # Written down before the run, not after: an account invented
+                    # mid-run and never recorded is one nobody can get back into.
+                    store.put(workspace_id=workspace_id, label=f"{persona_id} @ {data.get('url') or 'target'}",
+                              kind=KIND_SELF_ISSUED, origin=data.get("url") or "",
+                              username=identity["email"], secret=identity["password"])
+                except CredentialError as error:
+                    data.setdefault("warnings", []).append(
+                        f"Account issued but not stored, so it cannot be reused: {error}")
+        return session_state_path, issued
+
+    @staticmethod
+    def _run_session_dir(job) -> str:
+        """A run-scoped directory for the session file, under the artifact tree."""
+        root = Path(os.getenv("ARTIFACT_ROOT", "data/artifacts")) / "sessions" / str(job["job_id"])
+        root.mkdir(parents=True, exist_ok=True)
+        return str(root)
 
     @staticmethod
     def _vision_timeout() -> float:

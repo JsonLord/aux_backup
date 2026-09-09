@@ -253,3 +253,51 @@ def test_signing_in_by_hand_needs_somewhere_to_sign_in(store, keyed):
         store.sign_in_by_hand(label="Shop", login_url="")
     with pytest.raises(CredentialError, match="needs a label"):
         store.sign_in_by_hand(label="", login_url="https://shop.example.com/login")
+
+
+# ── Accounts the agent is given to register with ──────────────────────────────
+
+def test_an_issued_identity_is_stable_for_a_persona_and_site():
+    from apps.api.credentials import issue_identity
+
+    # A re-run should reach the account the last one made, not pile up a new one.
+    first = issue_identity("friedrich_wolf", "https://taoshq.com/", seed="s")
+    again = issue_identity("friedrich_wolf", "https://taoshq.com/", seed="s")
+    assert first == again
+
+    # Different persona, or different site, is a different account.
+    assert issue_identity("ada_lovelace", "https://taoshq.com/", seed="s") != first
+    assert issue_identity("friedrich_wolf", "https://other.example/", seed="s") != first
+
+
+def test_an_issued_identity_is_not_guessable_from_the_persona_name_alone():
+    from apps.api.credentials import issue_identity
+
+    assert issue_identity("friedrich_wolf", "https://taoshq.com/", seed="one") \
+        != issue_identity("friedrich_wolf", "https://taoshq.com/", seed="two")
+
+
+def test_an_issued_identity_will_not_mail_a_real_person_by_accident():
+    from apps.api.credentials import issue_identity
+
+    identity = issue_identity("friedrich_wolf", "https://taoshq.com/", seed="s")
+    assert identity["email"].endswith("@aux-test.invalid"), identity["email"]
+    # Long enough, and mixed enough, that a sign-up policy is not what fails the test.
+    assert len(identity["password"]) >= 12
+    assert any(c.isupper() for c in identity["password"])
+    assert any(c.isdigit() for c in identity["password"])
+
+
+def test_a_self_issued_account_is_recorded_so_a_later_run_can_get_back_in(store, keyed):
+    from apps.api.credentials import KIND_SELF_ISSUED, issue_identity
+
+    identity = issue_identity("friedrich_wolf", "https://taoshq.com/", seed="s")
+    meta = store.put(label="friedrich_wolf @ taoshq", kind=KIND_SELF_ISSUED,
+                     origin="https://taoshq.com/", username=identity["email"],
+                     secret=identity["password"])
+
+    # It reads as an account this system invented, not one the operator owns.
+    assert meta["kind"] == KIND_SELF_ISSUED
+    assert meta["username"] == identity["email"]
+    listed = store.list_credentials()[0]
+    assert "secret" not in listed

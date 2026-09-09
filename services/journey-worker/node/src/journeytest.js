@@ -35,12 +35,22 @@ function journeyContract(input) {
     expectedOutcome: `The tester can complete: ${task}`,
     evidence: ["screenshot", "snapshot", "url", "uiChangeTimeline"],
   }));
+  // An account issued for this run, when the flow under test is registration.
+  // Handing the agent the exact values means the credential is known before the
+  // browser opens, rather than having to be recovered from a transcript after --
+  // an account invented mid-run and never written down is one nobody can get
+  // back into, including the next run.
+  const identity = input.identity && input.identity.email
+    ? ` When the flow asks you to register or sign in, use exactly these details and invent nothing:`
+      + ` email ${input.identity.email}; password ${input.identity.password};`
+      + ` name ${input.identity.name || profileId}.`
+    : "";
   return {
     id: safeId(input.runId, `journey-${Date.now()}`),
     title: `AUX live journey for ${profileId}`,
     app: { name: "Target application", baseUrl: input.url },
     testerProfile: profileId,
-    objective: tasks.map((task) => task.instruction).join("; "),
+    objective: tasks.map((task) => task.instruction).join("; ") + identity,
     tasks,
     passCriteria: [{ id: "tasks-completed",
       statement: `The requested tasks can be completed.${CRITERION_RESULT_VOCABULARY}`,
