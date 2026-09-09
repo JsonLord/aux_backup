@@ -203,6 +203,76 @@ class CredentialStore:
             raise CredentialError("credential not found in this workspace")
         return row
 
+    def attach_state(self, credential_id: str, state: str, workspace_id: str = "local") -> dict[str, Any]:
+        """Record a captured browser session against an existing credential.
+
+        A password credential becomes usable at this point: from here on the run
+        is handed the session, and the password is not needed again until it
+        expires.
+        """
+        try:
+            json.loads(state)
+        except (TypeError, ValueError):
+            raise CredentialError("the captured session is not valid JSON") from None
+        row = self._row(credential_id, workspace_id)
+        encrypted = _cipher().encrypt(state.encode("utf-8")).decode("ascii")
+        with self.lock, self.connect() as db:
+            db.execute("UPDATE browser_credentials SET secret=?, kind=? WHERE credential_id=?",
+                       (encrypted, KIND_STATE, credential_id))
+            updated = db.execute("SELECT * FROM browser_credentials WHERE credential_id=?",
+                                 (credential_id,)).fetchone()
+        # The username is kept: it says whose session this is, which matters when
+        # a workspace holds several for the same site.
+        _ = row
+        return self._metadata(updated)
+
+    def capture_session(self, credential_id: str, login_url: str, *, workspace_id: str = "local",
+                        worker_url: str | None = None, timeout: float | None = None) -> dict[str, Any]:
+        """Sign in with a stored password and keep the resulting session.
+
+        The password is decrypted here, sent once over loopback to the worker that
+        owns the browser, and never returned to a caller -- so it stays inside
+        this module and the service that has to type it.
+
+        The call is held open for the whole sign-in, including any wait for a
+        second factor, so the client timeout has to outlast the worker's own
+        patience rather than cutting a half-finished login short.
+        """
+        from urllib import request as urlrequest
+
+        row = self._row(credential_id, workspace_id)
+        if row["kind"] != KIND_PASSWORD:
+            raise CredentialError("only a password credential has anything to sign in with")
+        if not str(login_url or "").strip():
+            raise CredentialError("a capture needs the URL of the sign-in page")
+
+        password = _cipher().decrypt(row["secret"].encode("ascii")).decode("utf-8")
+        body = json.dumps({
+            "url": login_url.strip(), "username": row["username"] or "", "password": password,
+        }).encode("utf-8")
+        base = (worker_url or os.getenv("JOURNEY_WORKER_URL", "http://127.0.0.1:8080")).rstrip("/")
+        call = urlrequest.Request(f"{base}/v1/login-captures", data=body,
+                                  headers={"content-type": "application/json"}, method="POST")
+        # Default past the worker's own second-factor wait, with room to spare.
+        wait = timeout if timeout is not None else float(os.getenv("AUX_LOGIN_CAPTURE_TIMEOUT", "300"))
+        try:
+            with urlrequest.urlopen(call, timeout=wait) as response:
+                outcome = json.loads(response.read())
+        except Exception as error:  # noqa: BLE001 - the cause must not carry the password
+            raise CredentialError(f"the sign-in service could not be reached: {type(error).__name__}") from None
+        finally:
+            del password
+
+        status = outcome.get("status")
+        if status != "succeeded":
+            # Surfaced verbatim: "answer the challenge" and "the password is
+            # wrong" need different reactions from whoever is watching.
+            raise CredentialError(outcome.get("detail") or f"sign-in did not complete ({status})")
+        state = outcome.get("state")
+        if not state:
+            raise CredentialError("the sign-in reported success but returned no session")
+        return self.attach_state(credential_id, state, workspace_id)
+
     def write_state_file(self, credential_id: str, directory: str | Path,
                          workspace_id: str = "local") -> str:
         """Materialise a run's storage state on disk and return its path.

@@ -6,6 +6,7 @@ const { BehaviorController } = require("./behavior");
 const { EvidenceCoordinator, normalizeStepEvidence } = require("./evidence");
 const { runWithJourneyTest } = require("./journeytest");
 const { liveRunState } = require("./liveRun");
+const { captureLogin } = require("./loginCapture");
 const { listLiveRuns } = require("./reasoningCapture");
 const { replayFromEvidence } = require("./replay");
 const { validateBrowserSafety } = require("./safety");
@@ -110,6 +111,18 @@ const server = http.createServer(async (request, response) => {
       const runId = decodeURIComponent(request.url.slice("/v1/runs/".length, -"/live".length));
       if (!runId) return json(response, 422, { error: "invalid_request", message: "runId is required" });
       return json(response, 200, await liveRunState(runId));
+    }
+    // Sign in once and keep the session, so later runs test the product a user
+    // actually sees. Held open for the duration like /v1/runs is: a capture that
+    // is waiting on a second factor is waiting on a person, and the status
+    // updates it emits are what the caller shows them meanwhile.
+    if (request.method === "POST" && request.url === "/v1/login-captures") {
+      const payload = await body(request);
+      const updates = [];
+      const outcome = await captureLogin({ ...payload, onStatus: (update) => updates.push(update) });
+      // The state is a bearer credential: returned to the caller that asked for
+      // it, and never written to this worker's logs or artifacts.
+      return json(response, 201, { ...outcome, updates });
     }
     if (request.method === "POST" && request.url === "/v1/runs") return json(response, 201, await runJourney(await body(request)));
     if (request.method === "POST" && request.url === "/v1/replays") return json(response, 201, replayFromEvidence(await body(request)));

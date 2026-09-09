@@ -159,6 +159,16 @@ def render(store, workspace_selector):
             delete_id = gr.Textbox(label="Delete by id", placeholder="cred_…", scale=3)
             delete = gr.Button("Delete", variant="stop", scale=1)
 
+        gr.Markdown("#### Capture a session")
+        gr.HTML('<p class="aux-cred-note">Sign a saved password credential in once and keep the '
+                "session. If the site asks for a second factor, the capture waits — answer the "
+                "challenge in the live view and it carries on by itself.</p>")
+        with gr.Row():
+            capture_id = gr.Textbox(label="Credential id", placeholder="cred_…", scale=2)
+            capture_url = gr.Textbox(label="Sign-in page", placeholder="https://shop.example.com/login", scale=3)
+        capture = gr.Button("Sign in and capture session")
+        capture_status = gr.Markdown("")
+
         with gr.Accordion("How do I get a session, or a key?", open=False):
             gr.Markdown(
                 "**A session file** – sign in once in a real browser, then export it:\n"
@@ -209,6 +219,22 @@ def render(store, workspace_selector):
         return ("🗑️ Deleted." if removed else "No credential with that id in this workspace."), \
             _rows(store, workspace_id)
 
+    def _capture(workspace_id, credential_id, login_url):
+        """Drive a sign-in and keep the session it produces.
+
+        Can take minutes when a second factor is involved -- that wait is the
+        point, not a stall -- so the message says what is being waited on.
+        """
+        if not str(credential_id or "").strip():
+            return "Enter the id of the password credential to sign in with.", gr.update()
+        try:
+            meta = store.capture_session(credential_id.strip(), login_url or "",
+                                         workspace_id=workspace_id or "local")
+        except CredentialError as error:
+            return f"⚠️ {error}", _rows(store, workspace_id)
+        return (f"✅ Signed in and kept the session for **{meta['label']}**. "
+                "Runs using it now browse signed in."), _rows(store, workspace_id)
+
     open_button.click(_open, [workspace_selector],
                       [dialog, backdrop, banner, table, status])
     close.click(_close, None, [dialog, backdrop])
@@ -218,6 +244,8 @@ def render(store, workspace_selector):
                api_name="store_browser_credential")
     delete.click(_delete, [workspace_selector, delete_id], [status, table],
                  api_name="delete_browser_credential")
+    capture.click(_capture, [workspace_selector, capture_id, capture_url],
+                  [capture_status, table], api_name="capture_browser_session")
 
     # Listing is its own endpoint so a script can check what a workspace already
     # has before attaching another one. Metadata only.

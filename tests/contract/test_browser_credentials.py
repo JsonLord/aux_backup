@@ -120,3 +120,78 @@ def test_credentials_do_not_leak_across_workspaces(store, keyed, tmp_path):
         store.write_state_file(meta["credential_id"], tmp_path / "s", workspace_id="beta")
 
     assert store.delete(meta["credential_id"], workspace_id="alpha") is True
+
+
+def test_a_captured_session_turns_a_password_into_a_usable_credential(store, keyed, tmp_path, monkeypatch):
+    meta = store.put(label="Shop", kind=KIND_PASSWORD, username="ada", secret="hunter2")
+    sent = {}
+
+    class _Response:
+        def read(self):
+            return json.dumps({"status": "succeeded", "state": STATE_JSON}).encode()
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+    def fake_urlopen(call, timeout=None):
+        sent["url"] = call.full_url
+        sent["body"] = json.loads(call.data)
+        sent["timeout"] = timeout
+        return _Response()
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+
+    updated = store.capture_session(meta["credential_id"], "https://shop.example.com/login")
+
+    # The worker owns the browser, so the password crosses exactly one loopback hop.
+    assert sent["url"].endswith("/v1/login-captures")
+    assert sent["body"]["password"] == "hunter2"
+    assert sent["body"]["username"] == "ada"
+    # The wait has to outlast the worker's own second-factor patience, or a
+    # half-finished login is thrown away by the client instead of the server.
+    assert sent["timeout"] >= 300
+
+    # It is now a session credential, and a run can be handed the file.
+    assert updated["kind"] == KIND_STATE
+    path = store.write_state_file(meta["credential_id"], tmp_path / "sessions")
+    assert json.loads(open(path, encoding="utf-8").read())["cookies"][0]["value"] == "s3cr3t"
+
+
+def test_an_unanswered_second_factor_is_reported_not_swallowed(store, keyed, monkeypatch):
+    # "Go and answer the challenge" and "the password is wrong" need different
+    # reactions, so the worker's own wording is surfaced rather than flattened.
+    meta = store.put(label="Shop", kind=KIND_PASSWORD, username="ada", secret="hunter2")
+
+    class _Response:
+        def read(self):
+            return json.dumps({"status": "second_factor_timed_out",
+                               "detail": "The second factor was not answered in time; "
+                                         "nothing was saved."}).encode()
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+    monkeypatch.setattr("urllib.request.urlopen", lambda call, timeout=None: _Response())
+
+    with pytest.raises(CredentialError, match="second factor was not answered"):
+        store.capture_session(meta["credential_id"], "https://shop.example.com/login")
+
+    # Nothing was written: the credential is still just a password.
+    assert store.list_credentials()[0]["kind"] == KIND_PASSWORD
+
+
+def test_a_failing_sign_in_service_never_echoes_the_password(store, keyed, monkeypatch):
+    meta = store.put(label="Shop", kind=KIND_PASSWORD, username="ada", secret="hunter2")
+
+    def explode(call, timeout=None):
+        raise OSError("connection refused to http://worker/v1/login-captures")
+
+    monkeypatch.setattr("urllib.request.urlopen", explode)
+
+    with pytest.raises(CredentialError) as raised:
+        store.capture_session(meta["credential_id"], "https://shop.example.com/login")
+    assert "hunter2" not in str(raised.value)
+
+
+def test_only_a_password_credential_can_be_signed_in(store, keyed):
+    meta = store.put(label="Shop", kind=KIND_STATE, secret=STATE_JSON)
+    with pytest.raises(CredentialError, match="only a password credential"):
+        store.capture_session(meta["credential_id"], "https://shop.example.com/login")
