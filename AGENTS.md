@@ -71,6 +71,35 @@ offline generator explicitly labeled as a fallback.
   Python 3.12 `uv.lock`, then run the frozen direct-versus-DSPy 3.3.0 parity report.
   DSPy must not become the default before that report is approved.
 
+### Browser session work: what is deferred, and the gap to close first
+
+**Not wired yet, and it is the link that makes the rest useful.** A credential can
+be stored, a session can be captured, and `runWithJourneyTest()` accepts
+`sessionStatePath` -- but nothing joins them. `CredentialStore.write_state_file()`
+has no caller outside its tests, and the run started at `apps/api/executor.py:250`
+attaches no credential. Until a run selects one and passes its state file, every
+run still browses signed out no matter what the settings dialog holds.
+
+**Deferred: forwarding real pointer movement.** A relayed click currently jumps to
+its target, because Gradio has no pointer-move event to forward -- it conveys
+human intent, not human movement. Reproducing movement needs custom JS in the
+live view posting coordinates into a hidden component. Do not build it
+speculatively: wait until a real run against a real challenge is actually
+rejected and the jump is the identified cause. Challenge scoring reads the client
+as much as the interaction, and this browser is CDP-driven either way, so the
+movement fix may not be what unblocks such a site.
+
+**Deferred: agent-browser's init scripts.** `AGENT_BROWSER_INIT_SCRIPTS` and
+`open --init-script` do nothing in the pinned 0.31.1. The cursor overlay is
+requested through it anyway and would install before the first navigation once
+the pin moves, which is earlier than `cursorKeeper.js` can manage. Re-check when
+the pin changes; until then the keeper is what works.
+
+**Never exercised end to end.** Every part of this was verified against a real
+browser individually -- stream frames, pointer tracking, relayed input, session
+capture -- but no full `JOURNEY_ENGINE=journeytest` run has been made with a real
+model, and the takeover controls have not been clicked through in a browser.
+
 ### HF workspace acceptance
 
 In a deployed HF Space, validate login, logout, token expiry, personal workspace
