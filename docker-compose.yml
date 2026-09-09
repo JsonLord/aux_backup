@@ -1,0 +1,117 @@
+services:
+  api:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/control-plane.Dockerfile
+    environment:
+      DATABASE_URL: postgresql+psycopg://aux_app:aux-app-development-secret@postgres:5432/aux
+      MIGRATION_DATABASE_URL: postgresql+psycopg://aux:aux@postgres:5432/aux
+      JOB_QUEUE: celery
+      REDIS_URL: redis://redis:6379/0
+      AUTH_MODE: ${AUTH_MODE:-local}
+      HF_OIDC_USERINFO_URL: ${HF_OIDC_USERINFO_URL:-https://huggingface.co/oauth/userinfo}
+      ARTIFACT_STORAGE: r2
+      R2_ENDPOINT_URL: http://minio:9000
+      R2_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      R2_ACCESS_KEY_ID: aux
+      R2_SECRET_ACCESS_KEY: aux-development-secret
+      R2_BUCKET: artifacts
+      JOURNEY_WORKER_URL: http://journey-worker:8080
+    command: ["sh", "-c", "DATABASE_URL=$$MIGRATION_DATABASE_URL alembic upgrade head && uvicorn apps.api.main:app --host 0.0.0.0 --port 8000"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+    ports: ["8000:8000"]
+    healthcheck: {test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/readyz')"], interval: 5s, timeout: 3s, retries: 30}
+  journey-worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/journey-worker.Dockerfile
+    environment:
+      JOURNEY_ENGINE: journeytest
+      EYESON_WORKER_URL: http://eyeson-worker:8081
+    ports: ["8080:8080"]
+    depends_on:
+      eyeson-worker: {condition: service_healthy}
+  eyeson-worker:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/eyeson-worker.Dockerfile
+    ports: ["8081:8081"]
+    healthcheck: {test: ["CMD", "node", "-e", "fetch('http://localhost:8081/healthz').then(r=>{if(!r.ok)process.exit(1)})"], interval: 5s, timeout: 3s, retries: 20}
+  persona-runtime:
+    build:
+      context: .
+      dockerfile: infrastructure/docker/persona-runtime.Dockerfile
+    environment:
+      PERSONA_GENERATOR: tinytroupe
+      SEMANTIC_ENGINE: ${SEMANTIC_ENGINE:-mock}
+      BLABLADOR_API_KEY: ${BLABLADOR_API_KEY:-}
+      PERSONA_DATABASE_PATH: /data/personas.db
+      PERSONA_DATABASE_URL: postgresql+psycopg://aux_app:aux-app-development-secret@postgres:5432/aux
+      AUTH_MODE: ${AUTH_MODE:-local}
+      HF_OIDC_AUDIENCE: ${HF_OIDC_AUDIENCE:-}
+      HF_OIDC_JWKS_URL: ${HF_OIDC_JWKS_URL:-}
+      HF_OIDC_USERINFO_URL: ${HF_OIDC_USERINFO_URL:-https://huggingface.co/oauth/userinfo}
+    volumes: ["platform-data:/data"]
+    ports: ["8090:8090"]
+    depends_on:
+      postgres: {condition: service_healthy}
+      api: {condition: service_healthy}
+  worker:
+    build: {context: ., dockerfile: infrastructure/docker/control-plane.Dockerfile}
+    command: ["celery", "-A", "apps.api.tasks:celery_app", "worker", "--loglevel=INFO", "-Q", "jobs"]
+    environment: &production-env
+      DATABASE_URL: postgresql+psycopg://aux_worker:aux-worker-development-secret@postgres:5432/aux
+      JOB_QUEUE: celery
+      REDIS_URL: redis://redis:6379/0
+      ARTIFACT_STORAGE: r2
+      R2_ENDPOINT_URL: http://minio:9000
+      R2_PUBLIC_ENDPOINT_URL: http://localhost:9000
+      R2_ACCESS_KEY_ID: aux
+      R2_SECRET_ACCESS_KEY: aux-development-secret
+      R2_BUCKET: artifacts
+      JOURNEY_WORKER_URL: http://journey-worker:8080
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+      minio-init: {condition: service_completed_successfully}
+  beat:
+    build: {context: ., dockerfile: infrastructure/docker/control-plane.Dockerfile}
+    command: ["celery", "-A", "apps.api.tasks:celery_app", "beat", "--loglevel=INFO"]
+    environment: *production-env
+    depends_on:
+      postgres: {condition: service_healthy}
+      redis: {condition: service_healthy}
+  postgres:
+    image: postgres:17-alpine
+    environment: {POSTGRES_DB: aux, POSTGRES_USER: aux, POSTGRES_PASSWORD: aux}
+    volumes: ["postgres-data:/var/lib/postgresql/data"]
+    configs:
+      - source: postgres-init
+        target: /docker-entrypoint-initdb.d/001-roles.sql
+    healthcheck: {test: ["CMD-SHELL", "pg_isready -U aux"], interval: 5s, timeout: 3s, retries: 20}
+  redis:
+    image: redis:8-alpine
+    command: ["redis-server", "--appendonly", "yes"]
+    volumes: ["redis-data:/data"]
+    healthcheck: {test: ["CMD", "redis-cli", "ping"], interval: 5s, timeout: 3s, retries: 20}
+  minio:
+    image: minio/minio:latest
+    command: ["server", "/data"]
+    environment: {MINIO_ROOT_USER: aux, MINIO_ROOT_PASSWORD: aux-development-secret}
+    volumes: ["object-data:/data"]
+    ports: ["9000:9000"]
+  minio-init:
+    image: minio/mc:latest
+    depends_on: [minio]
+    entrypoint: ["sh", "-c", "until mc alias set local http://minio:9000 aux aux-development-secret; do sleep 1; done; mc mb --ignore-existing local/artifacts"]
+volumes:
+  platform-data:
+  postgres-data:
+  redis-data:
+  object-data:
+configs:
+  postgres-init:
+    file: ./infrastructure/postgres/init.sql

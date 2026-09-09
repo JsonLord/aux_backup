@@ -1,5 +1,4 @@
-gradio==5.15.0
-PyGithub
+gradio[oauth]==5.15.0
 openai
 requests
 pandas

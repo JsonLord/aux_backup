@@ -1,0 +1,26 @@
+"use strict";
+const { aggregateCohort } = require("./aggregate");
+const { enrichRun } = require("./enricher");
+
+const escapeJson = (value) => JSON.stringify(value).replaceAll("<", "\\u003c");
+
+function renderReport(run, cohortRuns = [run]) {
+  const enriched = run.uxAnalysis ? run : enrichRun(run);
+  const model = { runId: enriched.runId, userId: enriched.profileId || enriched.userId,
+    steps: enriched.steps || [], painPoints: enriched.uxAnalysis.painPoints,
+    rootCauses: aggregateCohort(cohortRuns.map((item) => item.uxAnalysis ? item : enrichRun(item))) };
+  return `<!doctype html><html><head><meta name="viewport" content="width=device-width,initial-scale=1">
+<style>body{font:16px system-ui;margin:auto;max-width:80rem;padding:1rem;color:#17202a}.modes,nav{display:flex;gap:.5rem;flex-wrap:wrap}button{padding:.65rem 1rem;border:1px solid #789;border-radius:.5rem;background:white}button[aria-pressed=true]{background:#173b57;color:white}.viewer{display:grid;grid-template-columns:minmax(0,2fr) minmax(16rem,1fr);gap:1rem;margin-top:1rem}.shot{position:relative;min-height:18rem;background:#eef2f5;padding:1rem}.overlay{position:absolute;border:3px solid #d22;background:#d224;pointer-events:none}@media(max-width:48rem){.viewer{grid-template-columns:1fr}}</style></head><body>
+<h1>UX simulation report</h1><nav class="modes"><button id="journey" data-mode="journey">User Journey</button><button id="ux" data-mode="ux">UX Feedback</button></nav>
+<nav><button data-view="individual">Individual user</button><button data-view="aggregate">Aggregate root causes</button><button data-view="issue">Isolated issue</button></nav>
+<p id="selection"></p><div class="viewer"><section class="shot"><h2 id="shot-title">Original screenshot</h2><pre id="artifact"></pre><div id="overlays"></div></section><aside><button id="toggle">Show perceived screenshot</button><div id="details"></div></aside></div>
+<script>const model=${escapeJson(model)};const params=new URLSearchParams(location.search);let mode=params.get('mode')||'journey';let view=params.get('view')||'individual';let perceived=false;
+const safe=value=>String(value??'').replace(/[&<>"']/g,char=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const boxStyle=box=>box?'left:'+Number(box.x||0)+'px;top:'+Number(box.y||0)+'px;width:'+Number(box.width||0)+'px;height:'+Number(box.height||0)+'px':'';
+const step=()=>model.steps.find(s=>s.stepId==params.get('step'))||model.steps[0]||{};const evidence=()=>step().evidence?.[0]||{};
+function selectMode(next){mode=next;params.set('mode',mode);params.set('run',params.get('run')||model.runId||'');params.set('user',params.get('user')||model.userId||'');if(step().stepId)params.set('step',params.get('step')||step().stepId);if(evidence().iterationId)params.set('iteration',params.get('iteration')||evidence().iterationId);if(evidence().timestampMs!=null)params.set('timestamp',params.get('timestamp')||evidence().timestampMs);history.replaceState({},'',location.pathname+'?'+params);render()}
+function render(){document.querySelectorAll('[data-mode]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.mode==mode));document.querySelectorAll('[data-view]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.view==view));document.querySelector('#selection').textContent='Run '+(params.get('run')||'')+' · User '+(params.get('user')||'')+' · Step '+(params.get('step')||'');const e=evidence(),ref=perceived?e.perceivedScreenshot:e.screenshot;document.querySelector('#shot-title').textContent=perceived?'Perceived screenshot':'Original screenshot';document.querySelector('#artifact').textContent=ref?.artifactId||'No screenshot';document.querySelector('#toggle').textContent=perceived?'Show original screenshot':'Show perceived screenshot';const pain=model.painPoints.filter(p=>p.stepIds?.includes(step().stepId));const isolated=model.painPoints.filter(p=>p.id==(params.get('issue')||pain[0]?.id));const cards=(view=='issue'?isolated:pain).map(p=>'<article><h3>'+safe(p.title)+'</h3><p>'+safe(p.summary)+'</p></article>').join('');const aggregate=model.rootCauses.map(r=>'<article><h3>'+safe(r.category)+'</h3><p>'+r.affectedUsers.length+' users · '+r.affectedIterations.length+' iterations</p></article>').join('');document.querySelector('#details').innerHTML=view=='aggregate'?'<h2>Aggregate root causes</h2>'+aggregate:mode=='journey'?'<h2>Journey state</h2><pre>'+safe(JSON.stringify(step().state||{},null,2))+'</pre>':'<h2>UX pain points</h2>'+cards;document.querySelector('#overlays').innerHTML=mode=='ux'&&view!='aggregate'?(view=='issue'?isolated:pain).flatMap(p=>p.overlays||[]).map(o=>'<span class="overlay" style="'+boxStyle(o.box)+'" title="'+safe(o.elementId)+'"></span>').join(''):''}
+document.querySelectorAll('[data-mode]').forEach(b=>b.onclick=()=>selectMode(b.dataset.mode));document.querySelectorAll('[data-view]').forEach(b=>b.onclick=()=>{view=b.dataset.view;params.set('view',view);if(view=='issue'&&!params.get('issue'))params.set('issue',model.painPoints[0]?.id||'');history.replaceState({},'',location.pathname+'?'+params);render()});document.querySelector('#toggle').onclick=()=>{perceived=!perceived;render()};selectMode(mode);</script></body></html>`;
+}
+
+module.exports = { renderReport };
