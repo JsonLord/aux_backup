@@ -1,5 +1,4 @@
 gradio[oauth]==5.15.0
-PyGithub
 openai
 requests
 pandas

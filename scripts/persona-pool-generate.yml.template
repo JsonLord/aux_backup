@@ -1,0 +1,83 @@
+name: Generate persona pool batch
+
+# TEMPLATE -- deliberately NOT an active GitHub Actions workflow. Kept here
+# (outside .github/workflows/, where GitHub Actions only ever looks) rather
+# than deleted, so it cannot fire in this repo -- no schedule, no
+# workflow_dispatch, nothing -- while the working code stays available to
+# copy in later. To activate it in a repo where PersonaPool generation
+# should actually run automatically: copy this file to
+# .github/workflows/persona-pool-generate.yml (dropping the .yml.template
+# suffix) in that repo, then add the two secrets below.
+#
+# docs/persona-pool-plan.md component B: runs the same TinyTroupeGenerator/
+# PersonaCompiler pipeline the live Space uses, against a rotating set of
+# theme/customer-profile archetypes, and commits the results to the
+# JsonLord/PersonaPool repo -- independently of the Space, with nobody
+# waiting on it.
+#
+# Required repository secrets (Settings -> Secrets and variables -> Actions):
+#   BLABLADOR_API_KEY        Same model-router credential the live Space uses.
+#                             Never reuse the Space's read-only
+#                             PERSONA_POOL_GITHUB_TOKEN here -- this is a
+#                             different provider entirely.
+#   PERSONA_POOL_WRITE_TOKEN A GitHub PAT with contents:write on
+#                             JsonLord/PersonaPool ONLY. Distinct from, and
+#                             more privileged than, the Space's own
+#                             read-only PERSONA_POOL_GITHUB_TOKEN -- do not
+#                             reuse that token here either.
+# Optional repository variables (Settings -> Secrets and variables ->
+# Actions -> Variables), fall back to the same defaults start-live.sh uses:
+#   OPENAI_COMPATIBLE_ENDPOINT, OPENAI_MODEL
+
+on:
+  schedule:
+    - cron: "0 6 * * *" # daily, 06:00 UTC
+  workflow_dispatch: {}
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout aux_backup
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install persona-service dependencies
+        run: |
+          pip install --no-cache-dir --retries 10 --timeout 120 -r spaces/aux-live/requirements-live.txt
+          grep -m1 '^tinytroupe ' services/persona_service/requirements.lock > tinytroupe-requirement.txt
+          pip install --no-cache-dir --retries 10 --timeout 120 --no-deps -r tinytroupe-requirement.txt
+          python -c "from tinytroupe.factory.tiny_person_factory import TinyPersonFactory; print(TinyPersonFactory)"
+
+      - name: Checkout PersonaPool repo
+        uses: actions/checkout@v4
+        with:
+          repository: JsonLord/PersonaPool
+          path: persona-pool-checkout
+          token: ${{ secrets.PERSONA_POOL_WRITE_TOKEN }}
+
+      - name: Generate batch
+        env:
+          PERSONA_GENERATOR: tinytroupe
+          BLABLADOR_API_KEY: ${{ secrets.BLABLADOR_API_KEY }}
+          OPENAI_COMPATIBLE_ENDPOINT: ${{ vars.OPENAI_COMPATIBLE_ENDPOINT || 'https://debian-devil.tail3f341b.ts.net/v1' }}
+          OPENAI_MODEL: ${{ vars.OPENAI_MODEL || 'auto' }}
+        run: python scripts/generate_persona_pool_batch.py --repo-dir persona-pool-checkout --count-per-theme 2
+
+      - name: Commit and push if changed
+        working-directory: persona-pool-checkout
+        run: |
+          git config user.name "aux-persona-pool-bot"
+          git config user.email "actions@users.noreply.github.com"
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to commit."
+            exit 0
+          fi
+          git commit -m "Scheduled persona pool batch: $(date -u +%Y-%m-%d)"
+          git push

@@ -14,6 +14,27 @@ Imported into `services/eyeson-engine` and owned by this repository.
 **Notes:**
 This codebase is to be migrated and integrated into the aux platform. Expect architectural changes to remove independent browser capture, integrate with JourneyTest screenshots, and add element attribution, pain resolution, and alternatives.
 
+**Update (2026-08-28):** the actual live integration did not migrate this
+`services/eyeson-engine` codebase (a Node/Express/React app with a
+Gemini-specific `AICritiqueService`, no configured credential in this
+deployment) -- instead `services/eyeson-worker` (a lightweight from-scratch
+Node worker already in this repo) gained a new `visionCritique.js` that does
+what this note asked for, against the OpenAI-compatible endpoint already
+configured for the whole deployment rather than a separate Gemini key:
+JourneyTest screenshots feed it directly, findings carry real element
+attribution (selector + boundingBox, cropped into the report) when
+journeytest-core's own semantic snapshot has a matching element, and findings
+are grounded through `knowledge.js`'s `CuratedUXKnowledgeProvider` (real WCAG/
+Nielsen Norman references -- this existed before but was never actually
+invoked). "Alternatives" is real but simpler than this repo's `alternatives.js`
+template system (itself still an explicit `html-css-sandbox-placeholder`, and
+gated to the unrelated native-fixture-engine pain-point path): each vision
+finding's `recommendation` is a real, specific, LLM-generated suggestion, not
+a category-keyed template. Verified against real target sites, including a
+genuine severe bug (page content recursively repeating) that the
+task-completion-only verdict had no way to catch. `services/eyeson-engine`
+itself remains unmigrated reference code, not deployed.
+
 ---
 
 ## JourneyTest
@@ -68,6 +89,14 @@ dependencies = [
 
 Blablador compatibility belongs in `services/persona_service`; never patch the
 installed upstream package at application startup.
+
+The Helmholtz client implementation on
+`JsonLord/TinyTroupe:fix-openai-auth-error` was reviewed at commit
+`cc9bd2e550d93ad867746c9dddffaf6ff13f6620`. That branch reports package version
+0.5.2, so it is not substituted for the reviewed 0.7.0 runtime. Its provider
+mapping is implemented at the persona-service adapter boundary instead:
+`helmholtz-blablador` is normalized to TinyTroupe 0.7's registered `openai`
+client, while `OPENAI_BASE_URL` points to the Helmholtz-compatible endpoint.
 
 ---
 

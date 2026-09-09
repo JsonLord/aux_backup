@@ -1,0 +1,42 @@
+gradio[oauth]==5.15.0
+spaces==0.32.0
+fastapi>=0.115,<1
+uvicorn>=0.30,<1
+requests>=2.32,<3
+httpx>=0.27,<1
+pydantic>=2.9,<3
+openai>=1.65,<4
+pandas>=2.2,<4
+tiktoken>=0.8,<1
+msal>=1.31,<2
+rich>=13.9,<16
+chevron>=0.14,<1
+textdistance>=4.6,<5
+pyjwt[crypto]>=2.10,<3
+# Explicit, not relying on an incidental transitive pull -- crops the specific
+# element region a vision-critique finding refers to out of a full JourneyTest
+# screenshot (apps/api/executor.py's _vision_critique_journeys).
+pillow>=10.4,<12
+llama-index-core>=0.14,<0.15
+llama-index-embeddings-openai>=0.6,<0.7
+llama-index-readers-web>=0.6,<0.7
+# TinyPerson.__init__ unconditionally imports tinytroupe.agent.action_generator ->
+# tinytroupe.experimentation -> in_place_experiment_runner, which does
+# `import IPython` / `from IPython.display import ...` at module level purely for
+# an unused notebook-display feature (InPlaceExperimentRunner). This is not an
+# optional/lazy import: every persona construction hits it, so it must be present
+# even though nothing here runs inside a notebook. Found live: this path was never
+# exercised until the Blablador-502 and system-message-ordering fixes let
+# generation reach actual TinyPerson construction for the first time. That same
+# import chain (tinytroupe.experimentation.statistical_tests) also needs scipy
+# unconditionally, for the same reason.
+ipython>=8.0,<10
+scipy>=1.11,<2
+# Pinned to match services/persona_service/dspy-artifact.lock's reviewed wheel
+# (sha256:358cbfb15d13246dc4a289bb2350c0ee602260c8a3869f7f63a48a9d2233e48c). Installed
+# with full dependency resolution (not --no-deps like the TinyTroupe install below)
+# since DSPy's litellm-based LM backend needs its real transitive dependency tree
+# to function at runtime, not just to import. DSPy itself stays an explicit
+# PERSONA_COMPILER=dspy opt-in (see docs/stage-4-audit.md); this only makes it
+# available to select.
+dspy==3.3.0

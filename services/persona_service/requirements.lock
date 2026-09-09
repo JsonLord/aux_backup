@@ -1,4 +1,6 @@
 # Runtime pins resolved on 2026-08-26. TinyTroupe must not be patched in place.
+# Helmholtz compatibility from JsonLord/TinyTroupe@cc9bd2e is ported through the
+# persona adapter because that fork branch declares the older package version 0.5.2.
 tinytroupe @ git+https://github.com/microsoft/TinyTroupe.git@a6244b358a1fe1c71bf751f7ba0f8dfa368ec5a4
 # Do not substitute the legacy dspy-ai alias. The normative wheel hash is isolated
 # in dspy-artifact.lock so it can be verified with --no-deps without incorrectly
