@@ -400,7 +400,8 @@ def test_the_live_view_reads_frames_and_thoughts_from_the_worker(monkeypatch):
     try:
         assert [run["runId"] for run in gradio_app.fetch_live_runs()] == ["job_a_persona_1"]
 
-        image, thoughts, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
+        image, thoughts, note, timer, journey, _canvas = gradio_app.poll_live_run(
+            "job_a_persona_1", True, "")
 
         assert image["visible"] is True and frame in image["value"]
         assert "001-click-e21-after.png" in image["value"]
@@ -421,7 +422,8 @@ def test_the_live_view_stops_polling_when_the_run_ends(monkeypatch):
         "runId": "job_a_persona_1", "status": "finished", "frames": 0, "frame": None, "reasoning": []}})
     monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
     try:
-        image, _, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
+        image, _, note, timer, journey, _canvas = gradio_app.poll_live_run(
+            "job_a_persona_1", True, "")
         assert image["visible"] is False
         # The note is the signal the handoff keys on.
         assert "has finished" in note
@@ -437,7 +439,7 @@ def test_an_unreachable_worker_is_reported_and_does_not_spin(monkeypatch):
     monkeypatch.setenv("JOURNEY_WORKER_URL", "http://127.0.0.1:9")
     assert gradio_app.fetch_live_runs() == []
 
-    image, _, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
+    image, _, note, timer, journey, _canvas = gradio_app.poll_live_run("job_a_persona_1", True, "")
     assert image["visible"] is False
     assert "Could not reach the journey worker" in note
     assert timer["active"] is False
@@ -451,7 +453,7 @@ def test_a_live_run_that_has_not_written_a_frame_yet_still_follows(monkeypatch):
         "reasoning": [{"elapsedMs": 500, "text": "Opening the base URL."}]}})
     monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
     try:
-        image, thoughts, note, timer, journey = gradio_app.poll_live_run("r", True, "")
+        image, thoughts, note, timer, journey, _canvas = gradio_app.poll_live_run("r", True, "")
         assert image["visible"] is False
         assert "has not written a frame yet" in note
         assert "Opening the base URL." in thoughts

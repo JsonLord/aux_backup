@@ -7,6 +7,8 @@ const { EvidenceCoordinator, normalizeStepEvidence } = require("./evidence");
 const { runWithJourneyTest } = require("./journeytest");
 const { liveRunState } = require("./liveRun");
 const { captureLogin } = require("./loginCapture");
+const { sendViewportInput } = require("./viewportStream");
+const { beginTakeover, endTakeover, noteInput, takeoverActive, takeoverState } = require("./takeover");
 const { listLiveRuns } = require("./reasoningCapture");
 const { replayFromEvidence } = require("./replay");
 const { validateBrowserSafety } = require("./safety");
@@ -116,6 +118,31 @@ const server = http.createServer(async (request, response) => {
     // actually sees. Held open for the duration like /v1/runs is: a capture that
     // is waiting on a second factor is waiting on a person, and the status
     // updates it emits are what the caller shows them meanwhile.
+    // Hand the browser to a person, so they can finish what the agent cannot --
+    // a second factor, or a challenge that is asking whether a human is there.
+    if (request.method === "GET" && request.url === "/v1/takeovers") {
+      return json(response, 200, takeoverState());
+    }
+    if (request.method === "POST" && request.url === "/v1/takeovers") {
+      return json(response, 201, beginTakeover(await body(request)));
+    }
+    if (request.method === "DELETE" && request.url === "/v1/takeovers") {
+      const finished = endTakeover();
+      return json(response, 200, { ended: Boolean(finished), takeover: finished });
+    }
+    // Input is refused without a handover: an agent mid-action and a person
+    // clicking are two hands on the same pointer, and the run is then evidence
+    // of neither one's behaviour.
+    if (request.method === "POST" && request.url === "/v1/input") {
+      if (!takeoverActive()) {
+        return json(response, 409, { error: "no_takeover",
+          message: "take over the browser before sending input" });
+      }
+      const outcome = sendViewportInput(await body(request));
+      if (!outcome.sent) return json(response, 502, { error: "input_not_sent", message: outcome.error });
+      noteInput();
+      return json(response, 202, outcome);
+    }
     if (request.method === "POST" && request.url === "/v1/login-captures") {
       const payload = await body(request);
       const updates = [];

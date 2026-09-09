@@ -18,7 +18,7 @@ import shutil
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
-from apps.gradio import credentials_panel
+from apps.gradio import credentials_panel, live_control
 from apps.gradio.github_backup import (GitHubAuthError, confirm_backup_repo, push_session_to_github,
                                         validate_and_list_repos)
 
@@ -1722,12 +1722,35 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as d
                 # squeezed into a third of the row beside them.
                 live_frame = gr.HTML(visible=False)
                 live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
+                # Handing the browser over, for what a run cannot finish on its own:
+                # a second factor, or a challenge that is asking for a human.
+                with gr.Accordion("Take over the browser", open=False):
+                    gr.Markdown(
+                        "Click the picture below to click the same spot in the real browser, and "
+                        "type to send keystrokes. Use it to answer a second factor or a bot "
+                        "challenge, then hand the browser back so the run can carry on.\n\n"
+                        "_The run records that a person intervened: a step someone completed by "
+                        "hand is not a step the product afforded._")
+                    with gr.Row():
+                        takeover_on = gr.Button("Take over", variant="primary")
+                        takeover_off = gr.Button("Hand back")
+                    takeover_status = gr.Markdown("_The agent is driving._")
+                    takeover_canvas = gr.Image(label="Click to click the real browser",
+                                               interactive=False, visible=False,
+                                               show_download_button=False, type="filepath")
+                    with gr.Row():
+                        takeover_text = gr.Textbox(label="Type into the page", scale=3)
+                        takeover_submit = gr.Checkbox(label="Press Enter after", value=False)
+                        takeover_send = gr.Button("Send", scale=1)
                 live_note = gr.Markdown()
                 live_timer = gr.Timer(2.0, active=False)
                 # journeytest-core's own run id for the live run, which is what the
                 # stored artifacts are tagged with. Remembered while the run is live
                 # because the worker forgets the run the moment it ends.
                 live_journey_run = gr.State("")
+                # Whether a person currently has the browser. The poll reads it so
+                # it only pays to decode a frame while somebody is clicking on it.
+                takeover_driving = gr.State(False)
 
             with gr.Group(visible=False) as gallery_group:
                 gallery_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
@@ -1921,23 +1944,37 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as d
                 return (gr.update(choices=choices, value=choices[0][1]),
                         f"{len(choices)} run(s) in flight.")
 
-            def poll_live_run(run_id, following, journey_run):
+            def _frame_to_image(frame: str):
+                """The streamed frame as an image Gradio can report clicks on.
+
+                Only decoded while somebody is driving: at two seconds a tick it
+                is pure waste the rest of the time.
+                """
+                try:
+                    import base64 as _b64, io as _io
+                    from PIL import Image as _Image
+                    return _Image.open(_io.BytesIO(_b64.b64decode(frame.split(",", 1)[1])))
+                except Exception:
+                    return None
+
+            def poll_live_run(run_id, following, journey_run, driving=False):
                 """One tick of the live view."""
                 if not run_id:
-                    return gr.update(visible=False), "_Pick a live run._", "", gr.update(), journey_run
+                    return (gr.update(visible=False), "_Pick a live run._", "", gr.update(),
+                            journey_run, gr.update())
                 state = fetch_live_state(run_id)
                 thoughts = render_live_thoughts(state.get("reasoning") or [])
                 if state.get("status") == "unreachable":
                     return (gr.update(visible=False), thoughts,
                             f"\u26a0\ufe0f Could not reach the journey worker: {state.get('error', '')}",
-                            gr.update(active=False), journey_run)
+                            gr.update(active=False), journey_run, gr.update())
                 if state.get("status") == "finished":
                     # The capture is cleared when a run ends, so its absence *is* the
                     # end of the run. Stop polling; the handoff below turns the live
                     # view into the ordinary recording of the same run.
                     return (gr.update(visible=False), thoughts,
                             "\u2714\ufe0f This run has finished \u2014 loading its recording\u2026",
-                            gr.update(active=False), journey_run)
+                            gr.update(active=False), journey_run, gr.update())
                 frame = state.get("frame")
                 elapsed = (state.get("elapsedMs") or 0) / 1000
                 note = (f"Live \u00b7 {state.get('frames', 0)} frame(s) captured \u00b7 "
@@ -1946,11 +1983,13 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as d
                 if not frame:
                     return (gr.update(visible=False), thoughts,
                             note + " \u2014 the browser has not written a frame yet.",
-                            gr.update(active=bool(following)), journey_run)
+                            gr.update(active=bool(following)), journey_run, gr.update())
                 panes = render_live_panes(frame, state.get("cursor"),
                                           caption=str(state.get("frameName") or ""))
+                canvas = (gr.update(value=_frame_to_image(frame), visible=True)
+                          if driving else gr.update())
                 return (gr.update(visible=True, value=panes),
-                        thoughts, note, gr.update(active=bool(following)), journey_run)
+                        thoughts, note, gr.update(active=bool(following)), journey_run, canvas)
 
             recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout, live_follow],
                                    [single_video_group, compare_group, live_group, gallery_group,
@@ -1992,8 +2031,53 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as d
 
             # api_name so the live view can be exercised against a real running
             # journey, not only through the browser.
-            live_timer.tick(poll_live_run, [live_run, live_follow, live_journey_run],
-                            [live_frame, live_thoughts, live_note, live_timer, live_journey_run],
+            def _take_over(run_id):
+                outcome = live_control.begin_takeover(run_id or "", reason="manual")
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}", gr.update(visible=False), False
+                return ("**You are driving.** Click the picture to click the page. "
+                        "Hand back when the obstacle is cleared."), gr.update(visible=True), True
+
+            def _hand_back():
+                outcome = live_control.end_takeover()
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}", gr.update(), True
+                return "_The agent is driving._", gr.update(visible=False, value=None), False
+
+            def _click_on_canvas(event: gr.SelectData):
+                """A click in the picture is a click at the same point in the page.
+
+                The frame is a render of the page viewport, so the coordinates
+                need no conversion.
+                """
+                x, y = event.index
+                outcome = live_control.click_at(x, y)
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}"
+                return f"Clicked the page at {int(x)}, {int(y)}."
+
+            def _send_keys(text, submit):
+                if not str(text or ""):
+                    return "Type something to send first."
+                outcome = live_control.type_text(text, submit=bool(submit))
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}"
+                return f"Sent {outcome['typed']} character(s)" + (" and Enter." if submit else ".")
+
+            takeover_on.click(_take_over, [live_run],
+                              [takeover_status, takeover_canvas, takeover_driving],
+                              api_name="take_over_browser")
+            takeover_off.click(_hand_back, None,
+                               [takeover_status, takeover_canvas, takeover_driving],
+                               api_name="hand_back_browser")
+            takeover_canvas.select(_click_on_canvas, None, [takeover_status])
+            takeover_send.click(_send_keys, [takeover_text, takeover_submit], [takeover_status],
+                                api_name="send_keys_to_browser")
+
+            live_timer.tick(poll_live_run,
+                            [live_run, live_follow, live_journey_run, takeover_driving],
+                            [live_frame, live_thoughts, live_note, live_timer, live_journey_run,
+                             takeover_canvas],
                             api_name="poll_live_run").then(
                 hand_off_finished_run, [live_note, live_journey_run, evidence_session, workspace_selector],
                 [recordings_mode, journey_runs_state, recording_slider, journey_video, compare_pick, journey_status],

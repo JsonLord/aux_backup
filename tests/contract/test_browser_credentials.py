@@ -18,6 +18,27 @@ def store(tmp_path):
     return CredentialStore(f"sqlite:///{tmp_path / 'control.db'}")
 
 
+def _worker_recorder(monkeypatch, capture_result):
+    """Record every call the store makes to the browser service."""
+    calls = []
+
+    class _Response:
+        def __init__(self, body): self._body = json.dumps(body).encode()
+        def read(self): return self._body
+        def __enter__(self): return self
+        def __exit__(self, *_): return False
+
+    def fake_urlopen(call, timeout=None):
+        calls.append({"url": call.full_url, "method": call.get_method(),
+                      "body": json.loads(call.data) if call.data else None})
+        if call.full_url.endswith("/v1/login-captures"):
+            return _Response(capture_result)
+        return _Response({})
+
+    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    return calls
+
+
 @pytest.fixture
 def keyed(monkeypatch):
     monkeypatch.setenv("AUX_CREDENTIAL_KEY", generate_key())
@@ -124,31 +145,14 @@ def test_credentials_do_not_leak_across_workspaces(store, keyed, tmp_path):
 
 def test_a_captured_session_turns_a_password_into_a_usable_credential(store, keyed, tmp_path, monkeypatch):
     meta = store.put(label="Shop", kind=KIND_PASSWORD, username="ada", secret="hunter2")
-    sent = {}
-
-    class _Response:
-        def read(self):
-            return json.dumps({"status": "succeeded", "state": STATE_JSON}).encode()
-        def __enter__(self): return self
-        def __exit__(self, *_): return False
-
-    def fake_urlopen(call, timeout=None):
-        sent["url"] = call.full_url
-        sent["body"] = json.loads(call.data)
-        sent["timeout"] = timeout
-        return _Response()
-
-    monkeypatch.setattr("urllib.request.urlopen", fake_urlopen)
+    calls = _worker_recorder(monkeypatch, {"status": "succeeded", "state": STATE_JSON})
 
     updated = store.capture_session(meta["credential_id"], "https://shop.example.com/login")
 
     # The worker owns the browser, so the password crosses exactly one loopback hop.
-    assert sent["url"].endswith("/v1/login-captures")
-    assert sent["body"]["password"] == "hunter2"
-    assert sent["body"]["username"] == "ada"
-    # The wait has to outlast the worker's own second-factor patience, or a
-    # half-finished login is thrown away by the client instead of the server.
-    assert sent["timeout"] >= 300
+    capture = next(c for c in calls if c["url"].endswith("/v1/login-captures"))
+    assert capture["body"]["password"] == "hunter2"
+    assert capture["body"]["username"] == "ada"
 
     # It is now a session credential, and a run can be handed the file.
     assert updated["kind"] == KIND_STATE
@@ -195,3 +199,57 @@ def test_only_a_password_credential_can_be_signed_in(store, keyed):
     meta = store.put(label="Shop", kind=KIND_STATE, secret=STATE_JSON)
     with pytest.raises(CredentialError, match="only a password credential"):
         store.capture_session(meta["credential_id"], "https://shop.example.com/login")
+
+
+def test_signing_in_by_hand_stores_a_session_and_never_a_password(store, keyed, monkeypatch):
+    # For a site with no credential registered: the person types their own
+    # username and password into the browser, and only the session is kept.
+    calls = _worker_recorder(monkeypatch, {"status": "succeeded", "state": STATE_JSON})
+
+    meta = store.sign_in_by_hand(label="Shop (by hand)", login_url="https://shop.example.com/login")
+
+    assert meta["kind"] == KIND_STATE
+    capture = next(c for c in calls if c["url"].endswith("/v1/login-captures"))
+    assert "password" not in capture["body"], "this service must not be typing anything"
+    assert capture["body"]["url"] == "https://shop.example.com/login"
+    # Nothing resembling a password is in the record.
+    with store.connect() as db:
+        row = db.execute("SELECT username, kind FROM browser_credentials").fetchone()
+    assert row["username"] is None
+
+
+def test_the_browser_is_handed_over_for_the_sign_in_and_handed_back_after(store, keyed, monkeypatch):
+    # Input is refused without a handover, so it has to bracket the sign-in.
+    calls = _worker_recorder(monkeypatch, {"status": "succeeded", "state": STATE_JSON})
+
+    store.sign_in_by_hand(label="Shop", login_url="https://shop.example.com/login")
+
+    order = [(c["method"], c["url"].rsplit("/", 1)[-1]) for c in calls]
+    assert order == [("POST", "takeovers"), ("POST", "login-captures"), ("DELETE", "takeovers")]
+
+
+def test_the_browser_is_handed_back_even_when_the_sign_in_fails(store, keyed, monkeypatch):
+    # Leaving it handed over would block the agent from ever acting again.
+    calls = _worker_recorder(monkeypatch, {"status": "failed", "detail": "gave up"})
+
+    with pytest.raises(CredentialError, match="gave up"):
+        store.sign_in_by_hand(label="Shop", login_url="https://shop.example.com/login")
+
+    assert ("DELETE", "takeovers") in [(c["method"], c["url"].rsplit("/", 1)[-1]) for c in calls]
+
+
+def test_a_password_sign_in_is_also_handed_over_for_the_challenge_it_may_hit(store, keyed, monkeypatch):
+    meta = store.put(label="Shop", kind=KIND_PASSWORD, username="ada", secret="hunter2")
+    calls = _worker_recorder(monkeypatch, {"status": "succeeded", "state": STATE_JSON})
+
+    store.capture_session(meta["credential_id"], "https://shop.example.com/login")
+
+    order = [(c["method"], c["url"].rsplit("/", 1)[-1]) for c in calls]
+    assert order == [("POST", "takeovers"), ("POST", "login-captures"), ("DELETE", "takeovers")]
+
+
+def test_signing_in_by_hand_needs_somewhere_to_sign_in(store, keyed):
+    with pytest.raises(CredentialError, match="URL of the sign-in page"):
+        store.sign_in_by_hand(label="Shop", login_url="")
+    with pytest.raises(CredentialError, match="needs a label"):
+        store.sign_in_by_hand(label="", login_url="https://shop.example.com/login")

@@ -65,3 +65,28 @@ def test_the_close_up_scales_against_the_page_viewport_not_the_stream_metadata()
     # 161 / 633, not 161 / 720 (which would be 22.36%).
     assert "background-position:83.75% 25.43%" in html
     assert "aspect-ratio:1280/633" in html
+
+
+def _live_state(frame):
+    return {"status": "live", "elapsedMs": 1000, "frames": 1, "frame": frame,
+            "frameName": "001.png", "reasoning": [],
+            "cursor": {"x": 10, "y": 10, "viewport": {"width": 100, "height": 100}}}
+
+
+def test_the_clickable_canvas_is_only_decoded_while_somebody_is_driving(monkeypatch):
+    """At two seconds a tick, decoding a frame nobody is clicking on is waste."""
+    import base64, io
+    from PIL import Image
+
+    buffer = io.BytesIO()
+    Image.new("RGB", (8, 8), (1, 2, 3)).save(buffer, format="PNG")
+    frame = "data:image/png;base64," + base64.b64encode(buffer.getvalue()).decode()
+    monkeypatch.setattr(app, "fetch_live_state", lambda run_id: _live_state(frame))
+
+    *_, idle_canvas = app.poll_live_run("run_1", True, "", False)
+    *_, driving_canvas = app.poll_live_run("run_1", True, "", True)
+
+    # An empty update leaves the component alone; the driving one carries a frame.
+    assert idle_canvas.get("value") is None and not idle_canvas.get("visible")
+    assert driving_canvas["visible"] is True
+    assert driving_canvas["value"] is not None

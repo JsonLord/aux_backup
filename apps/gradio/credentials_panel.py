@@ -169,6 +169,16 @@ def render(store, workspace_selector):
         capture = gr.Button("Sign in and capture session")
         capture_status = gr.Markdown("")
 
+        gr.Markdown("#### No credential for a site yet?")
+        gr.HTML('<p class="aux-cred-note">Open its sign-in page and log in yourself in the live '
+                "view. Nothing is typed by this service and no password is stored — only the "
+                "session that results, which is all a run needs.</p>")
+        with gr.Row():
+            hand_label = gr.Textbox(label="Name", placeholder="Shop – my account", scale=2)
+            hand_url = gr.Textbox(label="Sign-in page", placeholder="https://shop.example.com/login", scale=3)
+        hand_capture = gr.Button("Open it and let me sign in")
+        hand_status = gr.Markdown("")
+
         with gr.Accordion("How do I get a session, or a key?", open=False):
             gr.Markdown(
                 "**A session file** – sign in once in a real browser, then export it:\n"
@@ -235,6 +245,19 @@ def render(store, workspace_selector):
         return (f"✅ Signed in and kept the session for **{meta['label']}**. "
                 "Runs using it now browse signed in."), _rows(store, workspace_id)
 
+    def _sign_in_by_hand(workspace_id, name, login_url):
+        """Hand the browser over so a person can sign in themselves.
+
+        Blocks while they do, which can be minutes -- that wait is the feature.
+        """
+        try:
+            meta = store.sign_in_by_hand(label=name or "", login_url=login_url or "",
+                                         workspace_id=workspace_id or "local")
+        except CredentialError as error:
+            return f"⚠️ {error}", _rows(store, workspace_id)
+        return (f"✅ Kept the session for **{meta['label']}**. No password was stored."), \
+            _rows(store, workspace_id)
+
     open_button.click(_open, [workspace_selector],
                       [dialog, backdrop, banner, table, status])
     close.click(_close, None, [dialog, backdrop])
@@ -246,6 +269,8 @@ def render(store, workspace_selector):
                  api_name="delete_browser_credential")
     capture.click(_capture, [workspace_selector, capture_id, capture_url],
                   [capture_status, table], api_name="capture_browser_session")
+    hand_capture.click(_sign_in_by_hand, [workspace_selector, hand_label, hand_url],
+                       [hand_status, table], api_name="sign_in_by_hand")
 
     # Listing is its own endpoint so a script can check what a workspace already
     # has before attaching another one. Metadata only.

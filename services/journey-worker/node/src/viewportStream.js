@@ -132,6 +132,38 @@ function stopViewportStream() {
   reconnectAttempt = 0;
 }
 
+/**
+ * Send a viewer's input to the browser.
+ *
+ * The stream is bidirectional: agent-browser accepts input_mouse, input_keyboard
+ * and input_touch on the same socket it pushes frames down. That is what lets a
+ * person finish something the agent cannot -- a second factor, or a challenge
+ * that wants a human -- without a second browser or a second connection.
+ *
+ * The worker relays rather than the viewer connecting directly, because in a
+ * Space only one port is published and the stream's is not it. The worker
+ * already holds this socket, so relaying costs nothing extra.
+ *
+ * Movement is forwarded as it happens, not just the click. A pointer that
+ * teleports to a checkbox looks less human than one that never moved, and
+ * challenge scoring watches exactly that.
+ */
+function sendViewportInput(payload) {
+  if (!socket || socket.readyState !== 1) {
+    return { sent: false, error: "the viewport stream is not connected" };
+  }
+  const type = String(payload?.type || "");
+  if (!["input_mouse", "input_keyboard", "input_touch"].includes(type)) {
+    return { sent: false, error: `unsupported input type '${type}'` };
+  }
+  try {
+    socket.send(JSON.stringify(payload));
+  } catch (error) {
+    return { sent: false, error: String(error?.message || error) };
+  }
+  return { sent: true };
+}
+
 /** The newest frame, or null when none has arrived recently. */
 function latestFrame(now = Date.now()) {
   if (!latest) return null;
@@ -156,6 +188,6 @@ function __resetViewportStream() {
 
 module.exports = {
   DEFAULT_STREAM_PORT, FRAME_STALE_MS, configureStreamPort, latestFrame,
-  startViewportStream, stopViewportStream, streamPort, viewportStreamStatus,
+  sendViewportInput, startViewportStream, stopViewportStream, streamPort, viewportStreamStatus,
   __resetViewportStream, __handleMessage: handleMessage,
 };

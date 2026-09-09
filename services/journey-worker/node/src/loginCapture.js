@@ -66,7 +66,13 @@ const SECOND_FACTOR_PROBE = `(() => {
     " input[name*='verification' i], input[id*='verification' i]");
   const text = (document.body && document.body.innerText || "").slice(0, 4000);
   const phrase = /two[- ]?factor|２fa|\\b2fa\\b|verification code|authenticator|one[- ]?time (code|password)|security code|approve (the |this )?(sign|log)[- ]?in|check your (phone|device)/i.test(text);
-  return Boolean(field) || phrase;
+  // A bot challenge wants a person for the same reason a second factor does, so
+  // it extends the same wait rather than needing its own.
+  const challenge = /verify(ing)? (you are|you're) human|are you a human|checking your browser|needs to review the security|just a moment|cf-turnstile|hcaptcha|recaptcha|i'm not a robot/i.test(text)
+    || Boolean(document.querySelector(
+      "iframe[src*='challenges.cloudflare.com'], .cf-turnstile, iframe[src*='hcaptcha.com']," +
+      " iframe[src*='recaptcha'], #challenge-form, [data-sitekey]"));
+  return Boolean(field) || phrase || challenge;
 })()`;
 
 /** Whether a password prompt is still on screen -- i.e. sign-in has not landed. */

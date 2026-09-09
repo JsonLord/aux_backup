@@ -203,6 +203,63 @@ class CredentialStore:
             raise CredentialError("credential not found in this workspace")
         return row
 
+    @staticmethod
+    def _worker(path: str, payload: dict[str, Any] | None = None, *, method: str = "POST",
+                worker_url: str | None = None, timeout: float | None = None) -> dict[str, Any]:
+        """One call to the service that owns the browser.
+
+        Failures are re-raised without their cause's text, because some of these
+        calls carry a password and an exception is the easiest place to leak one.
+        """
+        from urllib import request as urlrequest
+
+        base = (worker_url or os.getenv("JOURNEY_WORKER_URL", "http://127.0.0.1:8080")).rstrip("/")
+        data = json.dumps(payload or {}).encode("utf-8") if payload is not None else None
+        call = urlrequest.Request(f"{base}{path}", data=data, method=method,
+                                  headers={"content-type": "application/json"})
+        wait = timeout if timeout is not None else float(os.getenv("AUX_LOGIN_CAPTURE_TIMEOUT", "300"))
+        try:
+            with urlrequest.urlopen(call, timeout=wait) as response:
+                body = response.read()
+            return json.loads(body) if body else {}
+        except Exception as error:  # noqa: BLE001 - the cause must not carry a secret
+            raise CredentialError(
+                f"the sign-in service could not be reached: {type(error).__name__}") from None
+
+    def sign_in_by_hand(self, *, label: str, login_url: str, origin: str = "",
+                        workspace_id: str = "local", owner_user_id: str = "local",
+                        worker_url: str | None = None, timeout: float | None = None) -> dict[str, Any]:
+        """Open a sign-in page and let a person complete it in the live view.
+
+        For a site with no credential registered, and for one where storing a
+        password is not wanted: nothing is typed by this service and no password
+        is ever written down. The human signs in themselves and only the
+        resulting session is kept -- which is all a later run needs.
+
+        The browser is handed over first, because input is refused without it,
+        and handed back afterwards even when the sign-in fails.
+        """
+        if not str(label or "").strip():
+            raise CredentialError("a credential needs a label so it can be chosen for a run")
+        if not str(login_url or "").strip():
+            raise CredentialError("signing in by hand needs the URL of the sign-in page")
+
+        self._worker("/v1/takeovers", {"reason": "sign-in", "url": login_url}, worker_url=worker_url)
+        try:
+            # No password: the worker opens the page and waits rather than typing.
+            outcome = self._worker("/v1/login-captures", {"url": login_url},
+                                   worker_url=worker_url, timeout=timeout)
+        finally:
+            self._worker("/v1/takeovers", method="DELETE", worker_url=worker_url, timeout=30)
+
+        if outcome.get("status") != "succeeded":
+            raise CredentialError(outcome.get("detail") or "the sign-in was not completed")
+        state = outcome.get("state")
+        if not state:
+            raise CredentialError("the sign-in reported success but returned no session")
+        return self.put(workspace_id=workspace_id, owner_user_id=owner_user_id, label=label,
+                        kind=KIND_STATE, origin=origin or login_url, secret=state)
+
     def attach_state(self, credential_id: str, state: str, workspace_id: str = "local") -> dict[str, Any]:
         """Record a captured browser session against an existing credential.
 
@@ -238,8 +295,6 @@ class CredentialStore:
         second factor, so the client timeout has to outlast the worker's own
         patience rather than cutting a half-finished login short.
         """
-        from urllib import request as urlrequest
-
         row = self._row(credential_id, workspace_id)
         if row["kind"] != KIND_PASSWORD:
             raise CredentialError("only a password credential has anything to sign in with")
@@ -247,19 +302,17 @@ class CredentialStore:
             raise CredentialError("a capture needs the URL of the sign-in page")
 
         password = _cipher().decrypt(row["secret"].encode("ascii")).decode("utf-8")
-        body = json.dumps({
-            "url": login_url.strip(), "username": row["username"] or "", "password": password,
-        }).encode("utf-8")
-        base = (worker_url or os.getenv("JOURNEY_WORKER_URL", "http://127.0.0.1:8080")).rstrip("/")
-        call = urlrequest.Request(f"{base}/v1/login-captures", data=body,
-                                  headers={"content-type": "application/json"}, method="POST")
-        # Default past the worker's own second-factor wait, with room to spare.
-        wait = timeout if timeout is not None else float(os.getenv("AUX_LOGIN_CAPTURE_TIMEOUT", "300"))
         try:
-            with urlrequest.urlopen(call, timeout=wait) as response:
-                outcome = json.loads(response.read())
-        except Exception as error:  # noqa: BLE001 - the cause must not carry the password
-            raise CredentialError(f"the sign-in service could not be reached: {type(error).__name__}") from None
+            # Handed over too: a password sign-in can still land on a second
+            # factor or a challenge that only a person can answer.
+            self._worker("/v1/takeovers", {"reason": "password sign-in", "url": login_url.strip()},
+                         worker_url=worker_url)
+            try:
+                outcome = self._worker("/v1/login-captures", {
+                    "url": login_url.strip(), "username": row["username"] or "", "password": password,
+                }, worker_url=worker_url, timeout=timeout)
+            finally:
+                self._worker("/v1/takeovers", method="DELETE", worker_url=worker_url, timeout=30)
         finally:
             del password
 
