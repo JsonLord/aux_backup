@@ -93,9 +93,14 @@ test("the cursor overlay is registered through agent-browser's init-script env",
   const env = {};
   const outcome = installCursorOverlay(env);
 
-  assert.equal(outcome.installed, true);
+  assert.equal(outcome.requested, true);
   assert.equal(env.AGENT_BROWSER_INIT_SCRIPTS, CURSOR_OVERLAY_SCRIPT);
   assert.ok(fs.existsSync(CURSOR_OVERLAY_SCRIPT), "the registered script must exist on disk");
+  // The pinned agent-browser 0.31.1 does not run init scripts (a trivial probe
+  // script never executed, by flag or env). Reporting this as installed would
+  // promise a cursor that never appears.
+  assert.equal(outcome.effective, false);
+  assert.match(outcome.reason, /0\.31\.1 does not run init scripts/);
 });
 
 test("an operator's own init scripts are not overwritten or guessed at", () => {
@@ -104,7 +109,7 @@ test("an operator's own init scripts are not overwritten or guessed at", () => {
   const env = { AGENT_BROWSER_INIT_SCRIPTS: "/opt/site/probe.js" };
   const outcome = installCursorOverlay(env);
 
-  assert.equal(outcome.installed, false);
+  assert.equal(outcome.requested, false);
   assert.equal(outcome.reason, "init-scripts-already-configured");
   assert.equal(env.AGENT_BROWSER_INIT_SCRIPTS, "/opt/site/probe.js");
 });
@@ -113,7 +118,7 @@ test("the overlay can be turned off so the page under test is untouched", () => 
   const env = { AUX_CURSOR_OVERLAY: "0" };
   const outcome = installCursorOverlay(env);
 
-  assert.equal(outcome.installed, false);
+  assert.equal(outcome.requested, false);
   assert.equal(outcome.reason, "disabled");
   assert.equal(env.AGENT_BROWSER_INIT_SCRIPTS, undefined);
 });

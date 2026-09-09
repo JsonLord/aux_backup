@@ -4,6 +4,7 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
+const { configureStreamPort, startViewportStream } = require("./viewportStream");
 
 function safeId(value, fallback) {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -69,30 +70,48 @@ function testerContract(profile) {
 const CURSOR_OVERLAY_SCRIPT = path.join(__dirname, "..", "assets", "cursor-overlay.js");
 
 /**
- * Make the pointer visible in everything this run captures.
+ * Ask agent-browser to draw the pointer into the page.
  *
- * agent-browser reads AGENT_BROWSER_INIT_SCRIPTS at launch and registers the
- * script before first navigation. journeytest-core's driver spawns the CLI with
- * execFile and no env option, so the child inherits this process's environment
- * and no driver or library change is needed to reach it.
+ * The browser's own cursor is composited above the page, so it is never in a
+ * screencast frame, a screenshot, or a recorded video. A cursor that is part of
+ * the DOM is, which is what assets/cursor-overlay.js provides -- verified in
+ * Chromium: it centres on the pointer, lands in captured pixels, survives
+ * navigation, and does not intercept clicks.
  *
- * Returns what it did so a caller can report it. Set AUX_CURSOR_OVERLAY=0 to
- * leave the page untouched -- the overlay is a real DOM node, and a page that
- * inspects itself can see it.
+ * KNOWN LIMITATION -- the pinned agent-browser 0.31.1 does not honour init
+ * scripts. Neither AGENT_BROWSER_INIT_SCRIPTS nor `open --init-script <path>`
+ * runs the file: a trivial probe script (`window.__probe = 42`) never executed
+ * over http or file, by flag or by env, in a fresh session. Its README documents
+ * the feature and a `removeinitscript` command the binary does not have, so that
+ * README describes a later build than the pinned one.
+ *
+ * The request is still made because it costs nothing and starts working the day
+ * the pin moves. What it must not do is claim success: `requested` says the
+ * environment was set, not that a cursor will appear. Until the pin moves, the
+ * pointer has to be drawn viewer-side from the run timeline instead.
+ *
+ * Set AUX_CURSOR_OVERLAY=0 to leave the page untouched -- the overlay is a real
+ * DOM node, and a page that inspects itself can see it.
  */
 function installCursorOverlay(env = process.env) {
-  if (String(env.AUX_CURSOR_OVERLAY || "").trim() === "0") return { installed: false, reason: "disabled" };
-  if (!fs.existsSync(CURSOR_OVERLAY_SCRIPT)) return { installed: false, reason: "script-missing" };
+  if (String(env.AUX_CURSOR_OVERLAY || "").trim() === "0") return { requested: false, reason: "disabled" };
+  if (!fs.existsSync(CURSOR_OVERLAY_SCRIPT)) return { requested: false, reason: "script-missing" };
   const existing = String(env.AGENT_BROWSER_INIT_SCRIPTS || "").trim();
   if (existing) {
     // agent-browser documents --init-script as repeatable but does not document
     // how the env form separates entries (unlike --args, which states "comma or
     // newline"). Appending on a guess could corrupt an operator's own value, so
     // theirs stands and the overlay stays out.
-    return { installed: false, reason: "init-scripts-already-configured" };
+    return { requested: false, reason: "init-scripts-already-configured" };
   }
   env.AGENT_BROWSER_INIT_SCRIPTS = CURSOR_OVERLAY_SCRIPT;
-  return { installed: true, script: CURSOR_OVERLAY_SCRIPT };
+  return {
+    requested: true,
+    script: CURSOR_OVERLAY_SCRIPT,
+    // Honest about what the pinned build does with it.
+    effective: false,
+    reason: "agent-browser 0.31.1 does not run init scripts",
+  };
 }
 
 /**
@@ -170,6 +189,11 @@ async function runWithJourneyTest(input) {
   startRunCapture(captureId, { outputDir: path.resolve(outputDir) });
   const statePath = resolveSessionState(input);
   const cursorOverlay = installCursorOverlay();
+  // Pin agent-browser's viewport stream to a known port before the driver
+  // launches, then follow it. Without this every session binds an OS-assigned
+  // port the worker has no way to learn.
+  configureStreamPort();
+  startViewportStream();
   const result = await core.runJourney({
     journey: journeyContract(input),
     profile: testerContract(input.profile),
