@@ -30,7 +30,9 @@
 const { createHash } = require("node:crypto");
 const path = require("node:path");
 
+const { AdherenceGate } = require("./adherence");
 const { BehaviorController } = require("./behavior");
+const { browsingFaculty } = require("./faculty");
 const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
@@ -149,7 +151,7 @@ class PersonaDirector {
    */
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
     scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
-    frames = recentFrames } = {}) {
+    frames = recentFrames, faculty, gate } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -163,6 +165,11 @@ class PersonaDirector {
     this.perception = perception;
     this.walk = walk;
     this.frames = frames;
+    this.faculty = faculty || browsingFaculty({ abilities: this.abilities,
+      seed: Number(this.profile.behavior?.seed) || 1 });
+    // An action that does not sound like this person is sent back with the
+    // reason, TinyTroupe-style. Without a judge the gate is simply off.
+    this.gate = gate || new AdherenceGate({ judge: actor.judgeAdherence });
   }
 
   /** Spend a slice of simulated time on the wall clock, bounded. */
@@ -223,13 +230,28 @@ class PersonaDirector {
       const readMs = Math.min(MAX_SCAN_MS, readingDurationMs(observation, this.abilities));
       await this.spend(readMs);
 
-      const decision = await this.actor({
+      const ask = {
         profile: this.profile, tasks, observation,
         // How they feel is given to them, never asked of them: it is derived from
         // what the page has done to them so far.
         affect: affectInWords(controller.state),
         history: filterWorkingMemory(history, this.abilities),
-      });
+      };
+      const proposed = await this.actor(ask);
+      // Does that sound like this person? TinyTroupe scores the action against
+      // the persona and, when it scores badly, hands the criticism back and asks
+      // for another. That is what makes a persona a constraint on the output
+      // rather than an instruction it may drift away from.
+      const settled = await this.gate.settle(this.profile, proposed,
+        (flaw) => this.actor(ask, { notLikeYou: flaw }));
+      const decision = settled.decision;
+      if (settled.adherence) {
+        await recorder.record("persona.adherence",
+          settled.adherence.passed
+            ? `that is like them (${settled.adherence.score}/10)`
+            : `still not quite like them (${settled.adherence.score}/10)`,
+          { ...settled.adherence, threshold: this.gate.threshold });
+      }
 
       // What they see and what they expect, before anything happens. Committing
       // to an expectation is what makes the next step falsifiable.
@@ -417,79 +439,17 @@ class PersonaDirector {
   }
 
   /**
-   * Turn one ACTION into driver calls.
+   * Carry out one ACTION, by offering it to the tools the persona has.
    *
-   * CLICK goes through the pointer simulation: a person with imprecise pointing
-   * does not land dead centre, and on a small target they miss. The driver takes
-   * a selector rather than a coordinate, so the scatter is recorded as what it
-   * is -- where this person's hand actually went -- and a miss outside the
-   * element's own box is reported as a failed action rather than silently
-   * corrected.
+   * The director used to hold a switch over action types, and the prompt held a
+   * separate list of what those types were. TinyTroupe's arrangement is better
+   * and this now follows it: each tool declares the actions it offers and
+   * carries them out, the vocabulary the persona is given is generated from
+   * those declarations, and an action nothing claims comes back unhandled
+   * instead of falling through to a silent no-op.
    */
-  async perform(action, browser, context) {
-    const result = { failed: false, acted: false, url: "", error: "" };
-    try {
-      switch (action.type) {
-        case "READ":
-          result.acted = false;      // looking changes nothing, so nothing is re-observed
-          break;
-        case "CLICK": {
-          const aim = await this.aimFor(action.target, browser, context);
-          if (aim && aim.missed) {
-            // The hand went outside the control. Nothing happens, which is
-            // exactly what happens to a person who misses.
-            result.failed = true;
-            result.error = "the click landed outside the control";
-            break;
-          }
-          await browser.scrollIntoView(action.target).catch(() => {});
-          await browser.click(action.target);
-          result.acted = true;
-          break;
-        }
-        case "SCROLL":
-          await browser.scroll({ direction: /up/i.test(action.content) ? "up" : "down",
-            amount: Number.parseInt(action.target, 10) || 800 });
-          result.acted = true;
-          break;
-        case "TYPE":
-          await browser.fill(action.target, action.content);
-          result.acted = true;
-          break;
-        case "GO_BACK":
-          await browser.press("Alt+ArrowLeft");
-          result.acted = true;
-          break;
-        default:
-          break;      // DONE and GIVE_UP touch nothing
-      }
-    } catch (error) {
-      result.failed = true;
-      result.acted = true;    // the reach happened even though it came to nothing
-      result.error = String(error?.message || error);
-    }
-    result.url = await browser.getUrl().catch(() => "");
-    return result;
-  }
-
-  /** Where this persona's pointer actually lands, and whether that is on target. */
-  async aimFor(target, browser, context) {
-    const precision = this.abilities?.motor?.pointerPrecision;
-    if (precision === undefined || precision >= 0.99 || !target) return null;
-    let box;
-    try {
-      box = (await browser.getElementBox(target))?.details;
-    } catch {
-      return null;
-    }
-    if (!box || !box.width || !box.height) return null;
-    const aim = simulatePointer(box, this.abilities, Number(this.profile.behavior?.seed) || 1);
-    const missed = aim.x < box.x || aim.x > box.x + box.width
-      || aim.y < box.y || aim.y > box.y + box.height;
-    await context.recorder.record("persona.pointer",
-      `aimed at ${Math.round(aim.x)}, ${Math.round(aim.y)}${missed ? " and missed" : ""}`,
-      { target, box, aim, missed });
-    return { ...aim, missed };
+  perform(action, browser, context) {
+    return this.faculty.processAction(action, { browser, recorder: context.recorder, context });
   }
 
   /**

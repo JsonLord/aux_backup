@@ -618,3 +618,48 @@ test("the thing they came for, on the screen, and missed", async () => {
   assert.deepEqual(looked.data.missedWhatTheyCameFor,
     [{ selector: "price", name: "From EUR 49 per month", goalAffinity: 0.85 }]);
 });
+
+test("an action that is not like this person is sent back before it reaches the page", async () => {
+  // The whole point of the gate: the persona is a constraint on what happens,
+  // not an instruction the model may drift away from. A patient, thorough action
+  // from an impatient persona should never get as far as the browser.
+  const asked = [];
+  const actor = async (input, options = {}) => {
+    asked.push(options.notLikeYou || "");
+    return asked.length === 1
+      ? { visible: "marketing copy", expectation: "eventually a price",
+          action: { type: "READ", target: "the manifesto" } }
+      : { visible: "marketing copy", expectation: "there is no price here",
+          action: { type: "GIVE_UP", content: "No prices. Done wasting time." } };
+  };
+  actor.judgeAdherence = async ({ user }) =>
+    /READ/.test(user)
+      ? '{"score": 2, "flaw": "someone this impatient would not settle in for a fourth page of copy"}'
+      : '{"score": 9, "flaw": ""}';
+
+  const browser = fakeBrowser();
+  const recorder = fakeRecorder();
+  const verdict = await run(new PersonaDirector({ profile: impatient, sleepFn: async () => {}, actor }),
+    browser, recorder);
+
+  assert.equal(asked.length, 2, "the first action was rejected and another asked for");
+  assert.match(asked[1], /impatient/, "and the criticism went back with the request");
+  const scored = recorder.events.find((event) => event.type === "persona.adherence");
+  assert.equal(scored.data.passed, true);
+  assert.equal(scored.data.attempts, 2);
+  assert.equal(verdict.status, "failed", "they gave up, which is what that persona does");
+});
+
+test("with no judge available the persona acts exactly as before", async () => {
+  // The gate improves a persona; a run must not depend on it. scriptedActor has
+  // no judge at all, which is the same situation as an unreachable one.
+  const browser = fakeBrowser();
+  const recorder = fakeRecorder();
+  await run(new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: scriptedActor([{ type: "CLICK", target: "e1" }, { type: "DONE", content: "fine" }]),
+  }), browser, recorder);
+
+  assert.ok(browser.calls.some((call) => call[0] === "click"));
+  assert.equal(recorder.events.find((event) => event.type === "persona.adherence"), undefined);
+});
