@@ -42,9 +42,23 @@ export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-https://api.helmholtz-blablador
 # jobs, and the router that is best at deciding what a person does next is not
 # the one you want doing them -- so they run on Blablador's alias-fast, on its
 # own endpoint with its own key, rather than on whatever "auto" resolves to.
-export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-alias-fast}"
-export JOURNEY_REFLECT_BASE_URL="${JOURNEY_REFLECT_BASE_URL:-${BLABLADOR_BASE_URL}}"
-export JOURNEY_REFLECT_API_KEY="${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}"
+# A model, an endpoint and a key are one setting, not three. Naming alias-fast
+# without a Blablador token is a 401 on every reflection and every adherence
+# check -- which the gate is designed to swallow, so the run would look healthy
+# while nothing held the persona to itself. Without the token the second model
+# simply follows the acting one, which is where it ran before and is known to
+# work.
+if [ -n "${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}" ]; then
+  export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-alias-fast}"
+  export JOURNEY_REFLECT_BASE_URL="${JOURNEY_REFLECT_BASE_URL:-${BLABLADOR_BASE_URL}}"
+  export JOURNEY_REFLECT_API_KEY="${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY}}"
+else
+  echo "[start-live] No Blablador token configured; reflection and persona-adherence" \
+       "will run on ${OPENAI_MODEL} against the primary endpoint. Set BLABLADOR_API_KEY" \
+       "as a Space secret to run them on alias-fast instead."
+  export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-${OPENAI_MODEL}}"
+  unset JOURNEY_REFLECT_BASE_URL JOURNEY_REFLECT_API_KEY
+fi
 # Bound the OpenAI-compatible completion budget. TinyTroupe 0.7 otherwise requests
 # 128000 completion tokens by default; an explicit ceiling keeps completions
 # bounded and predictable. The router's ~1,048,576 token context window leaves

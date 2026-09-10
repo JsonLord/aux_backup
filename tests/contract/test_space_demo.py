@@ -63,7 +63,7 @@ def test_a_model_id_is_only_ever_named_alongside_the_endpoint_that_serves_it():
 
     # Reflecting and judging adherence run on a named small model, and therefore
     # must carry the endpoint that has it.
-    assert 'export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-alias-fast}"' in start
+    assert 'JOURNEY_REFLECT_MODEL:-alias-fast' in start
     assert "JOURNEY_REFLECT_BASE_URL" in start, (
         "alias-fast does not exist on the primary router; naming it without its "
         "own base URL is a 400 on every step")
@@ -72,10 +72,18 @@ def test_a_model_id_is_only_ever_named_alongside_the_endpoint_that_serves_it():
     # Its key comes from Blablador, never from the primary router. The wrong
     # token is a 401 the adherence gate swallows by design, so the run would look
     # fine while nothing ever checked the persona against itself.
-    assert 'export JOURNEY_REFLECT_API_KEY="${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}"' in start
+    assert 'JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY}' in start
     assert 'export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-}"' in start, (
         "BLABLADOR_API_KEY must not fall back to the primary router's token")
 
     # And each endpoint is defaulted before anything reads it.
-    assert start.index("export BLABLADOR_BASE_URL=") < start.index("export JOURNEY_REFLECT_BASE_URL=")
-    assert start.index("export BLABLADOR_API_KEY=") < start.index("export JOURNEY_REFLECT_API_KEY=")
+    assert start.index("export BLABLADOR_BASE_URL=") < start.index("JOURNEY_REFLECT_BASE_URL=")
+    assert start.index("export BLABLADOR_API_KEY=") < start.index("JOURNEY_REFLECT_API_KEY=")
+
+    # A model, an endpoint and a key are one setting. Naming alias-fast with no
+    # Blablador token is a 401 on every step, which the gate swallows by design,
+    # so the deployment would look healthy while nothing checked the persona.
+    assert 'if [ -n "${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}" ]; then' in start
+    assert "unset JOURNEY_REFLECT_BASE_URL JOURNEY_REFLECT_API_KEY" in start, (
+        "without the token the second model must fall back to the acting one, "
+        "not point at an endpoint it cannot authenticate against")
