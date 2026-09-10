@@ -136,10 +136,24 @@ finished report resolves to a file that exists.
 
 **Good:** a deck opens without clipping or overflowing.
 
-**Partly built.** Oversized presentation images on landscape screens were fixed.
+**Built and measured.** `.slide` is `overflow-y: auto`, which sounds safe and is
+not: content past the fold is simply absent when somebody presents the deck, and
+nothing says so. A deck of the worst realistic content -- long findings with a
+screenshot each -- was rendered at six sizes people present at and measured. Every
+finding slide lost **49px at 1024x600**, the size of an older projector and of a
+half-height window. Type, padding and the screenshot's share now come down on a
+short viewport only, so a normal laptop keeps the 20px the deck was designed at
+and the full 42vh image. Zero overflow at all six sizes; the screenshot yields
+the space rather than the words, because type small enough to fit a 42vh image on
+a 600px screen is not readable from the back of a room, which is what a deck is
+for.
 
-**Not verified this session.** No check that a generated deck renders inside its
-viewport at the sizes people actually use.
+`tests/contract/test_slide_deck_fits.py` re-measures in Chromium, so content
+added to a slide later cannot quietly stop fitting.
+
+**Worth knowing:** the breakpoints must be last in the stylesheet. Placed at the
+top they override nothing -- an equally specific `.shot img` rule later wins --
+and the measured overflow did not move by a pixel.
 
 ## 9. The run can be watched and taken over
 

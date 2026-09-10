@@ -2250,6 +2250,32 @@ blockquote cite{{display:block;color:#7c8896;font-size:.72rem;font-style:normal;
 details.code{{margin-top:.2rem;font-size:.78rem}}
 details.code summary{{cursor:pointer;color:#5b6b7c;letter-spacing:.14em;text-transform:uppercase;font-size:.66rem;font-weight:700}}
 details.code pre{{max-height:11rem;overflow:auto;background:#12303f;color:#e6edf3;border-radius:.35rem;padding:.65rem;margin:.35rem 0 0;font-size:.72rem;line-height:1.45}}
+/* Last in the stylesheet on purpose. These override single-class rules like
+   .shot img, so an equally specific rule appearing later would win and the
+   whole block would do nothing -- which is exactly what happened when it sat
+   at the top: the measured overflow did not move by a pixel.
+
+   A slide scrolls rather than clips, which sounds safe and is not: content past
+   the fold is simply absent when somebody presents this, and nothing says so.
+   Measured on a deck of long findings with a screenshot each, every finding
+   slide lost 49px at 1024x600 -- the size of an older projector and of a
+   half-height window. Type and padding come down only on a short viewport, so a
+   normal laptop keeps the size the deck was designed at. */
+@media (max-height: 720px) {{
+  body{{font-size:17.5px;line-height:1.45}}
+  .slide{{padding:3.5vh 5vw;gap:.5rem}}
+  .shot img{{max-height:36vh}}
+}}
+@media (max-height: 620px) {{
+  body{{font-size:16px;line-height:1.4}}
+  .slide{{padding:1.4vh 4.5vw;gap:.35rem}}
+  /* The screenshot gives up the space, not the words. Shrinking the type far
+     enough to fit a 42vh image on a 600px-tall screen would take it below
+     legibility from the back of a room, which is what a deck is for. */
+  .shot img{{max-height:24vh}}
+  details.code pre{{max-height:7rem}}
+  blockquote{{padding:.4rem .7rem;font-size:.84rem}}
+}}
 table.impact{{border-collapse:collapse;font-size:.92rem;max-width:62rem;color:#39485a}}
 table.impact th{{text-align:left;padding:.4rem .8rem;border-bottom:2px solid #12303f;font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:#12303f}}
 table.impact td{{text-align:left;padding:.45rem .8rem;border-bottom:1px solid #e3e8ee}}
