@@ -36,6 +36,9 @@ class Scanner:
     pattern: str = "f"
     fixations: int = 12
     distractibility: float = 0.5
+    # How much of the eye's choosing is done by what the person came for. A hunt
+    # is almost entirely this; a settled read is mostly the page's own shape.
+    goal_pull: float = 0.6
     # A fixation lands near, but not exactly on, what it was aiming at.
     seed: int = 1
     reasons: list[str] = field(default_factory=list)
@@ -62,19 +65,19 @@ def choose_pattern(behavior: dict | None, abilities: dict | None = None) -> Scan
     reasons: list[str] = []
 
     if patience <= 0.35:
-        pattern, budget = "spotted", 6
+        pattern, budget, pull = "spotted", 6, 1.6
         reasons.append("little patience, so they hunt for the one thing they came for")
     elif verification >= 0.65 and patience >= 0.6:
-        pattern, budget = "commitment", 22
+        pattern, budget, pull = "commitment", 22, 0.4
         reasons.append("patient and inclined to check things, so they actually read")
     elif verification >= 0.6:
-        pattern, budget = "layer-cake", 14
+        pattern, budget, pull = "layer-cake", 14, 0.7
         reasons.append("checks things, so they work through the headings")
     elif exploration >= 0.65:
-        pattern, budget = "z", 16
+        pattern, budget, pull = "z", 16, 0.5
         reasons.append("likes poking around, so their eye wanders the page")
     else:
-        pattern, budget = "f", 12
+        pattern, budget, pull = "f", 12, 0.8
         reasons.append("no strong pull either way, so they scan the usual F")
 
     # A slow reader gets through less of a page in the same impatience.
@@ -88,7 +91,7 @@ def choose_pattern(behavior: dict | None, abilities: dict | None = None) -> Scan
         reasons.append("reads slowly, so fewer things get looked at before patience runs out")
 
     return Scanner(pattern=pattern, fixations=budget, distractibility=distractibility,
-                   reasons=reasons)
+                   goal_pull=pull, reasons=reasons)
 
 
 def pattern_affinity(pattern: str, box: dict, size: tuple[int, int], role: str = "") -> float:
@@ -135,8 +138,9 @@ def scan(candidates: list[dict], size: tuple[int, int], scanner: Scanner) -> lis
     not stare at the same banner for their whole visit. And a budget: the eye
     stops when patience does, and whatever is left was not seen.
 
-    Each candidate is `{box, role, salience}`; `salience` is the score from
-    salience.py, already weighted by how distractible this person is.
+    Each candidate is `{box, role, salience, goalAffinity}`; `salience` is the
+    score from salience.py, already weighted by how distractible this person is,
+    and `goalAffinity` is how much the region looks like what they came for.
     """
     remaining = list(candidates)
     fixations: list[dict] = []
@@ -153,7 +157,13 @@ def scan(candidates: list[dict], size: tuple[int, int], scanner: Scanner) -> lis
             # complaint people actually have about animated adverts.
             motion = float((candidate.get("salience") or {}).get("motion", 0.0))
             interrupt = motion * (0.3 + 1.4 * scanner.distractibility)
-            scored.append((affinity * 0.7 + salience * 0.6 + interrupt, candidate))
+            # What they came for pulls hardest of all on a hunt, which is what
+            # makes a hunt a hunt. Without it, spotted had nothing to spot and
+            # collapsed into ranking by size: a persona who came to find the
+            # price fixated six paragraphs of feature copy and never looked at
+            # the price, which was bolder and larger than any of them.
+            wanted = float(candidate.get("goalAffinity") or 0.0) * scanner.goal_pull
+            scored.append((affinity * 0.7 + salience * 0.6 + interrupt + wanted, candidate))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         weight, chosen = scored[0]
         remaining.remove(chosen)

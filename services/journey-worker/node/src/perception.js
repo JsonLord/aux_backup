@@ -181,7 +181,7 @@ class PerceptionClient {
     return Boolean(this.endpoint) && !this.disabled;
   }
 
-  async perceive({ screenshotBase64, elements, abilities, behavior, motionFrames, viewport }) {
+  async perceive({ screenshotBase64, elements, abilities, behavior, motionFrames, viewport, goal }) {
     if (!this.available || !screenshotBase64 || !elements?.length) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -191,7 +191,7 @@ class PerceptionClient {
         headers: { "content-type": "application/json" },
         body: JSON.stringify({
           screenshotBase64, elements, abilities: abilities || {}, behavior: behavior || {},
-          motionFrames: motionFrames || [], viewport: viewport || undefined,
+          motionFrames: motionFrames || [], viewport: viewport || undefined, goal: goal || "",
           detectUnnamed: this.detectUnnamed,
         }),
         signal: controller.signal,

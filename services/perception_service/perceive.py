@@ -25,6 +25,8 @@ import io
 
 from PIL import Image, UnidentifiedImageError
 
+from .goal import affinity as goal_affinity
+from .goal import terms as goal_terms
 from .optics import Eyes, legibility, see
 from .salience import motion_map, salience_of
 from .scanpath import choose_pattern, scan
@@ -71,12 +73,17 @@ def _encode(image: Image.Image, quality: int = 78) -> str:
 
 def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None = None,
              behavior: dict | None = None, motion_frames: list[str] | None = None,
-             viewport: dict | None = None, return_seen_image: bool = False) -> dict:
+             viewport: dict | None = None, return_seen_image: bool = False,
+             goal: str = "") -> dict:
     """Run one page through one persona's eyes.
 
     `elements` are the DOM's own account of what is there -- selector, role, name
     and box -- which is used as the list of candidates and as the ground truth to
     diff against. It is never used as the thing the persona perceives.
+
+    `goal` is what they came for, in their own words -- the task text. A scan is
+    not a survey, and somebody hunting for a price walks past the feature copy
+    without reading it.
     """
     page = _decode(image_base64)
     eyes = Eyes.from_abilities(abilities)
@@ -86,6 +93,7 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
     motion = motion_map(frames) if len(frames) >= 2 else None
 
     scanner = choose_pattern(behavior, abilities)
+    wanted = goal_terms(goal)
     # A page is scrolled, so affinity is judged against the viewport in front of
     # the person, not against a document that may be ten screens tall.
     size = (int((viewport or {}).get("width") or page.width),
@@ -104,7 +112,9 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         if not readable["visible"]:
             not_perceived.append({**entry, **readable})
             continue
-        candidates.append({**entry, "salience": salience_of(seen, box, motion, scanner.distractibility)})
+        candidates.append({**entry,
+                           "salience": salience_of(seen, box, motion, scanner.distractibility),
+                           "goalAffinity": goal_affinity(entry["name"], wanted, entry["role"])})
 
     fixations = scan(candidates, size, scanner)
     # Matched by selector, not by object identity: scan() returns a copy of each
@@ -119,15 +129,18 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                  "unimpaired": eyes.unimpaired},
         "scan": {"pattern": scanner.pattern, "fixationBudget": scanner.fixations,
                  "why": scanner.reasons, "distractibility": scanner.distractibility,
+                 "goalPull": scanner.goal_pull, "lookingFor": sorted(wanted),
                  "motionAvailable": motion is not None},
         "perceived": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
                        "box": item["box"], "salience": item["salience"], "order": item["order"],
+                       "goalAffinity": item["goalAffinity"],
                        "drawnByMotion": item["drawnByMotion"]} for item in fixations],
         # In the tree, nothing legible where it lives.
         "notPerceived": not_perceived,
         # Legible, but this person never got to it.
         "notLookedAt": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
-                         "box": item["box"], "salience": item["salience"]} for item in not_looked_at],
+                         "box": item["box"], "salience": item["salience"],
+                         "goalAffinity": item["goalAffinity"]} for item in not_looked_at],
         "counts": {"elements": len(elements), "legible": len(candidates),
                    "fixated": len(fixations), "notPerceived": len(not_perceived),
                    "notLookedAt": len(not_looked_at)},

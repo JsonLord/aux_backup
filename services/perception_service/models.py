@@ -79,6 +79,9 @@ class PerceiveRequest(BaseModel):
     behavior: dict[str, Any] = Field(default_factory=dict)
     motionFrames: list[str] = Field(default_factory=list, max_length=MAX_MOTION_FRAMES)
     viewport: Viewport | None = None
+    # What they came for, in their own words -- the task text. A scan is not a
+    # survey: somebody hunting for a price walks past the feature copy.
+    goal: str = Field(default="", max_length=2000)
     # The page as this person's eyes delivered it, to sit beside a finding that
     # says they could not see something. Costs a JPEG encode, so it is opt-in.
     returnSeenImage: bool = False

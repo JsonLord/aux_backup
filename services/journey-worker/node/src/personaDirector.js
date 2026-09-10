@@ -110,6 +110,24 @@ function outcomeEvent(action, { failed, changed, error, matched }) {
   return { type: "success", severity: 0, recoveryQuality: 0.6, repeatKey: action.type };
 }
 
+/**
+ * A task as words, whatever shape it arrived in.
+ *
+ * Journeys carry tasks as plain strings, but nothing guarantees that, and
+ * `String(task)` on an object yields "[object Object]" -- which would be handed
+ * to the persona as the thing they came to do, and would then be what the eye
+ * hunts for. Silent nonsense is worse than a missing task, so an object with no
+ * text in any of the usual fields becomes nothing at all.
+ */
+function taskText(task) {
+  if (typeof task === "string") return task.trim();
+  if (!task || typeof task !== "object") return "";
+  for (const field of ["instruction", "description", "task", "text", "goal", "name"]) {
+    if (typeof task[field] === "string" && task[field].trim()) return task[field].trim();
+  }
+  return "";
+}
+
 /** What the persona can see of the page, bounded by what they can hold in mind. */
 function observationFrom(snapshotText, abilities) {
   const lines = String(snapshotText || "").split("\n").map((line) => line.trim()).filter(Boolean);
@@ -155,7 +173,7 @@ class PersonaDirector {
   async run(context) {
     const { journey, browser, recorder } = context;
     const controller = new BehaviorController(this.profile);
-    const tasks = (journey.tasks || []).map((task) => task.instruction || String(task));
+    const tasks = (journey.tasks || []).map(taskText).filter(Boolean);
     const history = [];
     let steps = 0;
     let ending = null;              // {type: "done"|"gave_up"|"abandoned"|"exhausted", detail}
@@ -176,7 +194,7 @@ class PersonaDirector {
 
       const page = pending || await this.observe(browser);
       pending = null;
-      const { observation, perception } = await this.look(page);
+      const { observation, perception } = await this.look(page, tasks);
       if (perception) {
         await recorder.record("persona.perception",
           `looked at ${perception.counts.fixated} of ${perception.counts.elements} things`, {
@@ -188,6 +206,13 @@ class PersonaDirector {
             // it is the answer to "why did they not click the thing that was
             // right there", which is the question a report exists to answer.
             notLookedAt: perception.notLookedAt.map((item) => item.selector),
+            // The strongest thing this measurement can say: what they came for
+            // was legible, on the screen, and they still did not get to it.
+            // Every part of that is measured rather than asserted.
+            missedWhatTheyCameFor: perception.notLookedAt
+              .filter((item) => Number(item.goalAffinity) >= 0.5)
+              .map((item) => ({ selector: item.selector, name: item.name,
+                goalAffinity: item.goalAffinity })),
             undeclared: perception.detector?.undeclared || undefined,
           });
       }
@@ -364,7 +389,7 @@ class PersonaDirector {
    * When it is not configured or not reachable the tree-based observation stands.
    * Perception is meant to make a run truer, not to make a run fail.
    */
-  async look(page) {
+  async look(page, tasks = []) {
     const fallback = { observation: observationFrom(page.text, this.abilities), perception: null };
     if (!this.perception?.available) return fallback;
     let seen;
@@ -383,6 +408,9 @@ class PersonaDirector {
       behavior: this.profile.behavior,
       motionFrames: motionFramesFrom(this.frames()),
       viewport: seen.viewport,
+      // What they came for pulls the eye harder than anything else on a page,
+      // which is why an impatient visitor finds a price and reads nothing else.
+      goal: (this.profile.persona?.goals || []).concat(tasks).join(". "),
     });
     if (!perception?.observation) return fallback;
     return { observation: perception.observation, perception };

@@ -561,3 +561,60 @@ test("with no perception service the run still sees the page the old way", async
 
   assert.match(actorSaw[0], /\[e1\] link Pricing/, "the snapshot is still there when the walk is not");
 });
+
+test("a task that is not a plain string still reaches the persona as words", async () => {
+  // String(task) on an object is "[object Object]", which would become the thing
+  // the persona came to do -- and, once perception is goal-directed, the thing
+  // their eye hunts for on every page.
+  const seen = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async ({ tasks }) => {
+      seen.push(tasks);
+      return { visible: "", expectation: "", action: { type: "DONE", content: "done" } };
+    },
+  });
+  await director.run({
+    journey: { app: { baseUrl: "https://example.test/" },
+      tasks: ["Find the price.", { description: "Then decide if it is worth it." }, { nothing: true }] },
+    profile: {}, browser: fakeBrowser(), recorder: fakeRecorder(),
+    artifacts: { screenshotsDir: "/tmp/persona-test-shots" },
+  });
+
+  assert.deepEqual(seen[0], ["Find the price.", "Then decide if it is worth it."],
+    "a task with no text in it is dropped rather than turned into a string that means nothing");
+});
+
+test("the thing they came for, on the screen, and missed", async () => {
+  // The strongest finding perception can produce, and the one a usability report
+  // cannot currently make: not "the page is confusing" but "the price was
+  // legible, in the viewport, and this person's patience ran out first".
+  const perception = {
+    available: true,
+    async perceive() {
+      return {
+        observation: "[e1] heading Everything in one place",
+        eyes: {}, scan: { pattern: "spotted", fixationBudget: 6, why: [] },
+        counts: { elements: 3, legible: 3, fixated: 1, notPerceived: 0, notLookedAt: 2 },
+        notPerceived: [],
+        notLookedAt: [
+          { selector: "price", name: "From EUR 49 per month", goalAffinity: 0.85 },
+          { selector: "f4", name: "Everything you need for step 4", goalAffinity: 0 },
+        ],
+      };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({ elements: [{ selector: "e1", box: { x: 0, y: 0, width: 10, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA" }),
+    frames: () => [],
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.deepEqual(looked.data.missedWhatTheyCameFor,
+    [{ selector: "price", name: "From EUR 49 per month", goalAffinity: 0.85 }]);
+});
