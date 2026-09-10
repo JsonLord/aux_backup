@@ -181,7 +181,8 @@ class PerceptionClient {
     return Boolean(this.endpoint) && !this.disabled;
   }
 
-  async perceive({ screenshotBase64, elements, abilities, behavior, motionFrames, viewport, goal }) {
+  async perceive({ screenshotBase64, elements, abilities, behavior, motionFrames, viewport, goal,
+    returnSeenImage = false }) {
     if (!this.available || !screenshotBase64 || !elements?.length) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -192,6 +193,10 @@ class PerceptionClient {
         body: JSON.stringify({
           screenshotBase64, elements, abilities: abilities || {}, behavior: behavior || {},
           motionFrames: motionFrames || [], viewport: viewport || undefined, goal: goal || "",
+          // Asked for by the director on every step and dropped here until now,
+          // so the one artifact that makes an eyesight finding checkable was
+          // never produced.
+          returnSeenImage: Boolean(returnSeenImage),
           detectUnnamed: this.detectUnnamed,
         }),
         signal: controller.signal,

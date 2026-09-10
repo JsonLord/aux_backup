@@ -57,9 +57,9 @@ function fakeRecorder() {
   return { events, async record(type, summary, data) { events.push({ type, summary, data }); } };
 }
 
-const run = (director, browser, recorder) =>
+const run = (director, browser, recorder, screenshotsDir = "/tmp/persona-test-shots") =>
   director.run({ journey: JOURNEY, profile: {}, browser, recorder,
-    artifacts: { screenshotsDir: "/tmp/persona-test-shots" } });
+    artifacts: { screenshotsDir } });
 
 const impatient = {
   id: "friedrich_wolf",
@@ -717,4 +717,48 @@ test("the run says what the persona already knew when they arrived", async () =>
   const started = recorder.events.find((event) => event.type === "agent.start");
   assert.equal(started.data.memory.episodes, 2);
   assert.equal(started.data.memory.lessons.length, 1);
+});
+
+test("the page as they saw it is kept, but only when it is evidence of something", async () => {
+  // A clean screenshot beside "they could not read this" invites the reader to
+  // disagree, correctly. The degraded capture is the only honest image -- and the
+  // service could produce it from the start while nothing ever asked.
+  const { mkdtempSync, readdirSync } = require("node:fs");
+  const { tmpdir } = require("node:os");
+  const shots = mkdtempSync(require("node:path").join(tmpdir(), "aux-seen-"));
+
+  const asked = [];
+  const unreadable = [{ selector: "p.fine", name: "Prices exclude VAT", reason: "too little contrast" }];
+  let step = 0;
+  const perception = {
+    available: true,
+    async perceive(request) {
+      asked.push(request.returnSeenImage);
+      step += 1;
+      return {
+        observation: "[e1] heading Plans",
+        eyes: { acuity: 0.35, blurPx: 1.95 }, scan: { pattern: "f", fixationBudget: 12, why: [] },
+        counts: { elements: 3, fixated: 1, notPerceived: 1, notLookedAt: 0 },
+        // Something unreadable on the first step only.
+        notPerceived: step === 1 ? unreadable : [],
+        notLookedAt: [],
+        // A one-pixel JPEG is enough to prove the bytes get written.
+        seenImageBase64: "/9j/4AAQSkZJRgABAQEAYABgAAD/2wBDAAgGBgcGBQgHBwcJCQgKDBQNDAsL"
+          + "DBkSEw8UHRofGh0aHBwcJC4nICIsIxwcKDcpLDAxNDQ0Hyc5PTgyPC4zNDL/wAALCAABAAEBAREA/8QAFAABAQAA"
+          + "AAAAAAAAAAAAAAAAAAX/xAAUEAEAAAAAAAAAAAAAAAAAAAAA/8QAFAEBAAAAAAAAAAAAAAAAAAAAAP/aAAwDAQACEQMRAD8AmAA=",
+      };
+    },
+  };
+  await run(new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({ elements: [{ selector: "e1", box: { x: 0, y: 0, width: 10, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA" }),
+    frames: () => [],
+    actor: scriptedActor([{ type: "SCROLL", content: "down" }, { type: "DONE", content: "seen" }]),
+  }), fakeBrowser(), fakeRecorder(), shots);
+
+  assert.deepEqual(asked, [true, true], "the degraded capture is always requested");
+  const kept = readdirSync(shots).filter((name) => name.endsWith("-as-they-saw-it.jpg"));
+  assert.equal(kept.length, 1,
+    "written for the step that found something unreadable, and not for the other");
 });

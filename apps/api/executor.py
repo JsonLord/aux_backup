@@ -742,12 +742,17 @@ class JobExecutor:
                 data = event.get("data") or {}
                 eyes = data.get("eyes") or {}
                 scan = data.get("scan") or {}
+                # The page as this person's eyes delivered it, written by the run
+                # for exactly the steps that found something unreadable.
+                seen_image = data.get("seenImage")
                 for item in data.get("notPerceived") or []:
                     key = (run_id, "notPerceived", item.get("selector"))
                     entry = by_element.setdefault(key, {"seen": 0, "item": item, "eyes": eyes,
                                                         "scan": scan, "runId": run_id,
-                                                        "personaId": persona_id})
+                                                        "personaId": persona_id,
+                                                        "seenImage": seen_image})
                     entry["seen"] += 1
+                    entry.setdefault("seenImage", seen_image)
                 for item in data.get("missedWhatTheyCameFor") or []:
                     key = (run_id, "missed", item.get("selector"))
                     entry = by_element.setdefault(key, {"seen": 0, "item": item, "eyes": eyes,
@@ -780,7 +785,12 @@ class JobExecutor:
                                        "was actually drawn."),
                     "evidence": (f"internal contrast {item.get('internalContrast')}, "
                                  f"edge contrast {item.get('edgeContrast')}, ink {item.get('ink')}"),
-                    "evidenceScreenshot": None,
+                    # Not a screenshot of the page: the page as this person's eyes
+                    # delivered it, which is the only honest image to put beside
+                    # "they could not read this". A clean capture next to that
+                    # claim invites the reader to disagree with it, correctly.
+                    "evidenceScreenshot": entry.get("seenImage"),
+                    "evidenceIsAsTheySawIt": bool(entry.get("seenImage")),
                     "observation": item.get("reason") or "",
                     "source": "perception.notPerceived", "runId": run_id,
                     "personaId": entry["personaId"],

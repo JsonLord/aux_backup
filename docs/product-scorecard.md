@@ -24,8 +24,13 @@ page cannot be read the tasks stay deliberately general and the status says so,
 because tasks written blind are worth less and a reader should know which kind
 they got.
 
-**Missing:** nothing checks afterwards that a generated task actually named
-something in the outline. The instruction is a prompt, not a constraint.
+**Also built:** a batch is checked against the outline it was written from
+(`page_summary.tasks_that_invent_the_site`), and one that names places the page
+does not have comes back with those names quoted and one more attempt. Both
+inventions the live run produced are caught; "look for a way to contact a human,
+and note whether one exists" is not, because that is the behaviour the prompt asks
+for. A batch that never comes back clean is still used, with a line saying so:
+ten real tasks with one invented section beat ten numbered placeholders.
 
 ## 2. The thoughts are a person's, not an agent's
 
@@ -117,8 +122,15 @@ band roughly fourteen times — reported by the vision stage as a CRITICAL
 "infinite repeating page content" defect in the customer's site — is detected and
 trimmed.
 
-**Not verified this session.** No end-to-end check that every artifact reference
-in a finished report resolves to a file that exists.
+**Also built:** an eyesight finding now cites the page *as that person's eyes
+delivered it*, not a clean screenshot of the page. The service could produce that
+image from the start and nothing ever asked for it -- the request field was
+dropped in the client on the way through. It is written only for steps that found
+something unreadable, because a JPEG per step of a forty-step run is a lot of
+bytes for a picture nothing will cite.
+
+**Still missing:** no end-to-end check that every artifact reference in a
+finished report resolves to a file that exists.
 
 ## 8. The slide deck fits the screen
 

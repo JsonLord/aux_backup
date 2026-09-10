@@ -1948,3 +1948,28 @@ def test_the_summary_of_a_clean_run_does_not_invent_a_worst_finding():
                                              [{"title": "No pain points detected"}], [])
     assert "The most serious is" not in summary
     assert "0 usability issue(s)" in summary
+
+
+def test_an_eyesight_finding_cites_the_page_as_they_actually_saw_it():
+    """A clean screenshot beside "they could not read this" invites the reader to
+    disagree with the finding, correctly. The degraded capture is the only honest
+    image, and the run writes it for exactly the steps that found something
+    unreadable."""
+    journey = _perception_journey()
+    for event in journey["timeline"]:
+        if event["type"] == "persona.perception":
+            event["data"]["seenImage"] = "/tmp/aux/shots/003-as-they-saw-it.jpg"
+
+    findings = JobExecutor._pain_points_from_perception([journey])
+    unreadable = [f for f in findings if f["source"] == "perception.notPerceived"][0]
+    assert unreadable["evidenceScreenshot"] == "/tmp/aux/shots/003-as-they-saw-it.jpg"
+    assert unreadable["evidenceIsAsTheySawIt"] is True
+
+
+def test_a_run_from_before_the_degraded_capture_existed_still_reports():
+    """Old runs carry no seenImage. The finding is still worth making; it just
+    falls back to a run screenshot like every other finding."""
+    findings = JobExecutor._pain_points_from_perception([_perception_journey()])
+    unreadable = [f for f in findings if f["source"] == "perception.notPerceived"][0]
+    assert unreadable["evidenceScreenshot"] is None
+    assert unreadable["evidenceIsAsTheySawIt"] is False

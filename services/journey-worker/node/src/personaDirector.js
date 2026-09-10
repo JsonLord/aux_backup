@@ -28,6 +28,7 @@
  */
 
 const { createHash } = require("node:crypto");
+const { writeFile } = require("node:fs/promises");
 const path = require("node:path");
 
 const { AdherenceGate } = require("./adherence");
@@ -220,6 +221,7 @@ class PersonaDirector {
       pending = null;
       const { observation, perception } = await this.look(page, tasks);
       if (perception) {
+        const seenImage = await this.keepSeenImage(context, perception, steps);
         await recorder.record("persona.perception",
           `looked at ${perception.counts.fixated} of ${perception.counts.elements} things`, {
             scan: perception.scan, eyes: perception.eyes, counts: perception.counts,
@@ -238,6 +240,9 @@ class PersonaDirector {
               .map((item) => ({ selector: item.selector, name: item.name,
                 goalAffinity: item.goalAffinity })),
             undeclared: perception.detector?.undeclared || undefined,
+            // What this person's eyes actually delivered, when the step found
+            // something they could not read.
+            seenImage: seenImage || undefined,
           });
       }
       // Taking a page in costs a person time, and how much depends on how fast
@@ -473,9 +478,35 @@ class PersonaDirector {
       // What they came for pulls the eye harder than anything else on a page,
       // which is why an impatient visitor finds a price and reads nothing else.
       goal: (this.profile.persona?.goals || []).concat(tasks).join(". "),
+      // The page as this person's eyes delivered it. The honest thing to put
+      // beside a finding that says they could not see something -- and until now
+      // the service could produce it and nobody ever asked.
+      returnSeenImage: true,
     });
     if (!perception?.observation) return fallback;
     return { observation: perception.observation, perception };
+  }
+
+  /**
+   * Keep the degraded capture, but only when it is evidence of something.
+   *
+   * Written for a step that found an element present and not perceivable, so a
+   * report can show what this person's eyes actually delivered next to the claim
+   * that they could not read it. Kept off every other step because a JPEG per
+   * step of a forty-step run is a lot of bytes to store for a picture nothing
+   * will cite.
+   */
+  async keepSeenImage(context, perception, step) {
+    const directory = context.artifacts?.screenshotsDir;
+    if (!directory || !perception?.seenImageBase64) return null;
+    if (!(perception.notPerceived || []).length) return null;
+    const target = path.join(directory, `${String(step).padStart(3, "0")}-as-they-saw-it.jpg`);
+    try {
+      await writeFile(target, Buffer.from(perception.seenImageBase64, "base64"));
+    } catch {
+      return null;      // evidence that cannot be written is not worth ending a run over
+    }
+    return target;
   }
 
   /**
