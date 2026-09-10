@@ -1832,3 +1832,119 @@ def test_an_ordinary_viewport_screenshot_is_never_considered():
     assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 720), (30, 40, 50))))[1] is None
     # A blank capture repeats nothing, rather than repeating everything.
     assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 6000), (255, 255, 255))))[1] is None
+
+
+def _perception_journey(**overrides):
+    """One run that saw a page the way a short-sighted, impatient person does."""
+    step = {
+        "eyes": {"acuity": 0.35, "contrastSensitivity": 0.25, "blurPx": 1.95},
+        "scan": {"pattern": "spotted", "fixationBudget": 6,
+                 "why": ["little patience, so they hunt for the one thing they came for"]},
+        "counts": {"elements": 15, "fixated": 6},
+        "notPerceived": [{"selector": "p.fine", "role": "text",
+                          "name": "Prices exclude VAT. Enterprise terms apply.",
+                          "box": {"x": 40, "y": 223},
+                          "reason": "too little contrast to make anything out",
+                          "internalContrast": 0.035, "edgeContrast": 0.0028, "ink": 0.0}],
+        "notLookedAt": ["e2", "e4"],
+        "missedWhatTheyCameFor": [{"selector": "p.price", "name": "From EUR 49 per month",
+                                   "goalAffinity": 0.85}],
+    }
+    step.update(overrides)
+    return {"runId": "run_1", "profileId": "friedrich_wolf",
+            "timeline": [{"type": "persona.perception", "data": step},
+                         {"type": "persona.perception", "data": step},
+                         {"type": "persona.affect", "data": {"state": {}}}]}
+
+
+def test_a_report_says_what_was_present_but_not_perceivable():
+    """The pipeline measures this on the rendered pixels, after the persona's own
+    optics -- something a contrast check against the declared CSS can miss --
+    and until now recorded it on the run and never reported it."""
+    findings = JobExecutor._pain_points_from_perception([_perception_journey()])
+    unreadable = [f for f in findings if f["source"] == "perception.notPerceived"]
+
+    assert len(unreadable) == 1
+    finding = unreadable[0]
+    assert finding["severity"] == "high"
+    assert "Prices exclude VAT" in finding["title"]
+    # The reason, the eyesight it was measured for, and the numbers behind it.
+    assert "too little contrast" in finding["summary"]
+    assert "0.35" in finding["summary"] and "1.95px" in finding["summary"]
+    assert "edge contrast 0.0028" in finding["evidence"]
+    # And a fix that does not send the reader to the wrong place.
+    assert "declared CSS colours is not enough" in finding["recommendation"]
+
+
+def test_a_report_says_what_they_came_for_and_never_saw():
+    """The answer to "why did they not click the thing that was right there",
+    which is the question a usability report exists to answer."""
+    findings = JobExecutor._pain_points_from_perception([_perception_journey()])
+    missed = [f for f in findings if f["source"] == "perception.missed"]
+
+    assert len(missed) == 1
+    finding = missed[0]
+    assert "From EUR 49 per month" in finding["title"]
+    # Why they missed it: which scan pattern, how few fixations, and what about
+    # this person chose it.
+    assert "spotted" in finding["summary"] and "6 fixations" in finding["summary"]
+    assert "little patience" in finding["summary"]
+    # A prominence fix, and explicitly not a copy fix -- the element was readable.
+    assert "prominence problem, not a wording one" in finding["recommendation"]
+
+
+def test_the_same_element_missed_all_visit_is_one_finding_not_forty():
+    """A low-contrast caption is unreadable on every step of a visit. Reported
+    per step it would bury everything else in the report."""
+    journey = _perception_journey()
+    journey["timeline"] = journey["timeline"] * 20
+    findings = JobExecutor._pain_points_from_perception([journey])
+
+    assert len(findings) == 2, "one per element, however many steps saw it"
+    assert any("40 step(s)" in f["summary"] for f in findings), \
+        "and it says how persistent it was, since that is the evidence"
+
+
+def test_a_run_that_saw_everything_produces_no_perception_findings():
+    """The model has to find real problems, not make every page a defect."""
+    clean = _perception_journey(notPerceived=[], missedWhatTheyCameFor=[])
+    assert JobExecutor._pain_points_from_perception([clean]) == []
+    # And a run from before perception existed carries no such events at all.
+    assert JobExecutor._pain_points_from_perception([{"runId": "old", "timeline": []}]) == []
+
+
+def test_an_element_with_no_name_is_still_reportable():
+    """Not everything on a page has an accessible name, and "" as a title would
+    be worse than useless to a reader."""
+    nameless = _perception_journey(notPerceived=[
+        {"selector": "div.badge", "role": "img", "name": "",
+         "box": {"x": 950, "y": 760}, "reason": "the region is a single flat colour"}])
+    finding = JobExecutor._pain_points_from_perception([nameless])[0]
+    assert "950,760" in finding["title"], "located by where it is when it cannot be named"
+
+
+def test_the_summary_names_the_worst_finding_rather_than_only_counting():
+    """"12 issues, 3 high-severity" is true of almost any report and tells a
+    reader nothing they can act on."""
+    findings = [
+        {"severity": "high", "title": 'On screen and never looked at: "From EUR 49 per month"',
+         "source": "perception.missed"},
+        {"severity": "high", "title": "Not readable to this person: \"Prices exclude VAT\"",
+         "source": "perception.notPerceived"},
+        {"severity": "medium", "title": "Vague call to action", "source": "uxFindings"},
+    ]
+    summary = JobExecutor._executive_summary("https://example.test/", ["a", "b"],
+                                             [{"id": "fw"}], findings, [{"title": "Clear value"}])
+
+    assert "The most serious is: On screen and never looked at" in summary
+    # The two classes a reader would not know to look for are called out by name.
+    assert "not legible once these users' eyesight is applied" in summary
+    assert "never looked at -- a prominence problem" in summary
+    assert "3 usability issue(s)" in summary and "2 of them high-severity" in summary
+
+
+def test_the_summary_of_a_clean_run_does_not_invent_a_worst_finding():
+    summary = JobExecutor._executive_summary("https://example.test/", ["a"], [{"id": "fw"}],
+                                             [{"title": "No pain points detected"}], [])
+    assert "The most serious is" not in summary
+    assert "0 usability issue(s)" in summary

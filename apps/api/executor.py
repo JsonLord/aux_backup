@@ -315,6 +315,10 @@ class JobExecutor:
                     shutil.rmtree(Path(session_state_path).parent, ignore_errors=True)
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)
+            # What the persona's eyes made of the page. Two finding classes that
+            # exist nowhere else, because no check against the DOM can produce
+            # either -- see _pain_points_from_perception.
+            findings += self._pain_points_from_perception(journeys)
             cohort_runs, screenshot_bytes, raw_strengths, vision_error, repeated_captures = \
                 self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
@@ -584,14 +588,37 @@ class JobExecutor:
     @staticmethod
     def _executive_summary(url: str | None, tasks: list[str], personas: list[dict[str, Any]],
                            findings: list[dict[str, Any]], preserve: list[dict[str, Any]]) -> str:
-        """State what was actually found, not what was merely prepared."""
-        blocking = sum(1 for finding in findings
-                       if str(finding.get("severity")) in {"critical", "high"}
-                       and finding.get("title") != "No pain points detected")
+        """State what was actually found, not what was merely prepared.
+
+        A count is not a summary. "12 usability issues were identified, 3 of them
+        high-severity" is true of almost any report and tells a reader nothing
+        they can act on -- they still have to read all twelve to learn whether
+        the site has a pricing problem or a checkout problem. So the worst
+        finding is named, and the two classes that only this pipeline can produce
+        are called out by name when they occur, because a reader will not know to
+        look for them.
+        """
         real = [finding for finding in findings if finding.get("title") != "No pain points detected"]
-        parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) against {url or 'the target site'}."]
+        blocking = [finding for finding in real
+                    if str(finding.get("severity")) in {"critical", "high"}]
+        parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) "
+                 f"against {url or 'the target site'}."]
         parts.append(f"{len(real)} usability issue(s) were identified"
-                     + (f", {blocking} of them high-severity or blocking." if blocking else "."))
+                     + (f", {len(blocking)} of them high-severity or blocking." if blocking else "."))
+
+        # The single thing to fix first, named rather than counted.
+        worst = (blocking or real)
+        if worst:
+            parts.append(f"The most serious is: {worst[0].get('title')}.")
+
+        unreadable = [f for f in real if f.get("source") == "perception.notPerceived"]
+        missed = [f for f in real if f.get("source") == "perception.missed"]
+        if unreadable:
+            parts.append(f"{len(unreadable)} element(s) are present in the page but not legible "
+                         "once these users' eyesight is applied to what was actually drawn.")
+        if missed:
+            parts.append(f"{len(missed)} thing(s) a user came for were readable and on screen, "
+                         "and were never looked at -- a prominence problem rather than a wording one.")
         if preserve:
             parts.append(f"{len(preserve)} design decision(s) are working and should be preserved.")
         return " ".join(parts)
@@ -675,6 +702,110 @@ class JobExecutor:
         if not journey.get("verdict") and not screenshots:
             raise RuntimeError(f"JourneyTest run failed: {message}")
         return {**journey, "harnessError": message}
+
+    @staticmethod
+    def _pain_points_from_perception(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Findings from what the persona's eyes actually resolved on the page.
+
+        Two of these exist nowhere else in the report, because no check against
+        the DOM can produce either. A run records them on every step as
+        `persona.perception` (services/journey-worker/node/src/personaDirector.js)
+        and nothing read them, so the pipeline measured two whole classes of
+        defect and then said nothing about them.
+
+          notPerceived   The element is in the accessibility tree and there is
+                         nothing legible where it lives, once this person's
+                         optics have been applied to the capture. Present but
+                         not perceivable, which is an accessibility defect a
+                         contrast checker on the CSS can miss entirely -- it is
+                         measured on the rendered pixels, after blur.
+
+          missedWhatTheyCameFor
+                         The thing they came for was legible, on screen, and
+                         they never got to it: their patience ran out or
+                         something moving pulled them away. Not a defect in
+                         itself; it is the answer to "why did they not click the
+                         thing that was right there", which is the question a
+                         usability report exists to answer and could not.
+
+        Grouped by element rather than by step. The same low-contrast caption is
+        unreadable on every step of a visit, and forty identical findings would
+        bury the rest of the report.
+        """
+        by_element: dict[tuple, dict[str, Any]] = {}
+        for journey in journeys:
+            run_id = journey.get("runId")
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            for event in journey.get("timeline") or []:
+                if event.get("type") != "persona.perception":
+                    continue
+                data = event.get("data") or {}
+                eyes = data.get("eyes") or {}
+                scan = data.get("scan") or {}
+                for item in data.get("notPerceived") or []:
+                    key = (run_id, "notPerceived", item.get("selector"))
+                    entry = by_element.setdefault(key, {"seen": 0, "item": item, "eyes": eyes,
+                                                        "scan": scan, "runId": run_id,
+                                                        "personaId": persona_id})
+                    entry["seen"] += 1
+                for item in data.get("missedWhatTheyCameFor") or []:
+                    key = (run_id, "missed", item.get("selector"))
+                    entry = by_element.setdefault(key, {"seen": 0, "item": item, "eyes": eyes,
+                                                        "scan": scan, "runId": run_id,
+                                                        "personaId": persona_id})
+                    entry["seen"] += 1
+
+        findings: list[dict[str, Any]] = []
+        for (run_id, kind, _selector), entry in by_element.items():
+            item, eyes, scan = entry["item"], entry["eyes"], entry["scan"]
+            name = (item.get("name") or "").strip()
+            what = f'"{name[:70]}"' if name else f"the {item.get('role') or 'element'} at "\
+                f"{int((item.get('box') or {}).get('x', 0))},{int((item.get('box') or {}).get('y', 0))}"
+            steps = f"on {entry['seen']} step(s)" if entry["seen"] > 1 else "on one step"
+            if kind == "notPerceived":
+                sight = (f"acuity {eyes.get('acuity')}, contrast sensitivity "
+                         f"{eyes.get('contrastSensitivity')}")
+                blur = f", which blurs the page by {eyes.get('blurPx')}px" if eyes.get("blurPx") else ""
+                findings.append({
+                    "severity": "high",
+                    "category": "accessibility",
+                    "title": f"Not readable to this person: {what}",
+                    "summary": (f"{what} is in the page, and after this person's eyes are applied to "
+                                f"the capture there is nothing legible where it sits: "
+                                f"{item.get('reason') or 'it does not stand out from its background'}. "
+                                f"Measured on the rendered pixels {steps}, for someone with {sight}{blur}."),
+                    "recommendation": ("Raise the contrast between this element and what is behind it, "
+                                       "or its size, until it resolves for this profile. Checking the "
+                                       "declared CSS colours is not enough: this is measured on what "
+                                       "was actually drawn."),
+                    "evidence": (f"internal contrast {item.get('internalContrast')}, "
+                                 f"edge contrast {item.get('edgeContrast')}, ink {item.get('ink')}"),
+                    "evidenceScreenshot": None,
+                    "observation": item.get("reason") or "",
+                    "source": "perception.notPerceived", "runId": run_id,
+                    "personaId": entry["personaId"],
+                })
+            else:
+                findings.append({
+                    "severity": "high",
+                    "category": "findability",
+                    "title": f"On screen and never looked at: {what}",
+                    "summary": (f"{what} is what this person came for, it was legible, and it was in "
+                                f"the viewport -- and they never looked at it {steps}. They scan "
+                                f"{scan.get('pattern') or 'the page'} with a budget of "
+                                f"{scan.get('fixationBudget')} fixations: "
+                                + "; ".join(scan.get("why") or []) + "."),
+                    "recommendation": ("Put it where this scan pattern actually goes, or make it "
+                                       "compete: this is a prominence problem, not a wording one. "
+                                       "The element is present and readable, so adding copy about it "
+                                       "elsewhere will not help."),
+                    "evidence": f"goal match {item.get('goalAffinity')}, never fixated {steps}",
+                    "evidenceScreenshot": None,
+                    "observation": "",
+                    "source": "perception.missed", "runId": run_id,
+                    "personaId": entry["personaId"],
+                })
+        return findings
 
     @staticmethod
     def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
