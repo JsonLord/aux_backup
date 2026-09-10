@@ -8,6 +8,11 @@ Each entry says what "good" means, what is actually built, and what is still
 missing. A claim here is worth nothing without the evidence beside it, so
 measurements name the run or the test that produced them.
 
+`spec.md` section 53 carries the same ten as a planning document: the scores, the
+work that closes each remaining gap in order of value, and the measurement traps
+that produced confidently wrong results. Read that one to decide what to build
+next; read this one for what each part currently does.
+
 ---
 
 ## 1. The tasks fit the site

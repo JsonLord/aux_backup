@@ -2971,3 +2971,132 @@ If engineering starts immediately, build in this order:
 14. Empirical calibration and alternative retesting.
 
 This order delivers a useful application early while preserving the architecture needed for the full research vision.
+
+---
+
+## 53. Where the ten judged qualities stand
+
+This section is a working record rather than a design: what a run is judged on,
+what has been built against each, what the measurements were, and what remains.
+It exists because the ten qualities were agreed in review, carried in
+conversation, and lost — twice. `docs/product-scorecard.md` holds the same list
+with more implementation detail; this is the version for planning the next stage.
+
+Two rules the rest of this section depends on:
+
+**A measurement, not an assertion.** Every claim below names the number that
+supports it and where it came from. A rating without one is an opinion, and the
+history of this work is that the opinions were wrong roughly half the time — the
+model that "correctly" reported a heading unreadable did so having never looked at
+its size; the deck that "fitted the screen" lost 49px on a projector; the dialog
+whose close button was wired correctly could not be closed.
+
+**Whose fact is it.** The persona is the instrument, never the standard. Whether
+somebody with 0.35 acuity can read something is a fact about them. Whether the
+element clears 4.5:1 is a fact about the site. Only the second can make a report
+say "defect", and separating them is what keeps the report believable.
+
+### 53.1 Scores, and what each is measured by
+
+| # | Quality | State | The measurement behind it |
+|---|---------|-------|---------------------------|
+| 1 | Tasks fit the site | **9/10** | Both inventions a live run produced (`'Productivity for AEC'`, `'Solutions'`) are caught and regenerated against; "look for a way to contact a human" is not flagged, because that is the behaviour asked for |
+| 2 | Thoughts are a person's | **9/10** | Live run: expectation committed before acting, `matched: "no"`, a gap naming what was absent. Feelings derived, never reported by the model |
+| 3 | Tool calling correct | **9/10** | Vocabulary generated from the tools that implement it; a test asserts the offered set and the implemented set are equal, so they cannot drift |
+| 4 | Persona resembles itself | **8/10** | Off-persona action scored 1/10 with a correct reason, corrected action 10/10. Memory bank: mean adherence 5.7 → 6.6 over two visits, reaching `GIVE_UP` at 10/10 |
+| 5 | Physical traits real | **9/10** | Identical `#888` (3.54:1): at acuity 0.35 the 44px heading reads, the 16px body copy does not; at 0.75/0.7 both read. Agrees with WCAG independently |
+| 6 | Report specific, with fixes | **8/10** | Two finding classes no DOM check can produce, gated on rendered contrast, cross-persona consistency, and profile rarity |
+| 7 | Artifacts render | **7/10** | Findings crop to the element (484×42 out of a 900×500 page) and eyesight findings cite the page as those eyes delivered it |
+| 8 | Deck fits the screen | **9/10** | Six presentation sizes, zero overflow, re-measured in Chromium by a test. Was 49px cut off per finding slide at 1024×600 |
+| 9 | Watchable and takeover-able | **8/10** | Live viewport stream, real pointer in the page, takeover path, stored sessions |
+| 10 | Runs unattended | **7/10** | Evidence salvaged on a bad ending; a truncated completion salvaged (measured: `finish_reason: length` at 29 completion tokens against a budget of 800) |
+
+Suites: **171 node, 295 python** passing. Two python failures are a persona
+fixture absent from this sandbox, unrelated to any of the above.
+
+### 53.2 What closes each remaining gap
+
+Ordered by value per unit of work, not by parameter number.
+
+**1. Run the GEPA compile against a real corpus** — closes the last of #4.
+`services/persona_service/actor_program.py` is built and unproven: the judge is
+the metric, the memory bank's episodes are the trainset, and nothing has been
+compiled yet. Needs a corpus of runs (say 20 visits across 5 personas), then a
+before/after on the gate's regeneration rate, which is the honest success measure
+and is already counted in `gate.stats`.
+
+**2. Verify every artifact reference resolves** — closes #7. There is no
+end-to-end check that a finished report's screenshot, video and snapshot
+references all point at files that exist. A run that silently drops one produces a
+slide with a missing image and says nothing. Cheap: walk a finished report, assert
+every path resolves, count and report the coverage.
+
+**3. Judge severity instead of assigning it** — closes the rest of #6.
+Severities come from a rule table. A finding that blocks a purchase and one that
+mildly annoys a reader can both come out "high". The evidence to judge on is
+already there: which task it blocked, the affect trace at that step, how many
+personas hit it.
+
+**4. Write recommendations for the page, not from a template** — also #6. The two
+perception classes carry templated fixes. They are correct and they are generic;
+the redesign generator already proves a model can be grounded in the run's
+semantic snapshot, and the same grounding applies here.
+
+**5. Report the provider failure upstream** — closes #10. `alias-code` failing is
+recorded and never surfaced (task #24). A run that degrades should say so in the
+report, not only in a log.
+
+**6. Constrain task generation rather than checking it** — the last of #1. The
+check catches inventions after the fact and regenerates. Passing the outline as a
+constrained vocabulary would prevent them.
+
+**7. Forward real pointer movement** — the last of #9 (task #22, deferred). The
+cursor teleports between clicks, which reads as less human than not moving it.
+
+### 53.3 Two things that are deliberately not on that list
+
+**The screen parser stays optional.** `services/perception_service/detector.py`
+finds what the DOM never declared — text baked into a hero image, a canvas-drawn
+control. It needs torch and weights, and the perceivability half of the model
+carries most of the value on numpy and PIL alone. `/healthz` says whether it is
+there; nothing depends on it.
+
+**Redesigns stay grounded in the DOM, not in pixels.** `screenshot-to-code` was
+considered and is the wrong tool for the main path: we have the real selectors,
+roles, accessible names and geometry, and round-tripping a region through pixels
+destroys exactly the information an accessibility finding is about — a fragment
+generated from an image cannot preserve an `aria-label` it never saw. Its
+technique earns a place in one spot only: the `undeclared` detections above, where
+pixels genuinely are all there is, and where the finding ("this exists only as
+pixels, so a screen reader cannot reach it") and the fix ("here it is as real
+markup") line up exactly.
+
+### 53.4 Measurement traps worth not repeating
+
+Every one of these produced a confidently wrong result that looked right in the
+code. They are recorded because the same shapes keep recurring.
+
+- **CSS placed where it cannot win.** Twice. The deck's short-viewport rules sat
+  above an equally specific `.shot img` rule and the measured overflow did not
+  move by a pixel. The credentials dialog's `display: block !important` overrode
+  the class Gradio hides with, so every close path ran correctly and the dialog
+  stayed on screen.
+- **A ring that includes what it surrounds.** Three times: edge contrast in
+  `legibility`, the WCAG surround for a solid control, and the internal
+  measurement importing blurred white across an element's own boundary — which
+  made a mid-grey button report *more* contrast at 0.4 acuity than at full sight.
+- **A fixed threshold on a degraded signal.** A twelve-grey-level "ink" test meant
+  that once the optics compressed a page, every stroke sat within twelve levels of
+  its background and the region read as blank.
+- **A uniform transform for a frequency-dependent effect.** Contrast loss as a
+  volume knob crushed a headline as hard as fine print, which is wrong about the
+  one thing that matters most.
+- **A test fooled by its own explanation.** Twice: comments containing the exact
+  string the assertion searched for, so the test passed while the bug was
+  reintroduced. Strip comments before asserting on source.
+- **A fixture that cannot show what it claims.** Solid bars standing in for text
+  have no internal structure; `#e9e9e9` on `#f5f5f5` is 1.11:1, unreadable to
+  everybody, and cannot demonstrate a difference between two people.
+- **A guard that is always true.** `offsetParent` is null for a `position: fixed`
+  element whether or not it is visible, so Escape and click-outside returned early
+  every time.
