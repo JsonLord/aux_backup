@@ -2,6 +2,7 @@
 const assert = require("node:assert/strict");
 const test = require("node:test");
 const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
+  completeObjectsIn, visionMaxTokens, DEFAULT_VISION_MAX_TOKENS,
   VisionUnavailableError } = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
 
@@ -284,4 +285,55 @@ test("a missing credential is reported as not configured, not as an invalid requ
     if (original.key !== undefined) process.env.OPENAI_API_KEY = original.key;
     if (original.blablador !== undefined) process.env.BLABLADOR_API_KEY = original.blablador;
   }
+});
+
+test("a critique cut off at the completion budget keeps the findings it finished", () => {
+  // The exact failure from a live run: max_tokens reached mid-string inside the
+  // fourth finding, so JSON.parse rejected a body that already held three
+  // complete, usable observations. Every screenshot in that run failed this way
+  // and the report carried no vision findings at all.
+  const truncated = JSON.stringify({
+    issues: [
+      { title: "Pricing is never stated", description: "No plan names a price.",
+        severity: "high", category: "copy",
+        elements: [{ elementSelector: "section:nth-of-type(3)", role: "cause" }] },
+      { title: "Links have no accessible name", description: "Icon-only links carry no aria-label.",
+        severity: "medium", category: "accessibility", elements: [] },
+    ],
+  }).replace(/\}$/, "")
+    + ', {"title": "A third finding that was cut off mid-sen';
+
+  const parsed = parseCritique(truncated, { truncated: true });
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.issues.length, 2);
+  assert.deepEqual(parsed.issues.map((issue) => issue.title),
+    ["Pricing is never stated", "Links have no accessible name"]);
+  // The finding that was cut off is dropped, not guessed at.
+  assert.ok(!parsed.issues.some((issue) => /cut off/.test(issue.title)));
+});
+
+test("braces inside a description are not mistaken for structure", () => {
+  const objects = completeObjectsIn('{"title":"Uses {placeholder} copy","description":"a } brace"}, {"title":"cut');
+  assert.equal(objects.length, 1);
+  assert.equal(objects[0].title, "Uses {placeholder} copy");
+});
+
+test("a cut-off critique with nothing complete says so, and says why", () => {
+  assert.throws(() => parseCritique('{"issues": [{"title": "only the very begin', { truncated: true }),
+    /cut off at the completion budget/);
+  // And a body that was never JSON keeps its own, different explanation.
+  assert.throws(() => parseCritique("I am sorry, I cannot analyse this image.", { truncated: false }),
+    /did not return JSON/);
+});
+
+test("the completion budget has room for a full critique and can be overridden", () => {
+  // 2500 was reached exactly, mid-finding, on a page with 52 detected elements.
+  delete process.env.EYESON_VISION_MAX_TOKENS;
+  assert.ok(visionMaxTokens() > 2500);
+  process.env.EYESON_VISION_MAX_TOKENS = "1200";
+  assert.equal(visionMaxTokens(), 1200);
+  delete process.env.EYESON_VISION_MAX_TOKENS;
+  process.env.EYESON_VISION_MAX_TOKENS = "not-a-number";
+  assert.equal(visionMaxTokens(), DEFAULT_VISION_MAX_TOKENS);
+  delete process.env.EYESON_VISION_MAX_TOKENS;
 });

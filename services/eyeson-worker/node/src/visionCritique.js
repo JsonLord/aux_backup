@@ -56,6 +56,13 @@ class VisionUnavailableError extends Error {
 // real cause (a 413 payload, a bad key) behind a generic "after 3 attempts".
 const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
 
+const DEFAULT_VISION_MAX_TOKENS = 6000;
+
+function visionMaxTokens() {
+  const configured = Number.parseInt(String(process.env.EYESON_VISION_MAX_TOKENS || ""), 10);
+  return Number.isInteger(configured) && configured > 0 ? configured : DEFAULT_VISION_MAX_TOKENS;
+}
+
 const FINDING_CATEGORIES = ["accessibility", "usability", "visual_design", "copy", "navigation"];
 const ELEMENT_ROLES = ["trigger", "cause", "feedback", "obstacle", "recovery"];
 // Maps this module's finding categories onto knowledge.js's curated-source
@@ -102,7 +109,66 @@ function clamp01(value, fallback = 0) {
   return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : fallback;
 }
 
-function parseCritique(content) {
+/**
+ * The complete objects at the start of a JSON array body that may be cut off.
+ *
+ * A completion that ran out of budget ends mid-value, so `JSON.parse` rejects
+ * the whole document -- including the findings that were written in full before
+ * the cut. Walking the array and keeping the elements that close is not
+ * "repairing" arbitrary JSON: nothing is invented, and anything incomplete is
+ * dropped. Strings are tracked so a brace inside a description cannot be
+ * mistaken for structure.
+ */
+function completeObjectsIn(text) {
+  const objects = [];
+  let depth = 0, start = -1, inString = false, escaped = false;
+  for (let index = 0; index < text.length; index += 1) {
+    const character = text[index];
+    if (inString) {
+      if (escaped) escaped = false;
+      else if (character === "\\") escaped = true;
+      else if (character === '"') inString = false;
+      continue;
+    }
+    if (character === '"') { inString = true; continue; }
+    if (character === "{") { if (depth === 0) start = index; depth += 1; continue; }
+    if (character === "}") {
+      depth -= 1;
+      if (depth === 0 && start >= 0) {
+        try { objects.push(JSON.parse(text.slice(start, index + 1))); } catch { /* not usable */ }
+        start = -1;
+      }
+    }
+  }
+  return objects;
+}
+
+/** The body of the named array, from its opening bracket to the end of the text. */
+function arrayBodyAfter(text, key) {
+  const at = text.indexOf(`"${key}"`);
+  if (at < 0) return "";
+  const open = text.indexOf("[", at);
+  return open < 0 ? "" : text.slice(open + 1);
+}
+
+/**
+ * What a truncated completion still said.
+ *
+ * A live run lost every screenshot's critique to this: the model hit max_tokens
+ * mid-array (finish_reason "length", completion_tokens exactly at the cap) and
+ * the parse threw, so a critique with several complete findings in it counted
+ * for nothing and the report said only that the vision stage "failed". The
+ * findings that were written in full are real observations about real pixels,
+ * so they are kept and the incomplete tail is dropped.
+ */
+function salvageTruncatedCritique(text) {
+  const issues = completeObjectsIn(arrayBodyAfter(text, "issues"));
+  const strengths = completeObjectsIn(arrayBodyAfter(text, "strengths"));
+  if (!issues.length && !strengths.length) return null;
+  return { issues, strengths };
+}
+
+function parseCritique(content, { truncated = false } = {}) {
   let stripped = content.trim();
   if (stripped.startsWith("```")) {
     stripped = stripped.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
@@ -113,12 +179,28 @@ function parseCritique(content) {
   let parsed;
   try {
     parsed = JSON.parse(stripped);
-  } catch {
+  } catch (error) {
     const objectMatch = stripped.match(/\{[\s\S]*\}/);
     const arrayMatch = stripped.match(/\[[\s\S]*\]/);
     const candidate = objectMatch && (!arrayMatch || objectMatch.index <= arrayMatch.index) ? objectMatch : arrayMatch;
-    if (!candidate) throw new Error("vision critique did not return JSON");
-    parsed = JSON.parse(candidate[0]);
+    let recovered = null;
+    try {
+      if (candidate) recovered = JSON.parse(candidate[0]);
+    } catch { /* fall through to salvage */ }
+    if (recovered === null) {
+      const salvaged = salvageTruncatedCritique(stripped);
+      if (salvaged) {
+        return { issues: normalizeIssues(salvaged.issues), strengths: normalizeStrengths(salvaged.strengths),
+          truncated: true };
+      }
+      // Say which failure this is. "did not return JSON" for a completion that
+      // was cut off at the budget reads as the model misbehaving, when what
+      // happened is that we asked for more than we left room for.
+      throw new Error(truncated
+        ? `vision critique was cut off at the completion budget before any finding was complete: ${error.message}`
+        : "vision critique did not return JSON");
+    }
+    parsed = recovered;
   }
   if (Array.isArray(parsed)) return { issues: normalizeIssues(parsed), strengths: [] };
   if (!parsed || typeof parsed !== "object") throw new Error("vision critique did not return a JSON object or array");
@@ -180,7 +262,16 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
     // completion budget on hidden reasoning before emitting visible text
     // (observed live: gemini-3.5-flash cut off at 9 visible tokens with
     // max_tokens=300, finish_reason "length"); this needs real headroom.
-    max_tokens: 2500,
+    //
+    // 2500 was still not enough. A live critique of a page with 52 detected
+    // elements stopped at exactly 2500 completion tokens with finish_reason
+    // "length", mid-string inside its fourth finding -- and every screenshot in
+    // that run failed the same way, so the report carried no vision findings at
+    // all. A finding runs to a few hundred tokens once it carries a
+    // recommendation and its element references, so this leaves room for a full
+    // critique rather than most of one. EYESON_VISION_MAX_TOKENS overrides it
+    // for a route with a smaller ceiling.
+    max_tokens: visionMaxTokens(),
   };
   let lastError;
   let attemptsSpent = 0;
@@ -201,9 +292,13 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
         throw failure;
       }
       const data = await response.json();
-      const content = data.choices?.[0]?.message?.content;
+      const choice = data.choices?.[0];
+      const content = choice?.message?.content;
       if (!content || !content.trim()) throw new Error("vision endpoint returned an empty completion");
-      return content;
+      // Whether the model stopped because it was finished or because it ran out
+      // of room. The difference decides whether an unparseable answer is the
+      // model's fault or ours, and the caller cannot tell from the text alone.
+      return { content, truncated: choice?.finish_reason === "length" };
     } catch (error) {
       lastError = error;
       if (NON_RETRYABLE_STATUS.has(error?.status)) break;
@@ -234,10 +329,10 @@ async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], u
   const { system, user } = buildPrompt({ url, task, personaSummary, elements });
   // The producer downscales and re-encodes before sending, so the bytes are not
   // necessarily PNG any more; mislabelling them breaks strict providers.
-  const content = await completeVision({ systemPrompt: system, userText: user, imageBase64, model, apiKey, baseUrl,
-    mimeType: imageMimeType || "image/png",
+  const { content, truncated } = await completeVision({ systemPrompt: system, userText: user, imageBase64,
+    model, apiKey, baseUrl, mimeType: imageMimeType || "image/png",
     maxAttempts: options.maxAttempts, retryWaitMs: options.retryWaitMs, timeoutMs: options.timeoutMs });
-  const { issues, strengths } = parseCritique(content);
+  const { issues, strengths } = parseCritique(content, { truncated });
   const byId = new Map(elements.map((element) => [element.selector, element]));
   const resolve = (refs) => refs.map((ref) => {
     const matched = byId.get(ref.elementSelector);
@@ -291,5 +386,6 @@ function toPainPoint(finding, context) {
   };
 }
 
-module.exports = { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
+module.exports = { DEFAULT_VISION_MAX_TOKENS, completeObjectsIn, salvageTruncatedCritique, visionMaxTokens,
+  critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
   VisionUnavailableError, FINDING_CATEGORIES, ELEMENT_ROLES };
