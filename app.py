@@ -441,16 +441,53 @@ def generate_personas(theme, customer_profile, num_personas, persona_client=None
     """Compatibility wrapper for legacy callbacks during tab migration."""
     return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
 
-def generate_tasks(theme, customer_profile, url):
+def page_outline_for_tasks(url):
+    """What the target page actually contains, or None if it cannot be read.
+
+    Never fatal: a site that blocks us, times out, or answers with something that
+    is not a web page falls back to the old URL-only behaviour rather than
+    stopping the run. The caller says so in the status either way, because tasks
+    written without looking at the page are worth much less and a reader should
+    know which kind they got.
+    """
+    try:
+        from apps.gradio.page_summary import fetch_page_outline
+        return fetch_page_outline(url)
+    except Exception as error:      # noqa: BLE001 - any failure degrades, none stops the run
+        print(f"Could not read {url} for task generation: {error}")
+        return None
+
+
+def generate_tasks(theme, customer_profile, url, outline=None):
     client = get_llm_client()
     if not client:
         return [f"Task {i+1} for {theme} (OPENAI_API_KEY not set)" for i in range(10)]
+
+    # Look at the page before writing tasks about it. Given only the URL string,
+    # the model invents the site's structure from the domain name and the persona
+    # -- against a real target it produced "Navigate to the 'Productivity for AEC'
+    # section" and "Explore the 'Solutions' menu" for a site whose navigation is
+    # Home / How it works / Install / Research / Pricing / Sign in / Get started.
+    # Well-written tasks for a site that does not exist.
+    if outline is None:
+        outline = page_outline_for_tasks(url)
+    if outline:
+        from apps.gradio.page_summary import outline_as_prompt_block
+        page_block = ("\n" + outline_as_prompt_block(outline) + "\n\n"
+                      "    Every task must refer to sections, links, buttons or content that appear above. "
+                      "Do not invent navigation, product names, or page sections that are not listed. "
+                      "If the page does not offer something the persona wants (pricing, contact, a demo), "
+                      "write the task as looking for it and finding out whether it is there.\n")
+    else:
+        page_block = ("\n    The page could not be read before writing these tasks, so keep them "
+                      "general: describe what the persona is trying to achieve rather than naming "
+                      "sections or menus, which would be guesses.\n")
 
     prompt = f"""
     Generate EXACTLY 10 sequential tasks for a user to perform on the website: {url}
     The theme of the analysis is: {theme}.
     The user persona profile is: {customer_profile}.
-
+{page_block}
     The tasks should cover:
     1. Communication
     2. Purchase decisions
@@ -521,9 +558,23 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
             if ex_personas:
                 current_profile = ex_personas[0].get('minibio', customer_profile)
 
-        progress(0.02, desc="Thinking...")
+        progress(0.02, desc="Reading the page...")
+        yield "Reading the page...", None, None, None
+        # Read the target once, here, so the status can say whether the tasks that
+        # follow were written against the real page or only against its URL.
+        outline = page_outline_for_tasks(url)
+        page_note = ""
+        if outline:
+            page_note = (f" Tasks were written against the live page "
+                         f"({len(outline.get('navigation') or [])} navigation link(s), "
+                         f"{len(outline.get('headings') or [])} heading(s) read).")
+        else:
+            page_note = (" The page could not be read, so these tasks are general: they describe "
+                         "what the persona wants rather than naming sections, which would be guesses.")
+
+        progress(0.06, desc="Thinking...")
         yield "Thinking...", None, None, None
-        tasks = generate_tasks(theme, current_profile, url)
+        tasks = generate_tasks(theme, current_profile, url, outline=outline)
         tasks_text = "\n".join(tasks) if isinstance(tasks, list) else str(tasks)
 
         requested = int(num_personas)
@@ -571,7 +622,7 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
             personas = select_or_create_personas(theme, customer_profile, requested, force_method=method, example_file=example_file, persona_client=personas_client)
 
         progress(1.0, desc="Generation complete!")
-        yield "Generation complete!", tasks_text, personas, tasks
+        yield "Generation complete!" + page_note, tasks_text, personas, tasks
     except Exception as e:
         yield f"Error during generation: {str(e)}", None, None, None
 
