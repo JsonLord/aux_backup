@@ -223,9 +223,15 @@ async function runWithJourneyTest(input) {
       profile: input.profile,
       model: { provider, name: modelId },
       actor: llmActor({ model: modelId, apiKey, baseUrl,
-        // The reflection is a factual comparison rather than a performance, so it
-        // runs on a smaller, faster model where one is configured.
-        reflectModel: process.env.JOURNEY_REFLECT_MODEL || undefined }),
+        // The reflection is a factual comparison rather than a performance, and
+        // scoring persona adherence is smaller still, so both run on a smaller,
+        // faster model where one is configured -- on its own endpoint and key
+        // when it is served somewhere other than the acting model.
+        reflectModel: process.env.JOURNEY_REFLECT_MODEL || undefined,
+        reflectBaseUrl: process.env.JOURNEY_REFLECT_BASE_URL
+          || process.env.BLABLADOR_BASE_URL || undefined,
+        reflectApiKey: process.env.JOURNEY_REFLECT_API_KEY
+          || process.env.BLABLADOR_API_KEY || undefined }),
       maxSteps: Number.parseInt(process.env.JOURNEY_MAX_STEPS || "", 10) || undefined,
     });
   }

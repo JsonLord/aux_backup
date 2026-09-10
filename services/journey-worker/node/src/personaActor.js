@@ -374,8 +374,15 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
  * costs. JOURNEY_REFLECT_MODEL picks it; unset, reflection uses the acting model,
  * because a model id only means something against the endpoint it is served from.
  */
-function llmActor({ model, reflectModel, apiKey, baseUrl, complete = completion, attempts = 2 } = {}) {
+function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflectBaseUrl,
+  complete = completion, attempts = 2 } = {}) {
   const judge = reflectModel || model;
+  // The smaller model can live somewhere else entirely. Reflecting and scoring
+  // adherence are small, frequent jobs and a router that is fast at them is
+  // often not the one you want deciding what a person does next -- so the
+  // endpoint and the key travel with the model rather than being assumed shared.
+  const judgeKey = reflectApiKey || apiKey;
+  const judgeUrl = reflectBaseUrl || baseUrl;
   async function decide(input, { notLikeYou = "" } = {}) {
     const { system, user } = buildPrompt({ ...input, notLikeYou });
     let lastText = "";
@@ -392,12 +399,13 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, complete = completion,
 
   decide.reflect = async function reflect(input) {
     const { system, user } = buildReflectionPrompt(input);
-    const text = await complete({ system, user, model: judge, apiKey, baseUrl });
+    const text = await complete({ system, user, model: judge, apiKey: judgeKey, baseUrl: judgeUrl });
     // An unreadable reflection must not invent a violation: "partly" would say
     // the page disappointed someone on no evidence at all.
     return parseReflection(text) || { observed: "", matched: "yes", gap: "", malformed: true };
   };
   decide.reflectModel = judge;
+  decide.reflectBaseUrl = judgeUrl;
 
   /**
    * Score one proposed action against the persona, for the adherence gate.
@@ -407,7 +415,7 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, complete = completion,
    * not also pay a full-sized call to grade itself.
    */
   decide.judgeAdherence = ({ system, user }) =>
-    complete({ system, user, model: judge, apiKey, baseUrl });
+    complete({ system, user, model: judge, apiKey: judgeKey, baseUrl: judgeUrl });
   return decide;
 }
 

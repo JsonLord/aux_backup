@@ -195,6 +195,7 @@ class PersonaDirector {
     lastUrl = await browser.getUrl().catch(() => journey.app.baseUrl);
     await this.capture(browser, context, "arrived");
 
+    let reportedGateFailure = false;
     while (steps < this.maxSteps && !ending) {
       if (context.signal?.aborted) { ending = { type: "abandoned", detail: "the run was cancelled" }; break; }
       steps += 1;
@@ -245,6 +246,15 @@ class PersonaDirector {
       const settled = await this.gate.settle(this.profile, proposed,
         (flaw) => this.actor(ask, { notLikeYou: flaw }));
       const decision = settled.decision;
+      if (this.gate.unavailableReason && !reportedGateFailure) {
+        reportedGateFailure = true;
+        // Said once, not every step. A run where nothing held the persona to
+        // itself looks identical to one where everything passed, and the
+        // difference matters more than any single step does.
+        await recorder.record("persona.adherence_unavailable",
+          "nothing checked whether these actions sound like this person",
+          { reason: this.gate.unavailableReason });
+      }
       if (settled.adherence) {
         await recorder.record("persona.adherence",
           settled.adherence.passed

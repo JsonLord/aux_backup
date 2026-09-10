@@ -127,6 +127,13 @@ class AdherenceGate {
     this.threshold = threshold;
     this.judge = judge;
     this.enabled = enabled ?? Boolean(judge);
+    // Two failures in a row and the second model is not coming back this run.
+    // Swallowing each one individually is right -- a judge that is down is not a
+    // failing action -- but swallowing them forever is how a run comes to look
+    // fine while the persona is never actually held to itself.
+    this.consecutiveFailures = 0;
+    this.lastError = "";
+    this.unavailableReason = "";
     // TinyTroupe keeps these on the generator; they are what tells you whether
     // the gate is doing anything or just costing a call per step.
     this.stats = { judged: 0, passedFirst: 0, regenerated: 0, keptDespiteFailing: 0, scores: [] };
@@ -147,14 +154,30 @@ class AdherenceGate {
         system: ADHERENCE_SYSTEM,
         user: `THE PERSON:\n${personaBrief(profile)}\n\nTHE PROPOSED NEXT ACTION:\n${actionBrief(decision)}`,
       });
-    } catch {
+    } catch (error) {
+      this.fail(error.message);
       return null;
     }
     const parsed = parseScore(text);
-    if (!parsed) return null;
+    if (!parsed) {
+      this.fail(`the judge answered with something that carried no score: `
+        + `${String(text || "").slice(0, 120)}`);
+      return null;
+    }
+    this.consecutiveFailures = 0;
     this.stats.judged += 1;
     this.stats.scores.push(parsed.score);
     return parsed;
+  }
+
+  /** One failure is tolerated; a run of them means the judge is not there. */
+  fail(message) {
+    this.lastError = String(message || "").slice(0, 300);
+    this.consecutiveFailures += 1;
+    if (this.consecutiveFailures >= 2 && !this.unavailableReason) {
+      this.unavailableReason = this.lastError;
+      this.enabled = false;
+    }
   }
 
   /**

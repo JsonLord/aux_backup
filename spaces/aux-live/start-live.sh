@@ -21,18 +21,30 @@ export OPENAI_BASE_URL="${OPENAI_COMPATIBLE_ENDPOINT:-${OPENAI_BASE_URL:-https:/
 # best available model); any other id 400s with model_not_found.
 export OPENAI_MODEL="${OPENAI_MODEL:-auto}"
 export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-auto}}"
-# The persona director asks a second, cheaper model whether what happened matched
-# what the persona expected. On a router that picks the model itself there is
-# nothing cheaper to choose, so it follows the same id; point it at a specific
-# small model only on an endpoint that serves one by name.
-export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-${OPENAI_MODEL}}"
 # What the persona sees of a page is decided from the capture rather than from
 # the accessibility tree. Unset, the worker keeps the tree-based observation it
 # has always used, so this turns perception on rather than being load-bearing.
 export PERCEPTION_SERVICE_URL="${PERCEPTION_SERVICE_URL:-http://127.0.0.1:8092}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
-export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-${OPENAI_API_KEY:-}}"
-export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"
+# Deliberately not defaulted to OPENAI_API_KEY any more. The two endpoints are
+# now genuinely different services, and sending the primary router's token to
+# Blablador is a 401 on every reflection -- which the gate swallows silently,
+# so the run looks fine and the persona is simply never held to itself.
+export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-}"
+# Its own endpoint now rather than an alias for the primary one: the reflect and
+# adherence calls are served here by name, which is the whole reason to name a
+# specific small model instead of asking a router to pick.
+export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-https://api.helmholtz-blablador.fz-juelich.de/v1}"
+
+# The persona director asks a second, smaller model two things every step:
+# whether what happened matched what the persona expected, and whether the action
+# it is about to take sounds like this person at all. Both are small, frequent
+# jobs, and the router that is best at deciding what a person does next is not
+# the one you want doing them -- so they run on Blablador's alias-fast, on its
+# own endpoint with its own key, rather than on whatever "auto" resolves to.
+export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-alias-fast}"
+export JOURNEY_REFLECT_BASE_URL="${JOURNEY_REFLECT_BASE_URL:-${BLABLADOR_BASE_URL}}"
+export JOURNEY_REFLECT_API_KEY="${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}"
 # Bound the OpenAI-compatible completion budget. TinyTroupe 0.7 otherwise requests
 # 128000 completion tokens by default; an explicit ceiling keeps completions
 # bounded and predictable. The router's ~1,048,576 token context window leaves

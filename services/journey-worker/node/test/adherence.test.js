@@ -135,3 +135,35 @@ test("a judgement cut off mid-sentence still yields its score", async () => {
   const settled = await gate.settle(FRIEDRICH, READING_ON, async () => LEAVING);
   assert.equal(settled.decision.action.type, "GIVE_UP");
 });
+
+test("a judge that keeps failing is stopped, and says why", async () => {
+  // A missing key for the second endpoint 401s every step. Swallowing each one
+  // is right; swallowing them forever is how a run looks fine while nothing
+  // ever held the persona to itself.
+  const gate = new AdherenceGate({ judge: async () => { throw new Error("HTTP 401: bad token"); } });
+
+  await gate.settle(FRIEDRICH, READING_ON, async () => LEAVING);
+  assert.equal(gate.enabled, true, "one failure is tolerated");
+  await gate.settle(FRIEDRICH, READING_ON, async () => LEAVING);
+  assert.equal(gate.enabled, false);
+  assert.match(gate.unavailableReason, /401/);
+});
+
+test("a judge that answers prose twice is also treated as absent", async () => {
+  const gate = new AdherenceGate({ judge: async () => "Looks fine to me!" });
+  await gate.settle(FRIEDRICH, READING_ON, async () => LEAVING);
+  await gate.settle(FRIEDRICH, READING_ON, async () => LEAVING);
+  assert.equal(gate.enabled, false);
+  assert.match(gate.unavailableReason, /carried no score/);
+});
+
+test("a success clears the count, so an occasional blip does not disable it", async () => {
+  let call = 0;
+  const gate = new AdherenceGate({ judge: async () => {
+    call += 1;
+    if (call === 1 || call === 3) throw new Error("timeout");
+    return '{"score": 9, "flaw": ""}';
+  } });
+  for (let step = 0; step < 4; step += 1) await gate.settle(FRIEDRICH, LEAVING, async () => LEAVING);
+  assert.equal(gate.enabled, true);
+});
