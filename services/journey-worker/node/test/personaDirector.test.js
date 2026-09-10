@@ -497,3 +497,67 @@ test("an empty completion counts as a failure worth retrying", async () => {
     globalThis.fetch = originalFetch;
   }
 });
+
+test("what the actor is told comes from the pixels, not from the whole tree", async () => {
+  // The tree is complete, which is exactly what is wrong with it as a model of
+  // seeing: handed all of it, an impatient short-sighted persona reads all of it
+  // and behaves like a patient one with perfect vision. Perception is only doing
+  // its job if what reaches the actor is *smaller* than what is on the page.
+  const seen = [];
+  const perception = {
+    available: true,
+    async perceive({ elements, behavior, abilities }) {
+      seen.push({ elements, behavior, abilities });
+      return {
+        observation: "[e1] link Pricing",
+        eyes: { blurPx: 1.95 }, scan: { pattern: "spotted", fixationBudget: 6 },
+        counts: { elements: 3, legible: 2, fixated: 1, notPerceived: 1, notLookedAt: 1 },
+        notPerceived: [{ selector: "p@0,400", reason: "too little contrast to make anything out" }],
+        notLookedAt: [{ selector: "e2" }],
+      };
+    },
+  };
+  const actorSaw = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing", box: { x: 0, y: 0, width: 60, height: 20 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0,
+    }),
+    frames: () => [{ data: "F1" }, { data: "F2" }],
+    actor: async ({ observation }) => {
+      actorSaw.push(observation);
+      return { visible: "a link", expectation: "prices", action: { type: "DONE", content: "found it" } };
+    },
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.equal(actorSaw[0], "[e1] link Pricing",
+    "the actor gets what was looked at, not the accessibility tree");
+  assert.deepEqual(seen[0].behavior, impatient.behavior, "the traits are what choose the scan pattern");
+
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.ok(looked, "what was not seen is evidence and has to reach the record");
+  assert.equal(looked.data.notPerceived[0].selector, "p@0,400");
+  assert.deepEqual(looked.data.notLookedAt, ["e2"]);
+});
+
+test("with no perception service the run still sees the page the old way", async () => {
+  // Perception makes a run truer; it is never allowed to make a run fail. A
+  // service that is absent, broken or slow leaves the tree-based observation
+  // exactly as it was.
+  const actorSaw = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    perception: { available: true, perceive: async () => null },
+    walk: async () => { throw new Error("the browser went away mid-batch"); },
+    actor: async ({ observation }) => {
+      actorSaw.push(observation);
+      return { visible: "", expectation: "", action: { type: "DONE", content: "done" } };
+    },
+  });
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.match(actorSaw[0], /\[e1\] link Pricing/, "the snapshot is still there when the walk is not");
+});

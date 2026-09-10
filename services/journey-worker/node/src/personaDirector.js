@@ -31,8 +31,10 @@ const { createHash } = require("node:crypto");
 const path = require("node:path");
 
 const { BehaviorController } = require("./behavior");
+const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
+const { recentFrames } = require("./viewportStream");
 
 const DEFAULT_MAX_STEPS = 40;
 
@@ -128,7 +130,8 @@ class PersonaDirector {
    * @param {number}   [options.maxSteps]
    */
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
-    scale = timeScale() } = {}) {
+    scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
+    frames = recentFrames } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -139,6 +142,9 @@ class PersonaDirector {
     this.sleep = sleepFn;
     this.scale = scale;
     this.shots = [];
+    this.perception = perception;
+    this.walk = walk;
+    this.frames = frames;
   }
 
   /** Spend a slice of simulated time on the wall clock, bounded. */
@@ -170,7 +176,21 @@ class PersonaDirector {
 
       const page = pending || await this.observe(browser);
       pending = null;
-      const observation = observationFrom(page.text, this.abilities);
+      const { observation, perception } = await this.look(page);
+      if (perception) {
+        await recorder.record("persona.perception",
+          `looked at ${perception.counts.fixated} of ${perception.counts.elements} things`, {
+            scan: perception.scan, eyes: perception.eyes, counts: perception.counts,
+            // Present, and nothing legible where it lives. This is a defect in
+            // the page, and no check against the DOM can find it.
+            notPerceived: perception.notPerceived,
+            // Legible, and this person never got to it. Not a defect by itself:
+            // it is the answer to "why did they not click the thing that was
+            // right there", which is the question a report exists to answer.
+            notLookedAt: perception.notLookedAt.map((item) => item.selector),
+            undeclared: perception.detector?.undeclared || undefined,
+          });
+      }
       // Taking a page in costs a person time, and how much depends on how fast
       // they read: that is what makes a slow reader run out of patience on a
       // wordy page and a fast one not. The cost is charged to the behaviour
@@ -329,6 +349,43 @@ class PersonaDirector {
     const text = String(snapshot.stdout || snapshot.summary || "");
     const url = await browser.getUrl().catch(() => "");
     return { url, text, digest: createHash("sha1").update(url + "\n" + text).digest("hex") };
+  }
+
+  /**
+   * What this person took in, as opposed to what is on the page.
+   *
+   * The accessibility tree is complete, which is exactly what is wrong with it
+   * as a model of seeing: handed all of it, every persona reads all of it, and a
+   * short-sighted one in a hurry behaves identically to a patient one with
+   * perfect vision. The perception service answers the narrower question --
+   * these pixels, these eyes, this way of scanning -- and returns only what was
+   * actually looked at.
+   *
+   * When it is not configured or not reachable the tree-based observation stands.
+   * Perception is meant to make a run truer, not to make a run fail.
+   */
+  async look(page) {
+    const fallback = { observation: observationFrom(page.text, this.abilities), perception: null };
+    if (!this.perception?.available) return fallback;
+    let seen;
+    try {
+      seen = await this.walk();
+    } catch {
+      // A page walk can fail for reasons that have nothing to do with the run --
+      // a navigation mid-batch, a browser still settling. The tree is still there.
+      return fallback;
+    }
+    if (!seen?.elements?.length || !seen.screenshotBase64) return fallback;
+    const perception = await this.perception.perceive({
+      screenshotBase64: seen.screenshotBase64,
+      elements: seen.elements,
+      abilities: this.abilities,
+      behavior: this.profile.behavior,
+      motionFrames: motionFramesFrom(this.frames()),
+      viewport: seen.viewport,
+    });
+    if (!perception?.observation) return fallback;
+    return { observation: perception.observation, perception };
   }
 
   /**

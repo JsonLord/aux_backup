@@ -20,17 +20,47 @@ report exists to answer and currently cannot.
 from __future__ import annotations
 
 import base64
+import binascii
 import io
 
-from PIL import Image
+from PIL import Image, UnidentifiedImageError
 
 from .optics import Eyes, legibility, see
 from .salience import motion_map, salience_of
 from .scanpath import choose_pattern, scan
 
 
+# A stitched full-page capture of a long site runs to about 11 megapixels, so
+# this leaves plenty of headroom while still refusing a decompression bomb: a
+# PNG that costs a few kilobytes on the wire can otherwise ask for gigabytes of
+# RAM here, and every caller of this module is handed base64 by someone else.
+MAX_PIXELS = 40_000_000
+
+
 def _decode(image_base64: str) -> Image.Image:
-    return Image.open(io.BytesIO(base64.b64decode(image_base64))).convert("RGB")
+    """One capture, or a ValueError saying why not.
+
+    Everything here is base64 handed over by another process, so both ways of
+    being wrong -- not base64, and base64 of something that is not an image --
+    are ordinary inputs rather than bugs. They come back as one kind of error so
+    that a caller does not have to catch PIL's exception hierarchy to tell a bad
+    request from a broken service.
+    """
+    try:
+        raw = base64.b64decode(image_base64, validate=False)
+    except (binascii.Error, ValueError) as error:
+        raise ValueError(f"capture is not valid base64: {error}") from error
+    try:
+        image = Image.open(io.BytesIO(raw))
+    except (UnidentifiedImageError, OSError) as error:
+        raise ValueError(f"capture is not an image this service can decode: {error}") from error
+    width, height = image.size
+    if width * height > MAX_PIXELS:
+        raise ValueError(f"capture is {width}x{height}, larger than this service will decode")
+    try:
+        return image.convert("RGB")
+    except OSError as error:  # a truncated file only fails once the pixels are read
+        raise ValueError(f"capture could not be decoded: {error}") from error
 
 
 def _encode(image: Image.Image, quality: int = 78) -> str:

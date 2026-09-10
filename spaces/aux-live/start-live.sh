@@ -26,6 +26,10 @@ export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-auto}}"
 # nothing cheaper to choose, so it follows the same id; point it at a specific
 # small model only on an endpoint that serves one by name.
 export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-${OPENAI_MODEL}}"
+# What the persona sees of a page is decided from the capture rather than from
+# the accessibility tree. Unset, the worker keeps the tree-based observation it
+# has always used, so this turns perception on rather than being load-bearing.
+export PERCEPTION_SERVICE_URL="${PERCEPTION_SERVICE_URL:-http://127.0.0.1:8092}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
 export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-${OPENAI_API_KEY:-}}"
 export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"
@@ -56,10 +60,11 @@ fi
 
 uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 & pids+=("$!")
 uvicorn services.persona_service.main:app --host 127.0.0.1 --port 8090 & pids+=("$!")
+uvicorn services.perception_service.main:app --host 127.0.0.1 --port 8092 & pids+=("$!")
 node services/journey-worker/node/src/index.js & pids+=("$!")
 PORT=8081 node services/eyeson-worker/node/src/index.js & pids+=("$!")
 
-for endpoint in http://127.0.0.1:8000/healthz http://127.0.0.1:8090/healthz http://127.0.0.1:8080/healthz http://127.0.0.1:8081/healthz; do
+for endpoint in http://127.0.0.1:8000/healthz http://127.0.0.1:8090/healthz http://127.0.0.1:8092/healthz http://127.0.0.1:8080/healthz http://127.0.0.1:8081/healthz; do
   for _ in $(seq 1 60); do
     curl -fsS "$endpoint" >/dev/null && break
     sleep 1
