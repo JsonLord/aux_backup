@@ -84,8 +84,14 @@ function positiveInt(value, fallback) {
   return Number.isInteger(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-const run = (args, options) => runAgentBrowser(args, options);
-const evaluate = (expression) => evaluateInPage(expression);
+// A capture is not part of any run, so it uses agent-browser's default session
+// rather than whichever browser a run happens to be driving. Said explicitly:
+// an omitted session follows the active run, and a capture that signed in inside
+// a running journey's browser would change what that journey is testing.
+const CAPTURE_SESSION = "";
+
+const run = (args, options) => runAgentBrowser(args, { session: CAPTURE_SESSION, ...options });
+const evaluate = (expression) => evaluateInPage(expression, { session: CAPTURE_SESSION });
 
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
@@ -164,7 +170,7 @@ async function captureLogin(options = {}) {
     commands.push(["click", submitSelector]);
 
     // stdin, so the password is not in this process's argv.
-    const filled = await batch(commands);
+    const filled = await batch(commands, { session: CAPTURE_SESSION });
     if (!filled.ok) {
       return { status: STATUS_FAILED,
         detail: `could not fill the sign-in form: ${filled.stderr}` };

@@ -13,15 +13,44 @@ const path = require("node:path");
 
 const COMMAND_TIMEOUT_MS = 60000;
 
+// Which browser these commands talk to.
+//
+// agent-browser keeps one browser per named session, and journeytest-core runs
+// every journey in a session of its own (`--session <runId>`). A command sent
+// without a name therefore lands in a *different* browser from the run -- which
+// is what happened: during a live run, `stream status` reported the run's
+// session on port 38091 and the unnamed one on 45977, two separate Chromes. The
+// cursor overlay was being drawn into the empty one, and the position probe read
+// it back from there, which is why the live view never had a pointer to show.
+//
+// So the run sets its session here when it starts, and everything the worker
+// does on its behalf -- decorating the page, reading the pointer, handing
+// control to a person -- follows it. A caller may still pass `session`
+// explicitly; a login capture, which is not part of any run, does.
+let activeSession = "";
+
+/** Point the worker's own commands at the browser a run is driving. */
+function setActiveSession(name) {
+  activeSession = String(name || "");
+  return activeSession;
+}
+
+function activeSessionName() {
+  return activeSession;
+}
+
 function agentBrowserCommand() {
   return process.env.AGENT_BROWSER_COMMAND
     || path.join(__dirname, "..", "node_modules", ".bin", "agent-browser");
 }
 
 /** Run agent-browser. `input` is written to stdin and never appears in argv. */
-function runAgentBrowser(args, { input, timeoutMs = COMMAND_TIMEOUT_MS } = {}) {
+function runAgentBrowser(args, { input, timeoutMs = COMMAND_TIMEOUT_MS, session } = {}) {
+  // `--session` is a global option and has to precede the subcommand.
+  const name = session === undefined ? activeSession : String(session || "");
+  const argv = name ? ["--session", name, ...args] : args;
   return new Promise((resolve) => {
-    const child = execFile(agentBrowserCommand(), args, { timeout: timeoutMs },
+    const child = execFile(agentBrowserCommand(), argv, { timeout: timeoutMs },
       (error, stdout, stderr) => resolve({
         ok: !error,
         stdout: String(stdout || ""),
@@ -48,4 +77,5 @@ async function evaluateInPage(expression, options = {}) {
   return { ok: true, value: text };
 }
 
-module.exports = { COMMAND_TIMEOUT_MS, agentBrowserCommand, batch, evaluateInPage, runAgentBrowser };
+module.exports = { COMMAND_TIMEOUT_MS, activeSessionName, agentBrowserCommand, batch, evaluateInPage,
+  runAgentBrowser, setActiveSession };

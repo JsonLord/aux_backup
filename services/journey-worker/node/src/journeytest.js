@@ -1,15 +1,35 @@
 "use strict";
 
+const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
+const { setActiveSession } = require("./agentBrowser");
 const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
-const { configureStreamPort, startViewportStream } = require("./viewportStream");
-const { cursorKeeperStatus, startCursorKeeper } = require("./cursorKeeper");
+const { configureStreamPort, startViewportStream, stopViewportStream } = require("./viewportStream");
+const { cursorKeeperStatus, startCursorKeeper, stopCursorKeeper } = require("./cursorKeeper");
 
 function safeId(value, fallback) {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, "-");
   return (normalized || fallback).slice(0, 24);
+}
+
+/**
+ * The agent-browser session this run drives.
+ *
+ * journeytest-core names it after its own generated run id when we do not say --
+ * a timestamped string the worker cannot know until the run directory exists,
+ * and by then the pointer overlay and the stream have already had to pick a
+ * browser. Naming it ourselves means the worker knows the session before the
+ * driver launches, so everything it does on the run's behalf reaches the same
+ * browser the run is in.
+ *
+ * The digest keeps two runs apart when safeId() truncates their ids to the same
+ * prefix -- two personas in one job differ only in a suffix.
+ */
+function sessionNameFor(runId) {
+  const digest = crypto.createHash("sha1").update(String(runId || "")).digest("hex").slice(0, 10);
+  return `aux-${safeId(runId, "run").slice(0, 12)}-${digest}`;
 }
 
 // journeytest-core's director prompt names the criterion ids and tells the model
@@ -198,29 +218,47 @@ async function runWithJourneyTest(input) {
   const captureId = String(input.runId || `run-${Date.now()}`);
   // The output directory is registered with the capture so a live view can find
   // the frames journeytest-core is writing while the run is still going.
-  startRunCapture(captureId, { outputDir: path.resolve(outputDir) });
+  const sessionName = sessionNameFor(captureId);
+  startRunCapture(captureId, { outputDir: path.resolve(outputDir), sessionName });
   const statePath = resolveSessionState(input);
   const cursorOverlay = installCursorOverlay();
-  // Pin agent-browser's viewport stream to a known port before the driver
-  // launches, then follow it. Without this every session binds an OS-assigned
-  // port the worker has no way to learn.
+  // Everything the worker does on this run's behalf goes to the run's own
+  // browser. Set before anything is sent, because a command without a session
+  // opens a second browser rather than failing.
+  setActiveSession(sessionName);
+  // Honour an operator-pinned stream port if there is one; the port is otherwise
+  // discovered from the session, which is what the pinned build actually does.
   configureStreamPort();
-  startViewportStream();
+  // Not awaited: discovery retries until the driver has launched the browser,
+  // and the run must not wait on the live view to start.
+  void startViewportStream({ session: sessionName });
   // `eval` is the one injection path 0.31.1 honours, and a navigation takes the
   // overlay with the old document, so it has to be put back rather than set once.
   startCursorKeeper();
-  const result = await core.runJourney({
-    journey: journeyContract(input),
-    profile: testerContract(input.profile),
-    driver,
-    director,
-    outputDir: path.resolve(outputDir),
-    video: input.video !== false,
-    browserEnvironment: input.browserEnvironment,
-    uiChangeRecording: true,
-    statePath,
-  });
+  let result;
+  try {
+    result = await core.runJourney({
+      journey: journeyContract(input),
+      profile: testerContract(input.profile),
+      driver,
+      director,
+      outputDir: path.resolve(outputDir),
+      video: input.video !== false,
+      browserEnvironment: input.browserEnvironment,
+      uiChangeRecording: true,
+      statePath,
+      sessionName,
+    });
+  } finally {
+    // The session is this run's. Leaving the keeper pointed at a browser that is
+    // going away would have it evaluate into nothing every two seconds, and
+    // leaving the socket open would serve a dead run's last frame to the next.
+    stopCursorKeeper();
+    stopViewportStream();
+    setActiveSession("");
+  }
   return { ...result, profileId: input.profile.id, simulationProfile: input.profile,
+    browserSession: sessionName,
     // Whether this run browsed signed in. A finding from an authenticated run and
     // one from an anonymous run are about different products, so the report has to
     // be able to say which it saw.
@@ -230,4 +268,4 @@ async function runWithJourneyTest(input) {
 }
 
 module.exports = { CURSOR_OVERLAY_SCRIPT, installCursorOverlay, journeyContract, loadJourneyTest,
-  resolveSessionState, runWithJourneyTest, testerContract };
+  resolveSessionState, runWithJourneyTest, sessionNameFor, testerContract };

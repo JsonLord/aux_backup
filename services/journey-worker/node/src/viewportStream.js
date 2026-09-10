@@ -23,12 +23,25 @@
  * so it lands in the pixels this streams.
  */
 
+const { runAgentBrowser } = require("./agentBrowser");
+
 const DEFAULT_STREAM_PORT = 9223;
 const RECONNECT_BASE_MS = 500;
 const RECONNECT_MAX_MS = 10000;
 // A frame older than this is not "live" any more: the browser has stopped
 // painting, or the session went away without the socket noticing.
 const FRAME_STALE_MS = 5000;
+
+// The session is not up the instant a run asks for its stream: the driver
+// launches the browser first. Long enough to cover that, short enough that a
+// run against a session that never appears is not held up.
+const DISCOVERY_ATTEMPTS = 10;
+const DISCOVERY_DELAY_MS = 1000;
+
+const defaultSleep = (ms) => new Promise((resolve) => {
+  const timer = setTimeout(resolve, ms);
+  if (typeof timer.unref === "function") timer.unref();
+});
 
 let socket = null;
 let latest = null;
@@ -43,16 +56,41 @@ function streamPort(env = process.env) {
 }
 
 /**
- * Pin agent-browser's stream to a known port.
+ * Ask agent-browser which port this session's stream is on.
  *
- * Every session otherwise binds an OS-assigned one, which the worker has no way
- * to learn without shelling out to `stream status`. Set before the driver
- * launches; the CLI inherits this environment.
+ * `stream status --json` reports it: {"data":{"connected":true,"port":38091,...}}.
+ * Asking is the only reliable way to know. The pinned 0.31.1 does not honour
+ * AGENT_BROWSER_STREAM_PORT -- during a live run with it set to 9254, the run's
+ * session came up on 38091 and a second session on 45977, both OS-assigned --
+ * so a worker that assumes the pinned port connects to nothing and the live view
+ * silently falls back to whatever screenshot happens to be on disk. Its own help
+ * text says as much: "If --port is omitted, agent-browser binds an available
+ * localhost port automatically and reports it back."
+ */
+async function discoverStreamPort({ session, runner = runAgentBrowser } = {}) {
+  const result = await runner(["stream", "status", "--json"], session === undefined ? {} : { session });
+  if (!result.ok) return null;
+  try {
+    const port = JSON.parse(result.stdout)?.data?.port;
+    return Number.isInteger(port) && port > 0 ? port : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Pin agent-browser's stream to a known port, when an operator asked for one.
+ *
+ * Kept because a build that does honour it should be taken at its word, and
+ * because an explicit port is what an operator publishing it needs. It is no
+ * longer relied on: startViewportStream() asks the session where its stream
+ * actually is, and uses the answer.
  */
 function configureStreamPort(env = process.env) {
-  const port = streamPort(env);
-  env.AGENT_BROWSER_STREAM_PORT = String(port);
-  return port;
+  const configured = Number.parseInt(String(env.AGENT_BROWSER_STREAM_PORT || ""), 10);
+  if (!Number.isInteger(configured) || configured <= 0) return null;
+  env.AGENT_BROWSER_STREAM_PORT = String(configured);
+  return configured;
 }
 
 function scheduleReconnect() {
@@ -108,10 +146,28 @@ function connect(url) {
   return socket;
 }
 
-/** Begin following the browser's viewport. Safe to call repeatedly. */
-function startViewportStream(env = process.env) {
-  const port = streamPort(env);
-  return connect(`ws://127.0.0.1:${port}`);
+/**
+ * Begin following the browser's viewport. Safe to call repeatedly.
+ *
+ * The port is discovered from the session rather than assumed. Discovery is
+ * retried because the session does not exist until the driver launches, which is
+ * after the run asks for the stream; each attempt is one cheap CLI call, and the
+ * socket's own reconnect takes over once a port is known.
+ */
+async function startViewportStream({ session, env = process.env, runner = runAgentBrowser,
+  attempts = DISCOVERY_ATTEMPTS, delayMs = DISCOVERY_DELAY_MS, sleep = defaultSleep } = {}) {
+  for (let attempt = 0; attempt < Math.max(1, attempts); attempt += 1) {
+    const port = await discoverStreamPort({ session, runner });
+    if (port) return connect(`ws://127.0.0.1:${port}`);
+    lastError = `agent-browser has not reported a stream port for session '${session || "default"}' yet`;
+    if (attempt + 1 < Math.max(1, attempts)) await sleep(delayMs);
+  }
+  // An operator-pinned port is the last thing to try: on a build that honours it
+  // this is right, and on one that does not there was nothing to connect to
+  // anyway.
+  const pinned = Number.parseInt(String(env.AGENT_BROWSER_STREAM_PORT || ""), 10);
+  if (Number.isInteger(pinned) && pinned > 0) return connect(`ws://127.0.0.1:${pinned}`);
+  return null;
 }
 
 function stopViewportStream() {
@@ -174,7 +230,12 @@ function latestFrame(now = Date.now()) {
 function viewportStreamStatus(now = Date.now()) {
   return {
     connected: Boolean(socket && socket.readyState === 1),
-    port: streamPort(),
+    // Where the worker is actually listening, which is what a reader needs when
+    // the answer is "no frames". Reporting the environment's port instead said
+    // 9223 while the session was on 38091 -- a status that agreed with the
+    // configuration and disagreed with reality.
+    url: desiredUrl || undefined,
+    port: desiredUrl ? Number.parseInt(desiredUrl.split(":").pop(), 10) : null,
     ageMs: latest ? now - latest.receivedAt : null,
     error: lastError || undefined,
   };
@@ -187,7 +248,7 @@ function __resetViewportStream() {
 }
 
 module.exports = {
-  DEFAULT_STREAM_PORT, FRAME_STALE_MS, configureStreamPort, latestFrame,
-  sendViewportInput, startViewportStream, stopViewportStream, streamPort, viewportStreamStatus,
-  __resetViewportStream, __handleMessage: handleMessage,
+  DEFAULT_STREAM_PORT, DISCOVERY_ATTEMPTS, DISCOVERY_DELAY_MS, FRAME_STALE_MS, configureStreamPort,
+  discoverStreamPort, latestFrame, sendViewportInput, startViewportStream, stopViewportStream,
+  streamPort, viewportStreamStatus, __resetViewportStream, __handleMessage: handleMessage,
 };

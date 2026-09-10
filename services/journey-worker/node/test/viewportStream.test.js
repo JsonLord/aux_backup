@@ -3,25 +3,78 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 const {
-  DEFAULT_STREAM_PORT, FRAME_STALE_MS, configureStreamPort, latestFrame,
-  streamPort, viewportStreamStatus, __resetViewportStream, __handleMessage,
+  DEFAULT_STREAM_PORT, FRAME_STALE_MS, configureStreamPort, discoverStreamPort, latestFrame,
+  startViewportStream, streamPort, viewportStreamStatus, __resetViewportStream, __handleMessage,
 } = require("../src/viewportStream");
 
 test.beforeEach(() => __resetViewportStream());
+// And afterwards, so a test that opened a socket does not leave it holding the
+// event loop open -- the runner hangs after the last assertion rather than failing.
+test.afterEach(() => __resetViewportStream());
 
-test("the stream port is pinned so the worker can find it", () => {
-  // Every agent-browser session otherwise binds an OS-assigned port, which the
-  // worker cannot learn without shelling out to `stream status`.
+test("only an operator's own pinned port is written into the environment", () => {
+  // agent-browser 0.31.1 does not honour AGENT_BROWSER_STREAM_PORT: during a live
+  // run with it set to 9254, the run's session came up on 38091 and a second one
+  // on 45977, both OS-assigned. Writing a default into the environment made the
+  // worker believe it knew a port it did not, so it connected to nothing and the
+  // live view silently fell back to screenshots. An unset variable now stays unset
+  // and the port is discovered instead.
   const env = {};
-  assert.equal(configureStreamPort(env), DEFAULT_STREAM_PORT);
-  assert.equal(env.AGENT_BROWSER_STREAM_PORT, String(DEFAULT_STREAM_PORT));
+  assert.equal(configureStreamPort(env), null);
+  assert.equal(env.AGENT_BROWSER_STREAM_PORT, undefined);
 
   const chosen = { AGENT_BROWSER_STREAM_PORT: "9999" };
   assert.equal(configureStreamPort(chosen), 9999);
   assert.equal(chosen.AGENT_BROWSER_STREAM_PORT, "9999");
 
   // A value that is not a port must not silently become one.
+  assert.equal(configureStreamPort({ AGENT_BROWSER_STREAM_PORT: "not-a-port" }), null);
   assert.equal(streamPort({ AGENT_BROWSER_STREAM_PORT: "not-a-port" }), DEFAULT_STREAM_PORT);
+});
+
+test("the stream port is read back from the session that owns it", async () => {
+  // The shape agent-browser really answers with, taken from a live session.
+  const calls = [];
+  const runner = async (args, options) => {
+    calls.push({ args, options });
+    return { ok: true, stdout: JSON.stringify({ success: true, error: null,
+      data: { connected: true, enabled: true, port: 59341, screencasting: false } }) };
+  };
+  assert.equal(await discoverStreamPort({ session: "aux-run-1", runner }), 59341);
+  assert.deepEqual(calls[0].args, ["stream", "status", "--json"]);
+  // Asked of the run's own session, not whichever browser is the default.
+  assert.equal(calls[0].options.session, "aux-run-1");
+});
+
+test("a session that cannot report a port yields none rather than a guess", async () => {
+  assert.equal(await discoverStreamPort({ runner: async () => ({ ok: false, stderr: "no session" }) }), null);
+  assert.equal(await discoverStreamPort({ runner: async () => ({ ok: true, stdout: "not json" }) }), null);
+  assert.equal(await discoverStreamPort({
+    runner: async () => ({ ok: true, stdout: JSON.stringify({ data: { port: 0 } }) }) }), null);
+});
+
+test("discovery is retried while the driver is still launching the browser", async () => {
+  // startViewportStream() is called before runJourney(), so the session does not
+  // exist yet on the first ask.
+  let attempt = 0;
+  const runner = async () => {
+    attempt += 1;
+    return attempt < 3
+      ? { ok: false, stderr: "session not found" }
+      : { ok: true, stdout: JSON.stringify({ data: { port: 59342 } }) };
+  };
+  const slept = [];
+  await startViewportStream({ session: "aux-run-1", runner, attempts: 5, delayMs: 7,
+    sleep: async (ms) => { slept.push(ms); }, env: {} });
+  assert.equal(attempt, 3);
+  assert.deepEqual(slept, [7, 7]);
+  assert.equal(viewportStreamStatus().url, "ws://127.0.0.1:59342");
+});
+
+test("an operator's pinned port is the fallback when discovery never answers", async () => {
+  await startViewportStream({ session: "aux-run-1", runner: async () => ({ ok: false, stderr: "gone" }),
+    attempts: 2, delayMs: 0, sleep: async () => {}, env: { AGENT_BROWSER_STREAM_PORT: "59343" } });
+  assert.equal(viewportStreamStatus().url, "ws://127.0.0.1:59343");
 });
 
 test("a frame from the browser becomes the newest frame", () => {
@@ -64,9 +117,18 @@ test("messages that are not frames are ignored without breaking the socket", () 
   assert.equal(latestFrame().data, "Zm9v", "the last real frame still stands");
 });
 
-test("status reports whether frames are actually arriving", () => {
-  const status = viewportStreamStatus();
-  assert.equal(status.connected, false);
-  assert.equal(status.port, streamPort());
-  assert.equal(status.ageMs, null);
+test("status reports whether frames are actually arriving", async () => {
+  const idle = viewportStreamStatus();
+  assert.equal(idle.connected, false);
+  // Nothing is being followed yet, so there is no port to report. Naming one
+  // from the environment would claim a connection that was never made.
+  assert.equal(idle.port, null);
+  assert.equal(idle.url, undefined);
+  assert.equal(idle.ageMs, null);
+
+  await startViewportStream({ session: "aux-run-1", attempts: 1, delayMs: 0, sleep: async () => {},
+    env: {}, runner: async () => ({ ok: true, stdout: JSON.stringify({ data: { port: 59344 } }) }) });
+  const following = viewportStreamStatus();
+  assert.equal(following.port, 59344);
+  assert.equal(following.url, "ws://127.0.0.1:59344");
 });
