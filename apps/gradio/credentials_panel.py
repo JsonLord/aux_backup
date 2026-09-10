@@ -55,22 +55,36 @@ CSS = """
   border-radius: 14px;
   background: var(--background-fill-primary, #fff);
   box-shadow: 0 24px 64px rgba(2, 6, 23, .38), 0 0 0 1px rgba(148, 163, 184, .28);
-  /* A Group is a flex container. Left as one, a max-height makes its children
-     shrink to fit instead of overflowing, which silently compresses the form
-     into itself -- clipped headings, collapsed inputs, one visible table row.
-     Block flow lets the content take its natural height and the dialog scroll. */
+}
+/* A Group is a flex container. Left as one, a max-height makes its children
+   shrink to fit instead of overflowing, which silently compresses the form into
+   itself -- clipped headings, collapsed inputs, one visible table row. Block
+   flow lets the content take its natural height and the dialog scroll.
+
+   :not(.hide) is load-bearing, and its absence was the whole bug behind "the
+   credentials window cannot be closed". Gradio hides a component by adding
+   .hide, which is display: none -- and an unconditional display: block
+   !important beats it. Every close path worked: the click reached the server,
+   _close ran, Gradio marked the dialog hidden, and the dialog stayed on screen
+   with its computed display still block. There was no way out at all, which is
+   exactly what was reported. */
+.aux-cred-dialog:not(.hide) {
   display: block !important;
 }
-.aux-cred-dialog > .styler,
-.aux-cred-dialog > div { display: block !important; }
-/* Restore the vertical rhythm that block flow drops. The form wrappers also
-   paint their own fill, which in block flow shows as grey bars between the
-   fields rather than as a background behind them. */
-.aux-cred-dialog .form, .aux-cred-dialog .block { margin-bottom: 10px; }
-.aux-cred-dialog .form { background: transparent; border: 0; }
-/* The Group's styler paints its own fill, which shows through the gaps between
-   the transparent form wrappers as grey bars between every field. */
-.aux-cred-dialog > .styler { background: transparent; }
+.aux-cred-dialog:not(.hide) > .styler,
+.aux-cred-dialog:not(.hide) > div { display: block !important; }
+/* The title and the close control share a line. That line is also made to stay
+   put while the dialog scrolls, but from the script rather than from here:
+   Gradio rewrites the selectors in this stylesheet, and the rule that found the
+   wrapper Gradio puts around a group matched an element and styled none of it.
+   Without a way out that stays on screen, the only one was a "Close" button
+   about a third of the way down a dialog capped at 86vh with its own scrollbar,
+   so scrolling to the saved-credentials table put it at y = -310. */
+.aux-cred-dialog .aux-cred-head {
+  display: flex !important; align-items: center; justify-content: space-between;
+  gap: 12px; background: transparent;
+}
+.aux-cred-dialog .aux-cred-head > * { margin-bottom: 0 !important; }
 .aux-cred-dialog h3 { margin: 0 0 2px; font-size: 1.05rem; }
 .aux-cred-note {
   font-size: .82rem; line-height: 1.5; opacity: .8; margin: 0 0 10px;
@@ -83,6 +97,66 @@ CSS = """
 .aux-cred-banner.warn { background: rgba(245, 158, 11, .12); border-color: #f59e0b; }
 @media (max-width: 640px) {
   .aux-cred-dialog { width: calc(100vw - 16px); padding: 16px 14px 14px; }
+}
+"""
+
+
+# Gradio has no modal component, so it also has no modal keyboard behaviour.
+# These are the two things a person tries before hunting for a button: Escape,
+# and clicking the dimmed area outside. Both work by clicking the close control
+# the app already renders, so there is one way out and nothing to keep in step.
+JS = """
+() => {
+  // Two of these three jobs would be CSS if CSS could reach. Gradio rewrites
+  // every selector in the stylesheet it is handed, and a rule using :has() to
+  // find the wrapper it puts around a group came back matching one element and
+  // styling none of it -- checked in a browser, where the wrapper still computed
+  // to position: static. Inline styles need no selector and no prefixing, so
+  // that is where the two rules that must land now live.
+  const dress = () => {
+    const cross = document.querySelector('button.aux-cred-x');
+    if (!cross) return;
+    // Gradio's own button rules make it full width. Beaten here rather than by
+    // stacking !important in a stylesheet that may be rewritten again.
+    Object.assign(cross.style, {
+      flex: '0 0 auto', width: '34px', minWidth: '34px', height: '34px',
+      padding: '0', borderRadius: '999px', fontSize: '1rem', lineHeight: '1',
+    });
+    const head = document.querySelector('.aux-cred-head');
+    const wrapper = head && head.parentElement;
+    if (!wrapper || wrapper.dataset.auxStuck) return;
+    // Sticky belongs on the wrapper, not on the group: the wrapper is exactly as
+    // tall as its one child, so a sticky child has no room to travel inside it
+    // and never moves.
+    Object.assign(wrapper.style, {
+      position: 'sticky', top: '-20px', zIndex: '3', display: 'block',
+      margin: '-20px -22px 6px', padding: '14px 22px 6px',
+      background: 'var(--background-fill-primary, #fff)',
+      borderRadius: '14px 14px 0 0',
+    });
+    wrapper.dataset.auxStuck = '1';
+  };
+
+  const dismiss = () => {
+    const dialog = document.querySelector('.aux-cred-dialog');
+    // Not offsetParent: it is null for a position:fixed element whether or not
+    // it is on screen, so the guard written that way made Escape and clicking
+    // outside do nothing at all, every time.
+    if (!dialog || !(dialog.checkVisibility ? dialog.checkVisibility() : dialog.offsetWidth)) return;
+    // elem_classes lands on the button itself; there is no inner button to find.
+    document.querySelector('button.aux-cred-x')?.click();
+  };
+
+  dress();
+  // The dialog is built hidden and Gradio re-renders it, so dressing it once on
+  // load is not enough.
+  new MutationObserver(dress).observe(document.body, { childList: true, subtree: true });
+  document.addEventListener('keydown', (event) => {
+    if (event.key === 'Escape') dismiss();
+  });
+  document.addEventListener('click', (event) => {
+    if (event.target?.classList?.contains('aux-cred-backdrop')) dismiss();
+  });
 }
 """
 
@@ -120,7 +194,11 @@ def render(store, workspace_selector):
     backdrop = gr.HTML('<div class="aux-cred-backdrop"></div>', visible=False)
 
     with gr.Group(visible=False, elem_classes="aux-cred-dialog") as dialog:
-        gr.Markdown("### Browser credentials")
+        with gr.Group(elem_classes="aux-cred-head"):
+            gr.Markdown("### Browser credentials")
+            # The affordance people look for first, and the only one still on
+            # screen once the dialog has been scrolled.
+            close_x = gr.Button("✕", elem_classes="aux-cred-x", size="sm")
         gr.HTML('<p class="aux-cred-note">Give a run a signed-in browser session, so it tests '
                 "the product your users actually see rather than the logged-out one.</p>")
         banner = gr.HTML(_encryption_banner())
@@ -261,6 +339,7 @@ def render(store, workspace_selector):
     open_button.click(_open, [workspace_selector],
                       [dialog, backdrop, banner, table, status])
     close.click(_close, None, [dialog, backdrop])
+    close_x.click(_close, None, [dialog, backdrop])
     save.click(_save,
                [workspace_selector, source, label, origin, secret_ref, state_json, username, password],
                [status, table, state_json, password],

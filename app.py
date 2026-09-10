@@ -1147,7 +1147,8 @@ def _credential_store():
     return _CREDENTIAL_STORE
 
 
-with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS) as demo:
+with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS,
+               js=credentials_panel.JS) as demo:
     gr.Markdown("# UX Analysis Orchestrator")
     with gr.Row():
         login_button = gr.LoginButton()

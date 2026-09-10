@@ -301,3 +301,103 @@ def test_a_self_issued_account_is_recorded_so_a_later_run_can_get_back_in(store,
     assert meta["username"] == identity["email"]
     listed = store.list_credentials()[0]
     assert "secret" not in listed
+
+
+def test_the_dialog_does_not_override_the_class_gradio_hides_it_with():
+    """The actual reason the credentials window could not be closed.
+
+    Gradio hides a component by adding .hide, which is display: none. The dialog
+    also carries display: block !important, because a Group is a flex container
+    and a max-height makes its children shrink to fit instead of overflowing --
+    which silently compressed the form into itself. Written unconditionally, that
+    !important beat .hide: every close path worked, the click reached the server,
+    _close ran, Gradio marked the dialog hidden, and it stayed on screen with its
+    computed display still block. There was no way out at all.
+    """
+    import re
+
+    from apps.gradio import credentials_panel
+
+    # Comments out first: the one above this rule explains the fix and contains
+    # the very string being looked for, so a check over the raw text passes on
+    # the comment while the rule beneath it is wrong. Found by reverting the fix
+    # and watching the test still pass.
+    css = re.sub(r"/\*.*?\*/", "", credentials_panel.CSS, flags=re.DOTALL)
+
+    checked = 0
+    for rule in css.split("}"):
+        if "display: block !important" not in rule:
+            continue
+        checked += 1
+        selector = rule.split("{")[0].strip()
+        assert ":not(.hide)" in selector, (
+            f"{selector} would override the class Gradio hides the dialog with, "
+            "and the dialog could never be closed")
+    assert checked >= 2, "the rules this is guarding have moved or been renamed"
+
+
+def test_the_credentials_dialog_can_always_be_closed():
+    """It could not be. The only way out was a "Close" button about a third of
+    the way down a dialog capped at 86vh with its own scrollbar, so scrolling to
+    the saved-credentials table scrolled the way out off the top -- and there was
+    no cross, no Escape and no click-outside, which are the three things anyone
+    tries first."""
+    import re
+
+    from apps.gradio import credentials_panel
+
+    css = credentials_panel.CSS
+    # A close control on a header bar that stays put while the dialog scrolls.
+    assert ".aux-cred-head" in css, "the title and the close control share a line"
+
+    # Sticky and the button's size are set from the script, not from here.
+    # Gradio rewrites the selectors in this stylesheet, and a rule using :has()
+    # to find the wrapper it puts around a group matched an element and styled
+    # none of it -- checked in a browser, where the wrapper still computed to
+    # position: static and the button to 634px wide.
+    js = credentials_panel.JS
+    assert "position: 'sticky'" in js
+    assert "width: '34px'" in js
+    # Sticky goes on the wrapper, not on the group: the wrapper is exactly as
+    # tall as its one child, so a sticky child has no room to travel.
+    assert "head.parentElement" in js
+
+    # And the two ways out that need no button at all.
+    assert "'Escape'" in credentials_panel.JS
+    assert "aux-cred-backdrop" in credentials_panel.JS
+    # Both go through the control the app already renders, so there is one close
+    # path rather than three that can fall out of step.
+    # One close path, not three that can fall out of step: Escape and clicking
+    # outside both go through the control the app already renders.
+    assert credentials_panel.JS.count("?.click()") == 1
+    assert ".aux-cred-x button" not in credentials_panel.JS, (
+        "elem_classes lands on the button itself; there is no inner button to click")
+    # offsetParent is null for a position:fixed element whether or not it is on
+    # screen, so a guard written that way makes both of them do nothing at all.
+    # Comments stripped first: the one explaining this names the very thing being
+    # looked for, the same way the CSS comment above did.
+    code = re.sub(r"//[^\n]*", "", credentials_panel.JS)
+    assert "offsetParent" not in code, "the visibility guard must not be offsetParent"
+    assert "checkVisibility" in code
+
+
+def test_the_dialog_javascript_is_actually_installed():
+    """A close handler nothing loads is not a close handler. The panel owns the
+    script; the app has to hand it to Blocks or Escape silently does nothing."""
+    from pathlib import Path
+
+    app_source = Path("app.py").read_text(encoding="utf-8")
+    assert "js=credentials_panel.JS" in app_source
+    assert "css=credentials_panel.CSS" in app_source
+
+
+def test_the_close_control_is_wired_to_the_same_handler_as_the_button():
+    """Rendering a cross that does nothing would be worse than not having one."""
+    from pathlib import Path
+
+    panel = Path("apps/gradio/credentials_panel.py").read_text(encoding="utf-8")
+    assert "close_x.click(_close, None, [dialog, backdrop])" in panel
+    assert "close.click(_close, None, [dialog, backdrop])" in panel
+    # The backdrop goes away with the dialog; leaving it would dim the whole app
+    # with nothing on top of it and no way to clear it.
+    assert panel.count("gr.update(visible=False), gr.update(visible=False)") >= 1
