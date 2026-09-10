@@ -3020,6 +3020,12 @@ Ordered by value per unit of work, not by parameter number. Each is tracked as a
 task, and the numbering below is the order to take them in rather than the task
 ids: 1 is #32, 2 is #33, 3 is #34, 4 is #35, 5 is #24, 6 is #36, 7 is #22.
 
+The tasks carry the detail this section deliberately does not: the file and line
+of what exists today, what is missing, which existing code is the pattern to
+follow, which tests already cover the area and which assertions will have to move
+rather than be deleted, and the measurement that decides when each is done. Read
+the task before starting the work; this section is for choosing what to start.
+
 **1. Run the GEPA compile against a real corpus** — closes the last of #4.
 `services/persona_service/actor_program.py` is built and unproven: the judge is
 the metric, the memory bank's episodes are the trainset, and nothing has been
