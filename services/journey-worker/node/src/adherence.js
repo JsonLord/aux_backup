@@ -41,7 +41,7 @@ is a good idea -- a confused person doing a confused thing adheres perfectly.
 Do not imagine a better action; judge the one you were given.
 
 Answer as JSON and nothing else:
-{"score": 0-10, "flaw": "the single clearest way it does not fit, or empty"}`;
+{"score": 0-10, "flaw": "at most 15 words on the clearest way it does not fit, or empty"}`;
 
 function personaBrief(profile) {
   const persona = profile?.persona || {};
@@ -64,15 +64,43 @@ function personaBrief(profile) {
 
 function parseScore(text) {
   const match = String(text || "").match(/\{[\s\S]*\}/);
-  if (!match) return null;
-  try {
-    const parsed = JSON.parse(match[0]);
-    const score = Number(parsed.score);
-    if (!Number.isFinite(score)) return null;
-    return { score: Math.max(0, Math.min(10, score)), flaw: String(parsed.flaw || "").slice(0, 300) };
-  } catch {
-    return null;
+  if (match) {
+    try {
+      const parsed = JSON.parse(match[0]);
+      const score = Number(parsed.score);
+      if (Number.isFinite(score)) {
+        return { score: Math.max(0, Math.min(10, score)), flaw: String(parsed.flaw || "").slice(0, 300) };
+      }
+    } catch {
+      // Fall through to salvage.
+    }
   }
+  return salvageScore(text);
+}
+
+/**
+ * Read a score out of a reply that was cut off before it finished.
+ *
+ * Measured against the router: a judge asked for `{"score": N, "flaw": "..."}`
+ * came back as `finish_reason: length` after twenty-nine completion tokens
+ * against a budget of eight hundred, because the model spent the rest of the
+ * budget on reasoning that is not returned. The score was complete and correct;
+ * only the sentence explaining it was truncated, and JSON.parse threw away both.
+ *
+ * The score is asked for first for exactly this reason, and a whole judgement is
+ * not worth discarding over a half-finished sentence -- the number is the part
+ * the gate acts on. A truncated flaw is still enough to regenerate against.
+ */
+function salvageScore(text) {
+  const body = String(text || "");
+  const score = body.match(/"score"\s*:\s*(-?\d+(?:\.\d+)?)/);
+  if (!score) return null;
+  const flaw = body.match(/"flaw"\s*:\s*"((?:[^"\\]|\\.)*)/);
+  return {
+    score: Math.max(0, Math.min(10, Number(score[1]))),
+    flaw: (flaw ? flaw[1].replace(/\\"/g, '"') : "").slice(0, 300),
+    truncated: true,
+  };
 }
 
 /** One action, as the judge sees it. */
@@ -172,4 +200,4 @@ class AdherenceGate {
 }
 
 module.exports = { ADHERENCE_SYSTEM, AdherenceGate, DEFAULT_MAX_ATTEMPTS, DEFAULT_THRESHOLD,
-  actionBrief, parseScore, personaBrief };
+  actionBrief, parseScore, personaBrief, salvageScore };

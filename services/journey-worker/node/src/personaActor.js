@@ -151,6 +151,36 @@ function buildPrompt({ profile, tasks, observation, affect, history, notLikeYou 
   return { system, user };
 }
 
+/**
+ * The parts of a decision that survived a reply being cut off mid-sentence.
+ *
+ * A model that thinks before answering can exhaust its completion budget on the
+ * thinking and return a fragment, and the fragment is usually most of the
+ * answer. Discarding it costs the persona a turn and produces the "malformed"
+ * fallback -- a READ nobody chose -- which then reads as a real observation in
+ * the record. Better to keep what they actually said.
+ */
+function salvageDecision(text) {
+  const field = (name) => {
+    const found = String(text).match(new RegExp(`"${name}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`));
+    return found ? found[1].replace(/\\"/g, '"') : "";
+  };
+  const action = salvageAction(text);
+  if (!action) return null;
+  return { visible: field("visible"), expectation: field("expectation"), action };
+}
+
+/** The action out of a fragment, which is the part the run cannot do without. */
+function salvageAction(text) {
+  const type = String(text).match(/"type"\s*:\s*"([A-Za-z_]+)"/);
+  if (!type) return null;
+  const part = (name) => {
+    const found = String(text).match(new RegExp(`"${name}"\\s*:\\s*"((?:[^"\\\\]|\\\\.)*)`));
+    return found ? found[1].replace(/\\"/g, '"') : "";
+  };
+  return { type: type[1], target: part("target"), content: part("content") };
+}
+
 /** Pull the first JSON object out of a completion, however the model wrapped it. */
 function parseDecision(content) {
   let text = String(content || "").trim();
@@ -161,15 +191,22 @@ function parseDecision(content) {
   try {
     parsed = JSON.parse(text);
   } catch {
+    // A reply cut off before it closed has no closing brace at all, so looking
+    // for a balanced object finds nothing and the salvage below never ran.
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
     try {
-      parsed = JSON.parse(match[0]);
+      parsed = match ? JSON.parse(match[0]) : null;
     } catch {
-      return null;
+      parsed = null;
+    }
+    if (!parsed) {
+      // What was said before the cut is still what this person thought, and
+      // throwing it away costs the run a whole turn.
+      parsed = salvageDecision(text);
+      if (!parsed) return null;
     }
   }
-  const action = parsed?.action || {};
+  const action = parsed?.action || salvageAction(content) || {};
   const type = String(action.type || "").toUpperCase().trim();
   if (!ACTION_TYPES.includes(type)) return null;
   return {
@@ -197,12 +234,19 @@ function parseReflection(content) {
   try {
     parsed = JSON.parse(text);
   } catch {
+    // A reply cut off before it closed has no closing brace at all, so looking
+    // for a balanced object finds nothing and the salvage below never ran.
     const match = text.match(/\{[\s\S]*\}/);
-    if (!match) return null;
     try {
-      parsed = JSON.parse(match[0]);
+      parsed = match ? JSON.parse(match[0]) : null;
     } catch {
-      return null;
+      parsed = null;
+    }
+    if (!parsed) {
+      // What was said before the cut is still what this person thought, and
+      // throwing it away costs the run a whole turn.
+      parsed = salvageDecision(text);
+      if (!parsed) return null;
     }
   }
   const matched = String(parsed?.matched || "").toLowerCase().trim();
@@ -257,7 +301,26 @@ const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
  * transient 502 is the wrong trade, so a failure that could plausibly go
  * differently is tried again with a growing pause between attempts.
  */
+/**
+ * How many completion tokens to allow.
+ *
+ * Measured against the router: a judge asked for a two-field JSON object came
+ * back cut off after twenty-nine completion tokens against a budget of eight
+ * hundred, `finish_reason: length`, because the model spent the rest of the
+ * budget on reasoning that is never returned -- 767 tokens of it. The budget has
+ * to cover the thinking as well as the answer, and how much thinking a router
+ * chooses to do is not something a caller can see in advance.
+ *
+ * The Space already publishes this ceiling for the same reason, so this follows
+ * it rather than inventing a second number.
+ */
+function completionBudget(env = process.env) {
+  const configured = Number.parseInt(String(env.OPENAI_MAX_COMPLETION_TOKENS || ""), 10);
+  return Number.isFinite(configured) && configured > 0 ? configured : 4096;
+}
+
 async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 120000,
+  maxTokens = completionBudget(),
   attempts = 3, retryWaitMs = 1500, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   let lastError;
   for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
@@ -267,7 +330,7 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
       const response = await fetch(`${String(baseUrl).replace(/\/$/, "")}/chat/completions`, {
         method: "POST", signal: controller.signal,
         headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify({ model, temperature: 0.7, max_tokens: 800,
+        body: JSON.stringify({ model, temperature: 0.7, max_tokens: maxTokens,
           messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
       });
       if (!response.ok) {
@@ -368,7 +431,7 @@ function scriptedActor(script) {
 }
 
 module.exports = { ACTION_CONSTRAINTS, ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES,
-  NON_RETRYABLE_STATUS,
+  NON_RETRYABLE_STATUS, completionBudget, salvageAction, salvageDecision,
   affectInWords, buildPrompt,
   buildReflectionPrompt, completion, llmActor, parseDecision, parseReflection, personaInWords,
   scriptedActor };

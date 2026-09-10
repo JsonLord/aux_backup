@@ -118,3 +118,20 @@ test("the judge sees what they said they could see, not just the action", () => 
   assert.match(brief, /still no prices/);
   assert.match(brief, /READ the manifesto/);
 });
+
+test("a judgement cut off mid-sentence still yields its score", async () => {
+  // Measured against the router: this reply came back finish_reason=length after
+  // 29 completion tokens against a budget of 800, because the model spent 767 on
+  // reasoning that is never returned. The score was complete and correct; only
+  // the sentence explaining it was truncated, and JSON.parse threw away both.
+  const cut = '{"score": 0, "flaw": "His impatience makes reading a whole philosophy section after four';
+  const judged = parseScore(cut);
+  assert.equal(judged.score, 0);
+  assert.match(judged.flaw, /impatience/, "a truncated reason is still enough to regenerate against");
+  assert.equal(judged.truncated, true);
+
+  // And it reaches the gate, rather than reading as a judge that is not there.
+  const gate = new AdherenceGate({ judge: async () => cut });
+  const settled = await gate.settle(FRIEDRICH, READING_ON, async () => LEAVING);
+  assert.equal(settled.decision.action.type, "GIVE_UP");
+});
