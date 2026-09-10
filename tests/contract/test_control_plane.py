@@ -1769,3 +1769,66 @@ def test_journey_run_timeout_default_covers_measured_run_lengths(monkeypatch):
     assert JobExecutor._journey_run_timeout() == 45
     monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "not-a-number")
     assert JobExecutor._journey_run_timeout() >= 1159
+
+
+def _png(image):
+    from io import BytesIO
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_a_capture_that_repeats_one_band_is_trimmed_to_the_band_that_is_real():
+    """A live run against a real customer site produced a 1280x8620 full-page
+    capture holding the same header-and-hero band about fourteen times -- what a
+    stitched screenshot does when the page pins its layout to the viewport. The
+    vision model reported a CRITICAL "infinite repeating page content ... makes
+    the site look completely broken" defect, and it went into the report as the
+    single thing to fix first. The site is fine; the capture was not."""
+    from io import BytesIO
+    from PIL import Image
+    from apps.api.executor import JobExecutor
+
+    band = Image.new("RGB", (1280, 600), (250, 250, 250))
+    band.paste(Image.new("RGB", (1280, 64), (12, 40, 90)), (0, 0))          # a header
+    band.paste(Image.new("RGB", (900, 200), (30, 120, 70)), (190, 180))     # a hero
+    stitched = Image.new("RGB", (1280, 600 * 14))
+    for index in range(14):
+        stitched.paste(band, (0, index * 600))
+
+    trimmed, original_height = JobExecutor._trim_repeated_capture(_png(stitched))
+    assert original_height == 8400
+    with Image.open(BytesIO(trimmed)) as kept:
+        assert kept.width == 1280
+        # One band, give or take the resolution the detector works at.
+        assert 500 <= kept.height <= 700
+
+
+def test_a_page_that_merely_repeats_its_own_cards_is_left_alone():
+    """Repetition is not the signature -- plenty of real pages stack identical
+    rows. What identifies a stitch is that the image resembles itself more a whole
+    band apart than one row apart, which a page with a header and varied content
+    cannot do."""
+    from PIL import Image
+    from apps.api.executor import JobExecutor
+
+    page = Image.new("RGB", (1280, 5000), (250, 250, 250))
+    page.paste(Image.new("RGB", (1280, 300), (12, 40, 90)), (0, 0))         # header, once
+    for y in range(300, 5000, 200):
+        page.paste(Image.new("RGB", (1100, 160), (220, 225, 235)), (90, y))  # identical cards
+    assert JobExecutor._trim_repeated_capture(_png(page))[1] is None
+
+    varied = Image.new("RGB", (1280, 6000))
+    for y in range(0, 6000, 40):
+        varied.paste(Image.new("RGB", (1280, 40), (y % 255, (y * 3) % 255, (y * 7) % 255)), (0, y))
+    assert JobExecutor._trim_repeated_capture(_png(varied))[1] is None
+
+
+def test_an_ordinary_viewport_screenshot_is_never_considered():
+    """The artifact only exists in stitched full-page captures, and the check
+    should cost nothing on the screenshots that are not."""
+    from PIL import Image
+    from apps.api.executor import JobExecutor
+    assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 720), (30, 40, 50))))[1] is None
+    # A blank capture repeats nothing, rather than repeating everything.
+    assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 6000), (255, 255, 255))))[1] is None

@@ -315,8 +315,8 @@ class JobExecutor:
                     shutil.rmtree(Path(session_state_path).parent, ignore_errors=True)
         if worker_url:
             findings = self._pain_points_from_journeys(journeys)
-            cohort_runs, screenshot_bytes, raw_strengths, vision_error = self._collect_vision_pain_points(
-                journeys, tasks, personas, data.get("url"))
+            cohort_runs, screenshot_bytes, raw_strengths, vision_error, repeated_captures = \
+                self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             # The vision model has a "strengths" array and still puts praise in
             # "issues" -- a live run published "Familiar and clean layout" as a
@@ -357,6 +357,14 @@ class JobExecutor:
                     "critical_pain_points reflect JourneyTest's own task-completion verdict only, not a "
                     "deeper visual/accessibility critique of the screenshots."
                 )
+            if repeated_captures:
+                limitations.append(
+                    f"{len(repeated_captures)} full-page capture(s) came back as one viewport band repeated "
+                    "down a very tall image -- what a stitched screenshot produces when the page pins its "
+                    "layout to the viewport. They were trimmed to the single band that is a faithful "
+                    "screenshot before anything was asked about them, so findings from those captures "
+                    "describe the top of the page rather than its full length. Untrimmed, a live run "
+                    "reported the repetition itself as a critical defect in a site that does not have one.")
             for journey in degraded:
                 persona_id = journey.get("profileId") or journey.get("testerProfileId") or "unknown persona"
                 verdict_note = ("its verdict was recorded before the failure and is included"
@@ -994,6 +1002,113 @@ class JobExecutor:
         """
         return int(os.getenv("EYESON_VISION_MAX_IMAGE_BYTES", "450000"))
 
+    @staticmethod
+    def _repeated_band_height(image, min_repeats: int = 3) -> int | None:
+        """The height of the band a full-page capture repeated, if it did.
+
+        A full-page screenshot is stitched from viewport-sized captures, and on a
+        page whose layout is pinned to the viewport -- a fixed hero, a scroll-
+        locked section -- every capture comes back showing the same thing. The
+        stitcher pastes them anyway, so the "page" is one band repeated down a
+        very tall image.
+
+        This is not a hypothetical. A live run against a real customer site
+        produced a 1280x8620 capture holding the same header-and-hero band about
+        fourteen times, and the vision model did exactly what it should with the
+        evidence it was given: it reported a CRITICAL "infinite repeating page
+        content ... makes the site look completely broken" defect. The site is
+        fine. The capture was not, and the finding went into a customer-facing
+        report as the single thing to fix first.
+
+        What identifies the artifact is not that some band recurs -- plenty of
+        real pages repeat a card or a row -- but that the image resembles itself
+        more at a distance of a whole band than at a distance of one row. On that
+        real capture the mean difference across the band period was 2.7 per
+        channel value against 14.9 row-to-row: the page has more variation
+        between adjacent lines than between what should be different sections of
+        it. A page with genuinely varied content cannot do that.
+
+        Returns the band height in the image's own pixels, or None.
+        """
+        from PIL import Image, ImageChops, ImageStat
+
+        # Only stitched captures: a viewport screenshot is nothing like this tall.
+        if image.height < image.width * 3:
+            return None
+        # A small greyscale copy is enough to tell bands apart and keeps the
+        # comparison to a handful of whole-image operations.
+        probe_height = 640
+        probe = image.convert("L").resize((32, probe_height), Image.LANCZOS)
+
+        def difference(offset: int) -> float:
+            """Mean absolute difference between the image and itself, shifted."""
+            above = probe.crop((0, 0, 32, probe_height - offset))
+            below = probe.crop((0, offset, 32, probe_height))
+            return ImageStat.Stat(ImageChops.difference(above, below)).mean[0]
+
+        adjacent = difference(1)
+        if adjacent <= 0:
+            return None     # a blank capture repeats nothing
+        scores = {period: difference(period) for period in range(8, probe_height // min_repeats + 1)}
+        coarse = min(scores, key=scores.get)
+        # More self-similar a band apart than a row apart, and near-identical in
+        # absolute terms -- the signature of a stitch, not of repetitive design.
+        if scores[coarse] > adjacent / 2 or scores[coarse] > 6:
+            return None
+
+        # The coarse pass says the image repeats, but not always at the band's own
+        # height: a band repeats at two and three times its height too, and
+        # squeezing the page into 640 rows puts the true period at a fractional
+        # number of them, where a harmonic that lands nearer a whole row scores
+        # better. So the height is settled at the image's own resolution, over the
+        # only candidates it can be -- whole divisions of what the coarse pass
+        # found -- and the smallest that still matches wins.
+        tall = image.convert("L").resize((32, image.height), Image.LANCZOS)
+
+        def band_difference(height: int) -> float:
+            """How much the top band differs from the band directly below it."""
+            above = tall.crop((0, 0, 32, height))
+            below = tall.crop((0, height, 32, height * 2))
+            return ImageStat.Stat(ImageChops.difference(above, below)).mean[0]
+
+        coarse_height = max(1, int(round(coarse * image.height / probe_height)))
+        candidates = []
+        for division in range(1, 13):
+            height = int(round(coarse_height / division))
+            if height < 8 or height * min_repeats > image.height:
+                continue
+            candidates.append((height, band_difference(height)))
+        if not candidates:
+            return None
+        closest = min(score for _, score in candidates)
+        tolerance = max(closest * 1.5, closest + 0.5)
+        return min(height for height, score in candidates if score <= tolerance)
+
+    @classmethod
+    def _trim_repeated_capture(cls, image_bytes: bytes) -> tuple[bytes, int | None]:
+        """One band of a capture that repeated itself, or the capture unchanged.
+
+        The first band is a faithful screenshot of what the browser showed; the
+        rest is the stitcher repeating it. Keeping the first band and dropping
+        the repeats is what stops a capture artifact from being reported as a
+        defect in the page.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return image_bytes, None
+        try:
+            with Image.open(BytesIO(image_bytes)) as opened:
+                image = opened.convert("RGB")
+                band = cls._repeated_band_height(image)
+                if not band or band >= image.height:
+                    return image_bytes, None
+                buffer = BytesIO()
+                image.crop((0, 0, image.width, band)).save(buffer, format="PNG", optimize=True)
+                return buffer.getvalue(), image.height
+        except (OSError, ValueError):
+            return image_bytes, None
+
     @classmethod
     def _vision_image_payload(cls, image_bytes: bytes) -> tuple[str, str]:
         """Shrink a screenshot until the vision endpoint will accept it.
@@ -1212,7 +1327,8 @@ class JobExecutor:
     @classmethod
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
                                      personas: list[dict[str, Any]], url: str | None
-                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]], str | None]:
+                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]],
+                                                str | None, list[str]]:
         """Critique a bounded, evenly-spaced sample of each run's real screenshots
         with a real vision model (services/eyeson-worker's /v1/journey-evidence-
         analyses), referenced against journeytest-core's own semantic element
@@ -1231,6 +1347,7 @@ class JobExecutor:
         cohort_runs: list[dict[str, Any]] = []
         screenshot_bytes: dict[str, bytes] = {}
         strengths: list[dict[str, Any]] = []
+        repeated_captures: list[str] = []
         attempted, last_error = False, None
         for journey, persona in zip(journeys, personas):
             artifacts = journey.get("artifacts") or {}
@@ -1251,6 +1368,11 @@ class JobExecutor:
                     except OSError as error:
                         last_error = str(error)
                         continue
+                    # A capture that repeated itself is trimmed to the one band
+                    # that is real, before either the model or the report sees it.
+                    image_bytes, repeated_from = cls._trim_repeated_capture(image_bytes)
+                    if repeated_from:
+                        repeated_captures.append(screenshot_path)
                     screenshot_bytes[screenshot_path] = image_bytes
                     elements = cls._elements_for_screenshot(screenshot_path, snapshots)
                     image_b64, image_mime = cls._vision_image_payload(image_bytes)
@@ -1278,9 +1400,10 @@ class JobExecutor:
                 "simulationProfile": {"behavior": persona.get("behavior", {})}, "painPoints": pain_points,
             })
         if not attempted:
-            return [], {}, [], None
+            return [], {}, [], None, []
         return (cohort_runs, screenshot_bytes, strengths,
-                last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
+                last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None,
+                repeated_captures)
 
     @classmethod
     def _text_tokens(cls, text: str) -> set[str]:
