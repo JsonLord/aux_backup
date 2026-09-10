@@ -132,3 +132,31 @@ test("status reports whether frames are actually arriving", async () => {
   assert.equal(following.port, 59344);
   assert.equal(following.url, "ws://127.0.0.1:59344");
 });
+
+test("a short tail of frames is kept, because motion is what catches the eye", () => {
+  // Only the newest frame was ever kept, so the frames that reveal a carousel, an
+  // autoplaying video or a blinking CTA were arriving and being discarded. What
+  // moves while nobody is touching the page is exactly what distracts a person.
+  const { recentFrames, RING_SIZE } = require("../src/viewportStream");
+  __resetViewportStream();
+  assert.deepEqual(recentFrames(), []);
+
+  for (let index = 0; index < RING_SIZE + 4; index += 1) {
+    __handleMessage(JSON.stringify({ type: "frame", data: `frame-${index}`, metadata: {} }));
+  }
+  const kept = recentFrames();
+  assert.equal(kept.length, RING_SIZE, "the ring is bounded, so a long run cannot grow it");
+  // Oldest first, newest last -- differencing needs them in order.
+  assert.equal(kept.at(-1).data, `frame-${RING_SIZE + 3}`);
+  assert.equal(kept[0].data, `frame-4`);
+});
+
+test("frames from a page that stopped painting are not read as motion", () => {
+  // A page that settled five seconds ago is finished, not animating; differencing
+  // its last frames would report whatever changed just before it stopped.
+  const { recentFrames } = require("../src/viewportStream");
+  __resetViewportStream();
+  __handleMessage(JSON.stringify({ type: "frame", data: "old", metadata: {} }));
+  assert.equal(recentFrames().length, 1);
+  assert.equal(recentFrames(Date.now() + FRAME_STALE_MS + 1000).length, 0);
+});

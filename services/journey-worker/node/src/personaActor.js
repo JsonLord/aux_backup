@@ -237,24 +237,55 @@ function buildReflectionPrompt({ profile, expectation, action, observation }) {
   return { system, user };
 }
 
-async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 120000 }) {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    const response = await fetch(`${String(baseUrl).replace(/\/$/, "")}/chat/completions`, {
-      method: "POST", signal: controller.signal,
-      headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-      body: JSON.stringify({ model, temperature: 0.7, max_tokens: 800,
-        messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
-    });
-    if (!response.ok) {
-      throw new Error(`persona actor endpoint returned HTTP ${response.status}: ${(await response.text()).slice(0, 300)}`);
+// Statuses where the identical request is rejected every time: a bad key, a model
+// the endpoint does not serve, a body it will not take. Retrying one burns the
+// budget and delays a failure that was never going to change.
+const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
+
+/**
+ * Ask the model, and do not give up on the first stumble.
+ *
+ * A router that picks the model for you can hand a request to something that is
+ * briefly unavailable, rate-limited, or slow to wake -- the first call of a
+ * session took 45 seconds against the same endpoint that then answered in 3.
+ * Every turn of a journey depends on this call, and losing a whole run to one
+ * transient 502 is the wrong trade, so a failure that could plausibly go
+ * differently is tried again with a growing pause between attempts.
+ */
+async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 120000,
+  attempts = 3, retryWaitMs = 1500, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  let lastError;
+  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
+    try {
+      const response = await fetch(`${String(baseUrl).replace(/\/$/, "")}/chat/completions`, {
+        method: "POST", signal: controller.signal,
+        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
+        body: JSON.stringify({ model, temperature: 0.7, max_tokens: 800,
+          messages: [{ role: "system", content: system }, { role: "user", content: user }] }),
+      });
+      if (!response.ok) {
+        const failure = new Error(`persona actor endpoint returned HTTP ${response.status}: `
+          + `${(await response.text()).slice(0, 300)}`);
+        failure.status = response.status;
+        throw failure;
+      }
+      const data = await response.json();
+      const content = data.choices?.[0]?.message?.content;
+      // An empty completion is a failed one: the caller cannot act on it, and a
+      // retry against a router that just picked a different model often can.
+      if (!content || !content.trim()) throw new Error("the model returned an empty completion");
+      return content;
+    } catch (error) {
+      lastError = error;
+      if (NON_RETRYABLE_STATUS.has(error?.status)) break;
+      if (attempt < attempts) await wait(retryWaitMs * attempt);
+    } finally {
+      clearTimeout(timer);
     }
-    const data = await response.json();
-    return data.choices?.[0]?.message?.content || "";
-  } finally {
-    clearTimeout(timer);
   }
+  throw new Error(`persona actor call failed after ${attempts} attempt(s): ${lastError?.message}`);
 }
 
 /**
@@ -321,6 +352,7 @@ function scriptedActor(script) {
   return decide;
 }
 
-module.exports = { ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES, affectInWords, buildPrompt,
+module.exports = { ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES, NON_RETRYABLE_STATUS,
+  affectInWords, buildPrompt,
   buildReflectionPrompt, completion, llmActor, parseDecision, parseReflection, personaInWords,
   scriptedActor };

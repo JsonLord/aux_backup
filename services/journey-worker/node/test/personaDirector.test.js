@@ -432,3 +432,68 @@ test("deciding and reflecting can run on different models", async () => {
   // against the endpoint serving it.
   assert.equal(llmActor({ model: "only-model", complete }).reflectModel, "only-model");
 });
+
+test("a stumble on the way to the model does not lose the run", async () => {
+  // A router that picks the model for you can hand a request to something briefly
+  // unavailable -- the first call of a session took 45s against an endpoint that
+  // then answered in 3. Every turn depends on this call, so losing a whole
+  // journey to one transient 502 is the wrong trade.
+  const { completion } = require("../src/personaActor");
+  let calls = 0;
+  const flaky = async () => {
+    calls += 1;
+    if (calls < 3) { const e = new Error("upstream hiccup"); e.status = 502; throw e; }
+    return { ok: true, async json() { return { choices: [{ message: { content: "third time" } }] }; } };
+  };
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = flaky;
+  try {
+    const waited = [];
+    const answer = await completion({ system: "s", user: "u", model: "auto", apiKey: "k",
+      baseUrl: "https://example.test/v1", wait: async (ms) => { waited.push(ms); } });
+    assert.equal(answer, "third time");
+    assert.equal(calls, 3);
+    assert.deepEqual(waited, [1500, 3000], "the pause grows between attempts");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("a request that can never succeed is not retried", async () => {
+  // A bad key or a model the endpoint does not serve is rejected identically
+  // every time; retrying burns the budget and buries the real cause.
+  const { completion } = require("../src/personaActor");
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: false, status: 401, async text() { return "Invalid API key"; } };
+  };
+  try {
+    await assert.rejects(() => completion({ system: "s", user: "u", model: "auto", apiKey: "bad",
+      baseUrl: "https://example.test/v1", wait: async () => {} }), /Invalid API key/);
+    assert.equal(calls, 1);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("an empty completion counts as a failure worth retrying", async () => {
+  // The caller cannot act on it, and a router that just picked a different model
+  // often can do better on the next attempt.
+  const { completion } = require("../src/personaActor");
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    calls += 1;
+    return { ok: true, async json() {
+      return { choices: [{ message: { content: calls < 2 ? "   " : "an answer" } }] }; } };
+  };
+  try {
+    assert.equal(await completion({ system: "s", user: "u", model: "auto", apiKey: "k",
+      baseUrl: "https://example.test/v1", wait: async () => {} }), "an answer");
+    assert.equal(calls, 2);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

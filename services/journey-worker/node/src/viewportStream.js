@@ -43,8 +43,14 @@ const defaultSleep = (ms) => new Promise((resolve) => {
   if (typeof timer.unref === "function") timer.unref();
 });
 
+// How many frames of history to hold. Enough to tell a page that is animating
+// from one that merely repainted once, cheap enough to keep in memory for the
+// length of any run: these are small JPEG frames and only the tail is kept.
+const RING_SIZE = 8;
+
 let socket = null;
 let latest = null;
+let recent = [];
 let reconnectTimer = null;
 let reconnectAttempt = 0;
 let lastError = "";
@@ -113,6 +119,13 @@ function handleMessage(raw) {
   }
   if (payload?.type !== "frame" || !payload.data) return;
   latest = { data: payload.data, metadata: payload.metadata || {}, receivedAt: Date.now() };
+  // Keep a short tail of frames as well as the newest one. What moves on a page
+  // while nobody is touching it -- a carousel, an autoplaying video, a blinking
+  // call to action -- is exactly what catches a distractible person's eye, and
+  // differencing consecutive frames is the whole detector. The frames already
+  // arrive; only the newest was being kept, so the rest were thrown away.
+  recent.push(latest);
+  while (recent.length > RING_SIZE) recent.shift();
 }
 
 function connect(url) {
@@ -172,6 +185,7 @@ async function startViewportStream({ session, env = process.env, runner = runAge
 
 function stopViewportStream() {
   desiredUrl = "";
+  recent = [];
   if (reconnectTimer) {
     clearTimeout(reconnectTimer);
     reconnectTimer = null;
@@ -227,6 +241,17 @@ function latestFrame(now = Date.now()) {
   return latest;
 }
 
+/**
+ * The recent frames, oldest first, for telling what on the page is moving.
+ *
+ * Stale frames are dropped: a page that stopped painting five seconds ago is not
+ * animating, it is finished, and differencing its last two frames would report
+ * whatever happened to change just before it settled.
+ */
+function recentFrames(now = Date.now()) {
+  return recent.filter((frame) => now - frame.receivedAt <= FRAME_STALE_MS);
+}
+
 function viewportStreamStatus(now = Date.now()) {
   return {
     connected: Boolean(socket && socket.readyState === 1),
@@ -245,10 +270,12 @@ function viewportStreamStatus(now = Date.now()) {
 function __resetViewportStream() {
   stopViewportStream();
   lastError = "";
+  recent = [];
 }
 
 module.exports = {
   DEFAULT_STREAM_PORT, DISCOVERY_ATTEMPTS, DISCOVERY_DELAY_MS, FRAME_STALE_MS, configureStreamPort,
-  discoverStreamPort, latestFrame, sendViewportInput, startViewportStream, stopViewportStream,
-  streamPort, viewportStreamStatus, __resetViewportStream, __handleMessage: handleMessage,
+  discoverStreamPort, latestFrame, recentFrames, RING_SIZE, sendViewportInput, startViewportStream,
+  stopViewportStream, streamPort, viewportStreamStatus,
+  __resetViewportStream, __handleMessage: handleMessage,
 };
