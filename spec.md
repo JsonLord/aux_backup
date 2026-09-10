@@ -3108,3 +3108,120 @@ code. They are recorded because the same shapes keep recurring.
 - **A guard that is always true.** `offsetParent` is null for a `position: fixed`
   element whether or not it is visible, so Escape and click-outside returned early
   every time.
+
+---
+
+## 54. What this session built
+
+The record behind section 53's scores. Grouped by what it achieved rather than by
+commit order, with the measurement each produced, because a claim without one is
+what this section exists to stop.
+
+**Shape of the change:** 42 commits, 71 files, +12,531 / −130. Node test files 7 →
+19, python contract test files 12 → 21. Suites at the end: **171 node, 295
+python** passing, with two pre-existing failures from a persona fixture absent in
+this sandbox.
+
+### 54.1 The persona became a simulation rather than a prompt
+
+`behavior.js` (frustration, anger, confusion, trust, fatigue, and an eight-way
+coping sampler) and `physical.js` (optics, pointer scatter, working memory,
+reading speed) were both complete and both unreachable — dead below an early
+`return` in `index.js`. A journey ran as a competent agent and the persona was
+decoration.
+
+`personaDirector.js` and `personaActor.js` make the cognitive cycle the control
+flow: what is visible, what is expected, one action, what was observed, whether it
+matched, the gap. The expectation is committed to **before** acting, which is what
+makes a step falsifiable — a vague expectation cannot turn out wrong. Feelings are
+derived from what the page did, never reported by the model.
+
+Coping became control flow too: when the model samples `abandon`, the run ends and
+the verdict says the persona gave up, because a synthetic user who would have left
+and did not is a script.
+
+- Live: expectation → `matched: "no"` → a gap naming what was absent; frustration
+  0.20 → 0.63 over three actions before walking away.
+- Frustration had been stuck at 0.00 for a whole live run because `perform()`
+  asserted `changed = true`. Change is now observed through a snapshot digest. An
+  affect model that cannot be disappointed models nothing.
+- Abandonment had been a dice roll — 1.4% a turn for a contented persona, and it
+  ended a run at frustration 0.15. `wouldReallyLeave()` gates it on the persona's
+  own tolerance.
+
+### 54.2 Perception was inverted: pixels first, then the tree
+
+`services/perception_service/` degrades the capture with the persona's optics
+*before* anything reads the page, so what does not survive is never detected,
+never reaches the actor, and cannot be acted on. That is what makes an ability
+mechanical rather than described.
+
+- Real Chromium render: sharp eyes resolve all six elements; 0.7/0.6 still
+  resolves all six; 0.35/0.25 loses exactly the `#999` body copy and the `#aaa`
+  fine print and keeps the heading, the call to action and the link.
+- Size became a first-class term. Identical `#888` (3.54:1): at acuity 0.35 the
+  44px heading reads and the 16px body copy does not. Agrees independently with
+  WCAG's 3:1 / 4.5:1 split.
+- The scan pattern comes from the compiled persona (spotted, F, layer-cake,
+  commitment, Z) with a fixation budget, so an impatient visitor genuinely never
+  reaches the pricing rather than being told they are impatient.
+- The hunt got something to hunt for: with the task text carried through, a
+  price-hunter's first fixation is the price rather than the sixth paragraph of
+  feature copy.
+
+### 54.3 The persona is now held to itself, and learns
+
+TinyTroupe's arrangement, three tiers:
+
+- **Within a step** — the action is scored against the persona and, below 7/10,
+  the criticism goes back and another is asked for. Live: `READ the entire
+  philosophy section twice` at `patience 0.20` scored **1/10**; the corrected
+  action, walking away, **10/10**.
+- **Across steps** — recurring criticism is consolidated into standing lessons in
+  the persona's own voice, reaching the prompt through the faculty like any tool's
+  constraints. Live: mean adherence **5.7 → 6.6**, reaching `GIVE_UP` at 10/10.
+- **Offline** — the judgements are a GEPA trainset. Built, unrun (task #32).
+
+Tools declare their own actions, so the vocabulary the persona is given is
+generated from what implements it; a test asserts the two sets are equal.
+
+### 54.4 The report says things nothing else can
+
+Two finding classes no DOM check can produce now reach the report, grouped per
+element across every run and step, cropped to the element, and carrying the
+persona's own words.
+
+The gate that keeps them believable: **the persona is the instrument, never the
+standard.** Rendered contrast decides whether something is an accessibility
+defect; consistency across personas decides whether it is about the page; profile
+rarity decides whether it is a defect at all. A compliant element missed only by a
+profile in the bottom few percent of corrected vision becomes an `info`
+observation, ranked below `low` and excluded from the issue count.
+
+An eyesight finding shows the page **as those eyes delivered it** — a clean
+screenshot beside "they could not read this" invites the reader to disagree, and
+they would be right.
+
+### 54.5 A run can be watched, driven, and signed in
+
+Live viewport stream over agent-browser's WebSocket, a real pointer drawn into the
+page, a takeover path, and stored per-workspace browser credentials so a run tests
+the signed-in product rather than the logged-out one.
+
+### 54.6 The pattern that produced most of the value
+
+Measure, find the model wrong, fix, re-measure. It fired often enough to be the
+method rather than an anecdote — roughly a dozen times, and in most of them the
+code looked correct and the result was luck:
+
+| What looked right | What measuring showed |
+|---|---|
+| A heading correctly reported unreadable | Size was nowhere in the model; it agreed by accident |
+| A deck that fitted the screen | 49px cut off per finding slide at 1024×600 |
+| A credentials dialog with a working close button | Could not be closed by any route |
+| A memory bank that made the persona better | Made it worse: 6.0 → 4.3 |
+| A stitched screenshot showing a broken site | Our own capture repeating its hero band ~14× |
+| A blur that helped legibility | It was bleeding white inward and manufacturing contrast |
+| A judge that was unavailable | It answered correctly and the reply was truncated at 29 tokens |
+
+Section 53.4 lists the seven trap shapes these fall into.
