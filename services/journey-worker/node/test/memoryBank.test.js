@@ -11,7 +11,9 @@ const { mkdtempSync, readFileSync, writeFileSync } = require("node:fs");
 const { tmpdir } = require("node:os");
 const path = require("node:path");
 
-const { PersonaMemoryBank, RECURRENCE, sameComplaint, sameWord } = require("../src/memoryBank");
+const {
+  NAMES_AN_ELEMENT, PersonaMemoryBank, RECURRENCE, sameComplaint, sameWord,
+} = require("../src/memoryBank");
 
 const impatienceFlaws = [
   "Low patience makes such lengthy rereading unlikely",
@@ -172,4 +174,62 @@ test("a step that passed at seven out of ten still said something worth learning
   clean.store({ action: { type: "GIVE_UP" }, score: 10, passed: true, flaw: "" });
   clean.store({ action: { type: "GIVE_UP" }, score: 9, passed: true, flaw: "minor phrasing" });
   assert.deepEqual(clean.lessons(), []);
+});
+
+test("a lesson never names an element, because it outlives the page", async () => {
+  // Measured: handed the action vocabulary, whose CLICK line carries "e.g. e12"
+  // as an example, the rewriter copied that ref into a standing lesson -- "You
+  // click the direct pricing link (e12)" -- and the persona spent a whole visit
+  // hunting for an e12 that was on no page at all.
+  const bank = bankWith(impatienceFlaws, {
+    rewrite: async () => "You click the direct pricing link (e12).",
+  });
+  await bank.consolidate();
+  assert.equal(bank.actionsConstraintsPrompt(), "");
+
+  assert.equal(NAMES_AN_ELEMENT.test("You CLICK e12 to view concrete pricing."), true);
+  assert.equal(NAMES_AN_ELEMENT.test("You read p@40,120 first."), true);
+  assert.equal(NAMES_AN_ELEMENT.test("You give up on a page that will not name a price."), false);
+});
+
+test("two complaints that rewrite to the same advice are said once", async () => {
+  // They did: "You click the direct pricing link" and "You CLICK to view
+  // concrete pricing" came from different groups and told the persona the same
+  // thing twice.
+  const bank = new PersonaMemoryBank({
+    rewrite: async () => "You give up on a page that will not name a price.",
+  });
+  for (const flaw of [...impatienceFlaws,
+    "A cautious person would verify the price before clicking buy",
+    "Verification of the price before purchase is what a careful person does"]) {
+    bank.store({ action: { type: "READ" }, score: 3, flaw, passed: false });
+  }
+  assert.equal(bank.lessons().length, 2, "two distinct complaints");
+  await bank.consolidate();
+  const shown = bank.actionsConstraintsPrompt().split("\n").filter((line) => line.startsWith("- "));
+  assert.equal(shown.length, 1, "and one thing worth telling them");
+});
+
+test("a lesson that says the complaint back is not a lesson", async () => {
+  // Measured live: from "Reading vague marketing copy contradicts his impatience
+  // for concrete pricing", the rewriter produced "You READ instead of chasing
+  // concrete pricing" -- which names an action and addresses them as "you" and
+  // is still exactly wrong, because it tells the persona to keep reading.
+  const complaints = [
+    "Reading vague marketing copy contradicts his impatience for concrete pricing and scope",
+    "Wastes time reading vague marketing instead of seeking concrete pricing",
+  ];
+  const restating = new PersonaMemoryBank({
+    rewrite: async () => "You READ instead of chasing concrete pricing.",
+  });
+  for (const flaw of complaints) restating.store({ action: { type: "READ" }, score: 2, flaw, passed: false });
+  await restating.consolidate();
+  assert.equal(restating.actionsConstraintsPrompt(), "");
+
+  const correcting = new PersonaMemoryBank({
+    rewrite: async () => "You give up on a page that will not name a price.",
+  });
+  for (const flaw of complaints) correcting.store({ action: { type: "READ" }, score: 2, flaw, passed: false });
+  await correcting.consolidate();
+  assert.match(correcting.actionsConstraintsPrompt(), /You give up on a page/);
 });

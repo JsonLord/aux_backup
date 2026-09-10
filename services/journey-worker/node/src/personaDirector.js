@@ -175,7 +175,9 @@ class PersonaDirector {
           // into this person's own voice. A raw flaw shown back to the persona
           // measured worse than showing nothing at all.
           rewrite: actor.judgeAdherence,
-          vocabulary: browsingFaculty().actionsDefinitionsPrompt() })
+          // Names only. The full vocabulary carries an example ref, and the
+          // rewriter copied it into a lesson verbatim.
+          vocabulary: browsingFaculty().actionTypes.join(", ") })
       : memory;
     this.faculty = faculty || browsingFaculty({ abilities: this.abilities,
       seed: Number(this.profile.behavior?.seed) || 1, memory: this.memory || undefined });

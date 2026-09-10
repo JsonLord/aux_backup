@@ -62,14 +62,30 @@ const MAX_EPISODES = 400;
  */
 const LESSON_SYSTEM = `You turn criticism of someone into a short fact about who they are.
 
-You are given several complaints about the same person's behaviour, and the list
-of actions available to them. Write ONE sentence, addressed to them as "you",
-saying what they do -- naming an action from the list they would take instead.
+You are given complaints about what this person KEEPS DOING WRONG, and the
+actions available to them. Write ONE sentence, addressed to them as "you", saying
+what they do INSTEAD of the thing being complained about.
 
-Say what they DO, never only what they do not do: "You give up on a page that
-will not name a price" steers; "you would not keep scrolling" does not.
+The complaint describes the mistake. Your sentence must describe the correction.
+
+  complaint: "Scrolling through vague copy contradicts his impatience"
+  good:      "You give up on a page that will not name a price."
+  useless:   "You scroll instead of chasing concrete pricing."   <- repeats the mistake
+  useless:   "You would not keep scrolling."                     <- names nothing to do
+
+Name an action from the list. Never name a specific element: this person will be
+on different pages, and a lesson about who they are cannot be about one control
+on one of them.
 
 At most 20 words. Reply with the sentence and nothing else.`;
+
+// Element references are per-page and per-snapshot, so a standing lesson can
+// never contain one. Measured: handed the action vocabulary, the rewriter copied
+// its example ref straight into a lesson -- "You click the direct pricing link
+// (e12)" -- and the persona spent a visit hunting for an e12 that was not on any
+// page. The vocabulary given to the rewriter is now bare action names, and this
+// catches anything that gets through anyway.
+const NAMES_AN_ELEMENT = /\b(?:e\d+|\[[^\]]+\]|[a-z]+@\d+,\d+)\b/i;
 
 const STOP_WORDS = new Set(["a", "an", "and", "the", "this", "that", "would", "not", "such",
   "with", "for", "his", "her", "their", "them", "they", "who", "which", "makes", "make", "is",
@@ -233,7 +249,16 @@ class PersonaMemoryBank extends Tool {
         // A rewrite that came back empty, or as another third-person complaint,
         // is worse than the flaw it replaces -- so it has to look like advice
         // addressed to them before it is kept.
-        if (sentence && /\byou\b/i.test(sentence)) this.phrasings.set(item.lesson, sentence);
+        const usable = sentence && /\byou\b/i.test(sentence)
+          && !NAMES_AN_ELEMENT.test(sentence)
+          // A rewrite that just says the complaint back is worse than useless:
+          // "You READ instead of chasing concrete pricing" came out of a
+          // complaint about reading, and told the persona to keep reading.
+          && !sameComplaint(sentence, item.lesson, 0.5)
+          // And not something already said: two different complaints often
+          // rewrite to the same advice, and the persona does not need it twice.
+          && ![...this.phrasings.values()].some((said) => said && sameComplaint(said, sentence, 0.6));
+        this.phrasings.set(item.lesson, usable ? sentence : "");
       } catch {
         // A rewriter that is down leaves the lesson unspoken rather than
         // showing the persona a criticism written about somebody else.
@@ -299,5 +324,5 @@ class PersonaMemoryBank extends Tool {
   }
 }
 
-module.exports = { LESSON_SYSTEM, MAX_EPISODES, MAX_LESSONS, PersonaMemoryBank, RECURRENCE,
-  gist, sameComplaint, sameWord };
+module.exports = { LESSON_SYSTEM, MAX_EPISODES, MAX_LESSONS, NAMES_AN_ELEMENT,
+  PersonaMemoryBank, RECURRENCE, gist, sameComplaint, sameWord };
