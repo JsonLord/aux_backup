@@ -5,6 +5,8 @@ const fs = require("node:fs");
 const path = require("node:path");
 
 const { setActiveSession } = require("./agentBrowser");
+const { llmActor } = require("./personaActor");
+const { PersonaDirector } = require("./personaDirector");
 const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
 const { configureStreamPort, startViewportStream, stopViewportStream } = require("./viewportStream");
 const { cursorKeeperStatus, startCursorKeeper, stopCursorKeeper } = require("./cursorKeeper");
@@ -212,6 +214,21 @@ async function runWithJourneyTest(input) {
       getApiKey: () => apiKey,
     });
   }
+  // Who drives the browser. The Pi director browses as a competent agent; the
+  // persona director browses as the person the run is supposed to be, and its
+  // coping decisions can end the run the way a real visitor would. Off by
+  // default until it has as many live runs behind it as the one it replaces.
+  if (String(process.env.JOURNEY_DIRECTOR || "").trim() === "persona") {
+    director = new PersonaDirector({
+      profile: input.profile,
+      model: { provider, name: modelId },
+      actor: llmActor({ model: modelId, apiKey, baseUrl,
+        // The reflection is a factual comparison rather than a performance, so it
+        // runs on a smaller, faster model where one is configured.
+        reflectModel: process.env.JOURNEY_REFLECT_MODEL || undefined }),
+      maxSteps: Number.parseInt(process.env.JOURNEY_MAX_STEPS || "", 10) || undefined,
+    });
+  }
   const outputDir = input.artifactDirectory || process.env.JOURNEY_ARTIFACT_ROOT || "/tmp/aux-journeys";
   // journeytest-core keeps only `text` content blocks when it records an
   // assistant turn, so the model's real thinking never reaches the run
@@ -267,6 +284,9 @@ async function runWithJourneyTest(input) {
   }
   return { ...result, profileId: input.profile.id, simulationProfile: input.profile,
     browserSession: sessionName,
+    // Which director browsed. A finding from a persona run and one from an agent
+    // run are about different things, so a reader has to be able to tell.
+    director: director.name || "pi",
     // Whether this run browsed signed in. A finding from an authenticated run and
     // one from an anonymous run are about different products, so the report has to
     // be able to say which it saw.

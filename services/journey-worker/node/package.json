@@ -10,7 +10,7 @@
     "agent-browser": "0.31.1"
   },
   "scripts": {
-    "check": "node --check src/index.js && node --check src/behavior.js && node --check src/evidence.js && node --check src/physical.js && node --check src/replay.js && node --check src/safety.js && node --check src/journeytest.js && node --check src/reasoningCapture.js && node --check src/liveRun.js && node --check src/viewportStream.js && node --check src/loginCapture.js && node --check assets/cursor-overlay.js && node --check src/agentBrowser.js && node --check src/cursorKeeper.js && node --check src/revealKeeper.js",
+    "check": "node --check src/index.js && node --check src/behavior.js && node --check src/evidence.js && node --check src/physical.js && node --check src/replay.js && node --check src/safety.js && node --check src/journeytest.js && node --check src/reasoningCapture.js && node --check src/liveRun.js && node --check src/viewportStream.js && node --check src/loginCapture.js && node --check assets/cursor-overlay.js && node --check src/agentBrowser.js && node --check src/cursorKeeper.js && node --check src/revealKeeper.js && node --check src/personaActor.js && node --check src/personaDirector.js",
     "start": "node src/index.js",
     "test": "node --test test/*.test.js"
   }
