@@ -21,6 +21,11 @@ export OPENAI_BASE_URL="${OPENAI_COMPATIBLE_ENDPOINT:-${OPENAI_BASE_URL:-https:/
 # best available model); any other id 400s with model_not_found.
 export OPENAI_MODEL="${OPENAI_MODEL:-auto}"
 export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-auto}}"
+# The persona director asks a second, cheaper model whether what happened matched
+# what the persona expected. On a router that picks the model itself there is
+# nothing cheaper to choose, so it follows the same id; point it at a specific
+# small model only on an endpoint that serves one by name.
+export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-${OPENAI_MODEL}}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
 export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-${OPENAI_API_KEY:-}}"
 export BLABLADOR_BASE_URL="${BLABLADOR_BASE_URL:-${OPENAI_BASE_URL}}"
