@@ -5,7 +5,7 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const {
   DEFAULT_INTERVAL_MS, OVERLAY_SCRIPT, cursorKeeperStatus, enabled, installOnce,
-  startCursorKeeper, stopCursorKeeper, __resetCursorKeeper,
+  readCursorPosition, startCursorKeeper, stopCursorKeeper, __resetCursorKeeper,
 } = require("../src/cursorKeeper");
 
 test.beforeEach(() => __resetCursorKeeper());
@@ -82,4 +82,33 @@ test("starting twice does not run two timers", async () => {
 test("the interval is frequent enough to matter and cheap enough to ignore", () => {
   assert.ok(DEFAULT_INTERVAL_MS <= 5000, "a bare page for longer than this is noticeable");
   assert.ok(DEFAULT_INTERVAL_MS >= 500, "polling faster than this buys nothing");
+});
+
+test("the pointer's last real position survives the navigation that wipes it", async () => {
+  __resetCursorKeeper();
+  // The page answers with "x,y,width,height" while the overlay is in it.
+  const seen = async () => ({ ok: true, stdout: '[{"result":"515,316,1280,633"}]', stderr: "" });
+  const live = await readCursorPosition(seen, 1000);
+  assert.deepEqual(live, { x: 515, y: 316, viewport: { width: 1280, height: 633 }, stale: false, ageMs: 0 });
+
+  // After a navigation the overlay is gone until the keeper puts it back, and
+  // parked off-screen until something moves it -- the probe answers with "".
+  const gone = async () => ({ ok: true, stdout: '[{"result":""}]', stderr: "" });
+  const remembered = await readCursorPosition(gone, 3500);
+  assert.deepEqual(remembered,
+    { x: 515, y: 316, viewport: { width: 1280, height: 633 }, stale: true, ageMs: 2500 });
+
+  // And a fresh reading is live again, with the age reset.
+  const again = async () => ({ ok: true, stdout: '[{"result":"20,40,1280,633"}]', stderr: "" });
+  assert.deepEqual(await readCursorPosition(again, 9000),
+    { x: 20, y: 40, viewport: { width: 1280, height: 633 }, stale: false, ageMs: 0 });
+});
+
+test("a pointer that has never been seen is reported as absent, not as a guess", async () => {
+  __resetCursorKeeper();
+  const nothing = async () => ({ ok: true, stdout: '[{"result":""}]', stderr: "" });
+  assert.equal(await readCursorPosition(nothing, 1000), null);
+  // A page that cannot be reached at all is the same answer.
+  const unreachable = async () => ({ ok: false, stdout: "", stderr: "no active page" });
+  assert.equal(await readCursorPosition(unreachable, 1000), null);
 });

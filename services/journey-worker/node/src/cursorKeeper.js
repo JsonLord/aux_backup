@@ -83,20 +83,40 @@ const CURSOR_POSITION_PROBE = `(() => {
     + "," + Math.round(innerWidth) + "," + Math.round(innerHeight);
 })()`;
 
+// Where the pointer was last actually seen, kept outside the page because the
+// page is where it keeps getting lost.
+let lastSeen = null;
+
 /**
  * Where the pointer is, in CSS pixels, with the viewport it is relative to.
  *
- * Returns null before anything has moved it, or when the page has no overlay
- * yet -- a magnifier centred on a guess is worse than one that waits.
+ * A navigation destroys the document and the overlay with it, and the keeper's
+ * fresh copy is parked off-screen until something moves it again. In a real run
+ * that is most of the time: the agent clicks a link, the click lands on the old
+ * document, and the new page has never been touched. Watching a live run, the
+ * position came back null on all ninety polls of a five-minute journey that
+ * clicked throughout -- so a viewer that only draws a live position draws
+ * nothing, and the pane meant to show the pointer stays empty.
+ *
+ * So the last real position is remembered here and reported with `stale` set
+ * once the page can no longer confirm it, along with how old it is. That is
+ * enough for a viewer to keep the marker where the pointer last was and dim it,
+ * rather than choosing between a blank pane and a position it cannot support.
+ * `stale` is never guessed: it is false only when the page itself just answered.
  */
-async function readCursorPosition(runner = batch) {
+async function readCursorPosition(runner = batch, now = Date.now()) {
   const result = await runner([["eval", CURSOR_POSITION_PROBE]]);
-  if (!result.ok) return null;
-  const match = String(result.stdout).match(/(\d+),(\d+),(\d+),(\d+)/);
-  if (!match) return null;
-  const [, x, y, width, height] = match.map(Number);
-  if (!width || !height) return null;
-  return { x, y, viewport: { width, height } };
+  const match = result.ok ? String(result.stdout).match(/(\d+),(\d+),(\d+),(\d+)/) : null;
+  if (match) {
+    const [, x, y, width, height] = match.map(Number);
+    if (width && height) {
+      lastSeen = { x, y, viewport: { width, height }, at: now };
+      return { x, y, viewport: { width, height }, stale: false, ageMs: 0 };
+    }
+  }
+  if (!lastSeen) return null;
+  return { x: lastSeen.x, y: lastSeen.y, viewport: lastSeen.viewport,
+    stale: true, ageMs: Math.max(0, now - lastSeen.at) };
 }
 
 function startCursorKeeper({ intervalMs, env = process.env, runner = batch } = {}) {
@@ -129,6 +149,7 @@ function __resetCursorKeeper() {
   source = null;
   lastError = "";
   installs = 0;
+  lastSeen = null;
 }
 
 module.exports = {

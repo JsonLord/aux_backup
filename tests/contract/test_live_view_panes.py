@@ -90,3 +90,28 @@ def test_the_clickable_canvas_is_only_decoded_while_somebody_is_driving(monkeypa
     assert idle_canvas.get("value") is None and not idle_canvas.get("visible")
     assert driving_canvas["visible"] is True
     assert driving_canvas["value"] is not None
+
+
+def test_a_stale_pointer_is_shown_dimmed_and_captioned_as_last_seen():
+    """Every navigation destroys the on-page marker, and a run that clicks through
+    links spends most of its time with no live position -- a five-minute live run
+    reported none on all ninety polls. The last real position is still the right
+    place to look, so it is shown; what must not happen is showing it as if the
+    pointer were there now."""
+    panes = app.render_live_panes("data:image/jpeg;base64,AAAA",
+                              {"x": 515, "y": 316, "viewport": {"width": 1280, "height": 633},
+                               "stale": True, "ageMs": 4200})
+    assert "pointer last seen at 515, 316 4s ago" in panes
+    assert "opacity:.55" in panes
+    # And it is still a crop centred on that position, not the empty-state pane.
+    assert "The pointer has not moved yet" not in panes
+    assert "background-position:40.23% 49.92%" in panes
+
+
+def test_a_live_pointer_is_not_dimmed():
+    panes = app.render_live_panes("data:image/jpeg;base64,AAAA",
+                              {"x": 515, "y": 316, "viewport": {"width": 1280, "height": 633},
+                               "stale": False, "ageMs": 0})
+    assert "pointer at 515, 316" in panes
+    assert "last seen" not in panes
+    assert "opacity:.55" not in panes

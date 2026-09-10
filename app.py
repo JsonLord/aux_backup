@@ -1009,6 +1009,12 @@ def render_live_panes(frame: str, cursor: dict | None, caption: str = "", zoom: 
     Without a pointer there is nothing to centre on, so the close-up says so
     rather than magnifying the middle of the page and implying that is where the
     agent is looking.
+
+    A pointer marked `stale` is where the pointer last actually was, not where it
+    is: every navigation destroys the on-page marker, and in a run that clicks
+    through links that is most of the time. It is still the right place to look,
+    so it is shown -- dimmed, and captioned as "last seen", so the close-up is
+    never read as a live position it cannot support.
     """
     image = escape(frame, quote=True)
     pane = ("flex:1 1 0;min-width:0;border-radius:.5rem;border:1px solid #334155;"
@@ -1024,11 +1030,20 @@ def render_live_panes(frame: str, cursor: dict | None, caption: str = "", zoom: 
         # pointer and clamps itself at the edges, so no pane pixel size is needed.
         x = max(0.0, min(100.0, float(cursor["x"]) / float(viewport["width"]) * 100))
         y = max(0.0, min(100.0, float(cursor["y"]) / float(viewport["height"]) * 100))
+        stale = bool(cursor.get("stale"))
         close_up = (
             f'<div style="{pane};aspect-ratio:{viewport["width"]}/{viewport["height"]};'
             f'background-image:url({image});background-repeat:no-repeat;'
-            f'background-size:{zoom * 100:.0f}% auto;background-position:{x:.2f}% {y:.2f}%"></div>')
-        close_up_caption = f'pointer at {int(cursor["x"])}, {int(cursor["y"])} · {zoom:g}×'
+            f'background-size:{zoom * 100:.0f}% auto;background-position:{x:.2f}% {y:.2f}%'
+            + (';opacity:.55;filter:grayscale(.35)' if stale else '')
+            + '"></div>')
+        where = f'{int(cursor["x"])}, {int(cursor["y"])}'
+        if stale:
+            age = cursor.get("ageMs")
+            ago = f' {age / 1000:.0f}s ago' if isinstance(age, (int, float)) else ""
+            close_up_caption = f'pointer last seen at {where}{ago} · {zoom:g}×'
+        else:
+            close_up_caption = f'pointer at {where} · {zoom:g}×'
     else:
         close_up = (f'<div style="{pane};aspect-ratio:16/10;display:flex;align-items:center;'
                     'justify-content:center;color:#64748b;font-size:.85rem">'
