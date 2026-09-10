@@ -216,3 +216,70 @@ def test_the_page_as_this_person_saw_it_can_be_shown_beside_the_finding():
     rendered = Image.open(io.BytesIO(base64.b64decode(result["seenImageBase64"])))
     assert rendered.size == (1280, 900)
     assert result["eyes"]["blurPx"] > 0
+
+
+def test_the_contrast_ratio_is_the_one_wcag_defines():
+    """The objective half of an accessibility finding. Whether a persona with 0.35
+    acuity could read something is a fact about the persona; whether the element
+    clears 4.5:1 is a fact about the site, and the only half a developer can act on
+    without first agreeing whose eyes to believe.
+
+    Checked against published values rather than against itself.
+    """
+    from services.perception_service.optics import contrast_ratio
+
+    def text(fg, bg=(255, 255, 255)):
+        # Stripes at glyph scale: real text is ink and paper interleaved, which is
+        # what the percentiles exist to separate.
+        image = Image.new("RGB", (300, 60), bg)
+        draw = ImageDraw.Draw(image)
+        for x in range(12, 288, 4):
+            draw.rectangle((x, 12, x + 1, 28), fill=fg)
+        return image
+
+    box = {"x": 12, "y": 12, "width": 276, "height": 17}
+    assert contrast_ratio(text((0, 0, 0)), box)["ratio"] == 21.0, "black on white is the maximum"
+    # #767676 is the canonical AA boundary colour on white.
+    boundary = contrast_ratio(text((118, 118, 118)), box)
+    assert 4.5 <= boundary["ratio"] <= 4.6 and boundary["passes"] is True
+    assert contrast_ratio(text((153, 153, 153)), box)["ratio"] == 2.85, "the designer grey"
+    assert contrast_ratio(text((170, 170, 170)), box)["passes"] is False
+    assert contrast_ratio(text((233, 233, 233), (245, 245, 245)), box)["ratio"] < 1.2
+
+
+def test_a_solid_control_is_measured_against_what_surrounds_it():
+    """A region of one flat colour has no internal contrast, and its percentiles
+    give 1.0:1 for a solid black button on white -- the worst possible score for
+    one of the most legible things on a page. That is the wrong question: WCAG
+    1.4.11 asks about a control's boundary against its surround.
+    """
+    from services.perception_service.optics import contrast_ratio
+
+    def button(fill, ground=(255, 255, 255)):
+        image = Image.new("RGB", (300, 120), ground)
+        ImageDraw.Draw(image).rectangle((20, 20, 260, 80), fill=fill)
+        return image
+
+    box = {"x": 20, "y": 20, "width": 240, "height": 60}
+    green = contrast_ratio(button((13, 122, 74)), box)
+    assert green["passes"] is True and green["required"] == 3.0
+    assert "surrounds it" in green["measured"]
+
+    # And the surround must exclude the control itself: a 240x60 button inside a
+    # 264x84 expansion is 65% of those pixels, so their median is the button and
+    # the ratio came back 1.0:1.
+    assert green["ratio"] > 4.0
+
+    assert contrast_ratio(button((248, 248, 248)), box)["passes"] is False
+    # The case salience.py cares about too: dark on dark is not prominent just
+    # because the rest of the page is white.
+    assert contrast_ratio(button((35, 35, 42), (25, 25, 30)), box)["passes"] is False
+
+
+def test_every_element_carries_its_contrast_so_a_report_can_cite_it():
+    result = perceive(image_base64=encode(page()), elements=ELEMENTS,
+                      abilities={"vision": {"acuity": 0.35, "contrastSensitivity": 0.25}})
+    for item in result["perceived"] + result["notLookedAt"]:
+        assert "contrast" in item and "passes" in item["contrast"]
+    for item in result["notPerceived"]:
+        assert "contrast" in item

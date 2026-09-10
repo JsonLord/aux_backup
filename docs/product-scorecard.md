@@ -109,8 +109,37 @@ never looked at**, which is the answer to "why did they not click the thing that
 was right there". Grouped per element, not per step. The executive summary names
 the worst finding instead of only counting.
 
-**Missing:** severities are assigned by rule, not judged. Recommendations for the
-two new classes are templated rather than written for the specific page.
+**The gate, which is what keeps it believable.** Filing every unreadable element
+as a high-severity accessibility defect would mean a run that happened to include
+one very short-sighted profile turned a compliant page into a failing one. Three
+things are separated:
+
+- **The rendered contrast ratio**, measured on the page *as drawn* -- not on the
+  degraded capture. Whether a persona with 0.35 acuity could read something is a
+  fact about the persona; whether the element clears 4.5:1 is a fact about the
+  site, true for every visitor, and citable. Checked against published values:
+  black on white 21.0:1, `#767676` 4.54:1 (the AA boundary colour), `#999`
+  2.85:1. A solid control has no text of its own, so it is measured against its
+  surround, which is what WCAG 1.4.11 asks -- and the surround excludes the
+  control itself, or a 240x60 button inside a 264x84 expansion is 65% of those
+  pixels and scores 1.0:1.
+- **Consistency across personas.** The same element missed by several different
+  profiles is about the page; missed by one is about that one.
+- **How unusual the profile is.** Compliant element, missed only by a profile in
+  the bottom few percent of corrected vision, becomes an `info` observation --
+  said plainly, ranked below `low`, and excluded from the issue count and from
+  "the most serious is".
+
+So: fails WCAG → `high / accessibility` however rare the profile that surfaced
+it. Passes WCAG, several profiles → `medium / legibility`, with the count stated.
+Passes WCAG, one rare profile → `info / profile-specific`, not a defect. Passes
+WCAG, one typical profile → `low`, a hint.
+
+Findings crop to the element they are about, and carry the persona's own words
+from the run's reflections.
+
+**Missing:** recommendations for the two new classes are templated rather than
+written for the specific page.
 
 ## 7. Artifacts render correctly
 

@@ -1834,93 +1834,155 @@ def test_an_ordinary_viewport_screenshot_is_never_considered():
     assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 6000), (255, 255, 255))))[1] is None
 
 
-def _perception_journey(**overrides):
-    """One run that saw a page the way a short-sighted, impatient person does."""
-    step = {
-        "eyes": {"acuity": 0.35, "contrastSensitivity": 0.25, "blurPx": 1.95},
-        "scan": {"pattern": "spotted", "fixationBudget": 6,
-                 "why": ["little patience, so they hunt for the one thing they came for"]},
-        "counts": {"elements": 15, "fixated": 6},
-        "notPerceived": [{"selector": "p.fine", "role": "text",
-                          "name": "Prices exclude VAT. Enterprise terms apply.",
-                          "box": {"x": 40, "y": 223},
-                          "reason": "too little contrast to make anything out",
-                          "internalContrast": 0.035, "edgeContrast": 0.0028, "ink": 0.0}],
-        "notLookedAt": ["e2", "e4"],
-        "missedWhatTheyCameFor": [{"selector": "p.price", "name": "From EUR 49 per month",
-                                   "goalAffinity": 0.85}],
-    }
-    step.update(overrides)
-    return {"runId": "run_1", "profileId": "friedrich_wolf",
-            "timeline": [{"type": "persona.perception", "data": step},
-                         {"type": "persona.perception", "data": step},
-                         {"type": "persona.affect", "data": {"state": {}}}]}
+# A profile in the bottom few percent of corrected vision, and a typical one.
+RARE_EYES = {"acuity": 0.35, "contrastSensitivity": 0.25, "blurPx": 1.95}
+TYPICAL_EYES = {"acuity": 1.0, "contrastSensitivity": 1.0, "blurPx": 0.0}
+
+# The same element, measured on the page as drawn, either side of the WCAG line.
+FAILS_WCAG = {"selector": "p.fine", "role": "text",
+              "name": "Prices exclude VAT. Enterprise terms apply to seats over 50.",
+              "box": {"x": 40, "y": 223, "width": 460, "height": 18},
+              "reason": "too little contrast to make anything out",
+              "internalContrast": 0.035, "edgeContrast": 0.0028, "ink": 0.0,
+              "contrast": {"ratio": 2.85, "required": 4.5, "passes": False,
+                           "measured": "text against its own background"}}
+PASSES_WCAG = {**FAILS_WCAG, "selector": "p.ok", "name": "Choose the plan that fits how you work",
+               "contrast": {"ratio": 7.1, "required": 4.5, "passes": True,
+                            "measured": "text against its own background"}}
+MISSED_PRICE = {"selector": "p.price", "name": "From EUR 49 per month", "goalAffinity": 0.85,
+                "box": {"x": 40, "y": 73, "width": 300, "height": 26}}
 
 
-def test_a_report_says_what_was_present_but_not_perceivable():
-    """The pipeline measures this on the rendered pixels, after the persona's own
-    optics -- something a contrast check against the declared CSS can miss --
-    and until now recorded it on the run and never reported it."""
-    findings = JobExecutor._pain_points_from_perception([_perception_journey()])
-    unreadable = [f for f in findings if f["source"] == "perception.notPerceived"]
+def _perception_journey(run_id="run_1", persona="friedrich_wolf", eyes=None,
+                        unreadable=(), missed=(), gap="No price was visible anywhere.",
+                        steps=2, seen_image=None):
+    """One run that looked at a page, repeated over `steps` steps."""
+    step = {"eyes": eyes or RARE_EYES,
+            "scan": {"pattern": "spotted", "fixationBudget": 6,
+                     "why": ["little patience, so they hunt for the one thing they came for"]},
+            "counts": {"elements": 15, "fixated": 6},
+            "notPerceived": list(unreadable), "notLookedAt": ["e2", "e4"],
+            "missedWhatTheyCameFor": list(missed), "seenImage": seen_image}
+    timeline = [{"type": "persona.perception", "data": step} for _ in range(steps)]
+    timeline.append({"type": "persona.reflection", "data": {"matched": "no", "gap": gap}})
+    return {"runId": run_id, "profileId": persona, "timeline": timeline}
 
-    assert len(unreadable) == 1
-    finding = unreadable[0]
-    assert finding["severity"] == "high"
-    assert "Prices exclude VAT" in finding["title"]
-    # The reason, the eyesight it was measured for, and the numbers behind it.
-    assert "too little contrast" in finding["summary"]
-    assert "0.35" in finding["summary"] and "1.95px" in finding["summary"]
-    assert "edge contrast 0.0028" in finding["evidence"]
-    # And a fix that does not send the reader to the wrong place.
+
+def test_an_element_that_fails_wcag_is_an_accessibility_defect_whoever_found_it():
+    """The contrast is measured on the page as drawn, so it is a fact about the
+    site and true for every visitor. It stands on its own however rare the profile
+    that happened to surface it."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG], eyes=RARE_EYES)])
+    assert len(findings) == 1
+    finding = findings[0]
+
+    assert finding["severity"] == "high" and finding["category"] == "accessibility"
+    assert "Fails WCAG AA contrast" in finding["title"]
+    assert "2.85:1" in finding["summary"] and "4.5:1" in finding["summary"]
+    assert finding["wcagPasses"] is False and finding["contrastRatio"] == 2.85
+    # And a fix that says where not to look.
     assert "declared CSS colours is not enough" in finding["recommendation"]
+    # Backed by what the persona actually said.
+    assert finding["personaEvidence"][0]["quote"] == "No price was visible anywhere."
 
 
-def test_a_report_says_what_they_came_for_and_never_saw():
-    """The answer to "why did they not click the thing that was right there",
-    which is the question a usability report exists to answer."""
-    findings = JobExecutor._pain_points_from_perception([_perception_journey()])
-    missed = [f for f in findings if f["source"] == "perception.missed"]
+def test_a_compliant_element_missed_by_one_rare_profile_is_not_called_a_defect():
+    """The rule that keeps the report believable. A run that happened to include
+    one very short-sighted profile must not turn a compliant page into a failing
+    one -- so it is said, and kept out of the numbered problems."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[PASSES_WCAG], eyes=RARE_EYES)])
+    finding = findings[0]
 
-    assert len(missed) == 1
-    finding = missed[0]
-    assert "From EUR 49 per month" in finding["title"]
-    # Why they missed it: which scan pattern, how few fixations, and what about
-    # this person chose it.
-    assert "spotted" in finding["summary"] and "6 fixations" in finding["summary"]
-    assert "little patience" in finding["summary"]
-    # A prominence fix, and explicitly not a copy fix -- the element was readable.
-    assert "prominence problem, not a wording one" in finding["recommendation"]
+    assert finding["severity"] == "info", "never ranked or counted among the problems"
+    assert finding["category"] == "profile-specific"
+    assert "one low-vision profile only" in finding["title"]
+    assert "0.35" in finding["summary"], "and it says which profile"
+    assert "No change is required for compliance" in finding["recommendation"]
+    assert JobExecutor._SEVERITY_RANK["info"] < JobExecutor._SEVERITY_RANK["low"]
+    assert "info" in JobExecutor._NOT_A_PROBLEM
 
 
-def test_the_same_element_missed_all_visit_is_one_finding_not_forty():
-    """A low-contrast caption is unreadable on every step of a visit. Reported
+def test_a_compliant_element_missed_by_several_profiles_is_a_finding_about_the_page():
+    """Consistency is what turns one visitor's trouble into evidence about the
+    element -- and it is still not a compliance claim."""
+    findings = JobExecutor._pain_points_from_perception([
+        _perception_journey("r1", "low_vision", RARE_EYES, [PASSES_WCAG], gap="Could not read it."),
+        _perception_journey("r2", "typical", TYPICAL_EYES, [PASSES_WCAG], gap="Hard to make out."),
+        _perception_journey("r3", "hurried", {"acuity": 0.8, "contrastSensitivity": 0.7},
+                            [PASSES_WCAG], gap="Missed the terms."),
+    ])
+    assert len(findings) == 1, "one element, one finding, however many personas met it"
+    finding = findings[0]
+
+    assert finding["severity"] == "medium" and finding["category"] == "legibility"
+    assert finding["affectedPersonas"] == 3
+    assert set(finding["affectedPersonaIds"]) == {"low_vision", "typical", "hurried"}
+    assert "3 different personas" in finding["summary"]
+    assert "about the element rather than about one visitor" in finding["summary"]
+    assert "Meeting the minimum is not the same as being easy to read" in finding["recommendation"]
+
+
+def test_a_typical_profile_missing_something_compliant_is_a_hint_not_an_info_note():
+    """Only an unusual profile earns the "not a defect" downgrade. A typical
+    visitor failing to read compliant text is worth more attention, not less."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[PASSES_WCAG], eyes=TYPICAL_EYES)])
+    assert findings[0]["severity"] == "low"
+    assert findings[0]["category"] == "legibility"
+
+
+def test_something_they_came_for_and_missed_gets_worse_as_more_people_miss_it():
+    one = JobExecutor._pain_points_from_perception(
+        [_perception_journey(missed=[MISSED_PRICE])])[0]
+    assert one["severity"] == "medium" and one["category"] == "findability"
+    assert "prominence problem, not a wording one" in one["recommendation"]
+
+    several = JobExecutor._pain_points_from_perception([
+        _perception_journey("r1", "a", RARE_EYES, missed=[MISSED_PRICE]),
+        _perception_journey("r2", "b", TYPICAL_EYES, missed=[MISSED_PRICE]),
+    ])[0]
+    assert several["severity"] == "high", "several people coming for it and not seeing it is worse"
+    assert "2 different personas missed it" in several["summary"]
+
+
+def test_the_same_element_across_every_step_and_run_is_one_finding():
+    """A low-contrast caption is unreadable on every step of every visit. Reported
     per step it would bury everything else in the report."""
-    journey = _perception_journey()
-    journey["timeline"] = journey["timeline"] * 20
-    findings = JobExecutor._pain_points_from_perception([journey])
-
-    assert len(findings) == 2, "one per element, however many steps saw it"
-    assert any("40 step(s)" in f["summary"] for f in findings), \
-        "and it says how persistent it was, since that is the evidence"
+    findings = JobExecutor._pain_points_from_perception([
+        _perception_journey("r1", "a", RARE_EYES, [FAILS_WCAG], steps=20),
+        _perception_journey("r2", "b", TYPICAL_EYES, [FAILS_WCAG], steps=20),
+    ])
+    assert len(findings) == 1
+    assert "40 step(s)" in findings[0]["evidence"]
+    assert findings[0]["affectedPersonas"] == 2
 
 
 def test_a_run_that_saw_everything_produces_no_perception_findings():
     """The model has to find real problems, not make every page a defect."""
-    clean = _perception_journey(notPerceived=[], missedWhatTheyCameFor=[])
-    assert JobExecutor._pain_points_from_perception([clean]) == []
-    # And a run from before perception existed carries no such events at all.
+    assert JobExecutor._pain_points_from_perception([_perception_journey()]) == []
     assert JobExecutor._pain_points_from_perception([{"runId": "old", "timeline": []}]) == []
 
 
 def test_an_element_with_no_name_is_still_reportable():
-    """Not everything on a page has an accessible name, and "" as a title would
-    be worse than useless to a reader."""
-    nameless = _perception_journey(notPerceived=[
-        {"selector": "div.badge", "role": "img", "name": "",
-         "box": {"x": 950, "y": 760}, "reason": "the region is a single flat colour"}])
-    finding = JobExecutor._pain_points_from_perception([nameless])[0]
+    nameless = {**FAILS_WCAG, "selector": "div.badge", "role": "img", "name": "",
+                "box": {"x": 950, "y": 760, "width": 300, "height": 100}}
+    finding = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[nameless])])[0]
     assert "950,760" in finding["title"], "located by where it is when it cannot be named"
+
+
+def test_an_eyesight_finding_cites_the_page_as_they_actually_saw_it():
+    """A clean screenshot beside "they could not read this" invites the reader to
+    disagree with the finding, correctly."""
+    finding = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG],
+                             seen_image="/tmp/aux/shots/003-as-they-saw-it.jpg")])[0]
+    assert finding["evidenceScreenshot"] == "/tmp/aux/shots/003-as-they-saw-it.jpg"
+    assert finding["evidenceIsAsTheySawIt"] is True
+    # And the box, so the report can crop to the element rather than show the page.
+    assert finding["elementBox"] == FAILS_WCAG["box"]
 
 
 def test_the_summary_names_the_worst_finding_rather_than_only_counting():
@@ -1950,26 +2012,10 @@ def test_the_summary_of_a_clean_run_does_not_invent_a_worst_finding():
     assert "0 usability issue(s)" in summary
 
 
-def test_an_eyesight_finding_cites_the_page_as_they_actually_saw_it():
-    """A clean screenshot beside "they could not read this" invites the reader to
-    disagree with the finding, correctly. The degraded capture is the only honest
-    image, and the run writes it for exactly the steps that found something
-    unreadable."""
-    journey = _perception_journey()
-    for event in journey["timeline"]:
-        if event["type"] == "persona.perception":
-            event["data"]["seenImage"] = "/tmp/aux/shots/003-as-they-saw-it.jpg"
-
-    findings = JobExecutor._pain_points_from_perception([journey])
-    unreadable = [f for f in findings if f["source"] == "perception.notPerceived"][0]
-    assert unreadable["evidenceScreenshot"] == "/tmp/aux/shots/003-as-they-saw-it.jpg"
-    assert unreadable["evidenceIsAsTheySawIt"] is True
-
-
 def test_a_run_from_before_the_degraded_capture_existed_still_reports():
     """Old runs carry no seenImage. The finding is still worth making; it just
     falls back to a run screenshot like every other finding."""
-    findings = JobExecutor._pain_points_from_perception([_perception_journey()])
-    unreadable = [f for f in findings if f["source"] == "perception.notPerceived"][0]
-    assert unreadable["evidenceScreenshot"] is None
-    assert unreadable["evidenceIsAsTheySawIt"] is False
+    finding = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG])])[0]
+    assert finding["evidenceScreenshot"] is None
+    assert finding["evidenceIsAsTheySawIt"] is False

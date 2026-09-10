@@ -191,3 +191,97 @@ def legibility(image: Image.Image, box: dict, margin: int = 12) -> dict:
         reason = "nothing in the region stands out from its background"
     return {"visible": visible, "reason": reason, "ink": round(ink, 4),
             "internalContrast": round(internal, 4), "edgeContrast": round(edge, 4)}
+
+
+# WCAG 2.2 relative-luminance coefficients and the sRGB transfer function. These
+# are the published numbers, not an approximation of them.
+_LUMA = (0.2126, 0.7152, 0.0722)
+_SRGB_KNEE = 0.04045
+
+# Where "the text" and "the background" are taken from inside a region. Extremes
+# would be a single antialiased pixel; the deciles are what a reader's eye
+# integrates over a glyph and the paper behind it.
+_INK_PERCENTILE = 10
+_PAPER_PERCENTILE = 90
+
+# WCAG 2.2 1.4.3 (AA): 4.5:1 for body text, 3:1 for large text and for the
+# non-text contrast of a control's boundary (1.4.11).
+WCAG_AA_TEXT = 4.5
+WCAG_AA_LARGE = 3.0
+
+# 1.4.3 calls text large at 18pt, or 14pt bold -- 24px and 18.66px at the usual
+# 96dpi. Height is the only thing a box gives us, so it stands in for size.
+LARGE_TEXT_PX = 24.0
+
+# How far outside a solid region to look for what it sits on.
+_SURROUND_PX = 12
+
+
+def relative_luminance(pixels: np.ndarray) -> np.ndarray:
+    """WCAG relative luminance for an array of sRGB values in 0..255."""
+    channels = pixels.astype(np.float32) / 255.0
+    linear = np.where(channels <= _SRGB_KNEE, channels / 12.92,
+                      ((channels + 0.055) / 1.055) ** 2.4)
+    return linear[..., 0] * _LUMA[0] + linear[..., 1] * _LUMA[1] + linear[..., 2] * _LUMA[2]
+
+
+def contrast_ratio(image: Image.Image, box: dict) -> dict:
+    """The rendered contrast of one element, as WCAG defines it.
+
+    Measured on the page as drawn, deliberately **not** on the degraded capture.
+    That is the whole point of having it: whether a persona with 0.35 acuity could
+    read something is a fact about that persona, and a report cannot responsibly
+    call it a defect in the site on that basis alone. Whether the element clears
+    4.5:1 is a fact about the site, true for every visitor, and citable.
+
+    So this is the objective half of an accessibility finding. It is also the only
+    half a developer can act on without agreeing about whose eyes to believe.
+    """
+    left, top = max(0, int(box.get("x", 0))), max(0, int(box.get("y", 0)))
+    right = min(image.width, int(left + max(1, box.get("width", 0))))
+    bottom = min(image.height, int(top + max(1, box.get("height", 0))))
+    if right <= left or bottom <= top:
+        return {"ratio": None, "passes": None, "required": None, "largeText": False}
+
+    rgb = image.convert("RGB")
+    luminance = relative_luminance(np.asarray(rgb.crop((left, top, right, bottom))))
+    ink = float(np.percentile(luminance, _INK_PERCENTILE))
+    paper = float(np.percentile(luminance, _PAPER_PERCENTILE))
+
+    # A region of one flat colour has no internal contrast to measure, and taking
+    # its deciles gives 1.0:1 for a solid black button on white -- which reads as
+    # the worst possible result for one of the most legible things on a page. That
+    # is not a bug in the arithmetic, it is the wrong question: a solid control has
+    # no text of its own, and what WCAG asks about it (1.4.11, non-text contrast)
+    # is its boundary against what surrounds it.
+    against = "text against its own background"
+    if abs(paper - ink) < 0.01:
+        # The bands outside the box, not the expanded box: a 240x60 control sits
+        # inside a 264x84 expansion, so it is 65% of those pixels and their median
+        # is the control itself. Measured that way a solid green button on white
+        # came back 1.0:1 -- the worst possible score for something perfectly
+        # legible. The same trap as measuring edge contrast in legibility().
+        bands = []
+        for crop in ((left, max(0, top - _SURROUND_PX), right, top),                       # above
+                     (left, bottom, right, min(rgb.height, bottom + _SURROUND_PX)),        # below
+                     (max(0, left - _SURROUND_PX), top, left, bottom),                     # left
+                     (right, top, min(rgb.width, right + _SURROUND_PX), bottom)):          # right
+            if crop[2] > crop[0] and crop[3] > crop[1]:
+                bands.append(relative_luminance(np.asarray(rgb.crop(crop))).ravel())
+        if not bands:
+            return {"ratio": None, "passes": None, "required": None, "largeText": False,
+                    "measured": "a flat region with nothing around it to compare against"}
+        ink, paper = float(np.median(luminance)), float(np.median(np.concatenate(bands)))
+        against = "a solid region against what surrounds it"
+
+    lighter, darker = max(ink, paper), min(ink, paper)
+    ratio = (lighter + 0.05) / (darker + 0.05)
+
+    # 1.4.11 asks 3:1 of a control's boundary, whatever its size.
+    if against.startswith("a solid"):
+        required, large = WCAG_AA_LARGE, False
+    else:
+        large = float(box.get("height", 0)) >= LARGE_TEXT_PX
+        required = WCAG_AA_LARGE if large else WCAG_AA_TEXT
+    return {"ratio": round(float(ratio), 2), "required": required,
+            "passes": bool(ratio >= required), "largeText": large, "measured": against}

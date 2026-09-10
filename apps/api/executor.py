@@ -598,7 +598,11 @@ class JobExecutor:
         are called out by name when they occur, because a reader will not know to
         look for them.
         """
-        real = [finding for finding in findings if finding.get("title") != "No pain points detected"]
+        real = [finding for finding in findings
+                if finding.get("title") != "No pain points detected"
+                and str(finding.get("severity")) not in JobExecutor._NOT_A_PROBLEM]
+        noted = [finding for finding in findings
+                 if str(finding.get("severity")) in JobExecutor._NOT_A_PROBLEM]
         blocking = [finding for finding in real
                     if str(finding.get("severity")) in {"critical", "high"}]
         parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) "
@@ -619,6 +623,12 @@ class JobExecutor:
         if missed:
             parts.append(f"{len(missed)} thing(s) a user came for were readable and on screen, "
                          "and were never looked at -- a prominence problem rather than a wording one.")
+        if noted:
+            # Said, and deliberately not counted: the page is compliant in these
+            # places and one unusual profile had trouble, which is worth knowing
+            # and is not a defect.
+            parts.append(f"{len(noted)} further observation(s) apply to one unusual profile each "
+                         "rather than to the site.")
         if preserve:
             parts.append(f"{len(preserve)} design decision(s) are working and should be preserved.")
         return " ".join(parts)
@@ -703,119 +713,244 @@ class JobExecutor:
             raise RuntimeError(f"JourneyTest run failed: {message}")
         return {**journey, "harnessError": message}
 
+    # A profile far enough from the population norm that one of them failing to
+    # read something is not, on its own, evidence about the site. Roughly the
+    # bottom few percent of corrected vision -- not "wears glasses".
+    _RARE_ACUITY = 0.45
+    _RARE_CONTRAST = 0.35
+
     @staticmethod
-    def _pain_points_from_perception(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """Findings from what the persona's eyes actually resolved on the page.
+    def _profile_is_a_small_minority(eyes: dict[str, Any]) -> bool:
+        """Whether these eyes are unusual enough to need corroborating evidence."""
+        try:
+            acuity = float(eyes.get("acuity", 1.0))
+            contrast = float(eyes.get("contrastSensitivity", 1.0))
+        except (TypeError, ValueError):
+            return False
+        return acuity <= JobExecutor._RARE_ACUITY or contrast <= JobExecutor._RARE_CONTRAST
 
-        Two of these exist nowhere else in the report, because no check against
-        the DOM can produce either. A run records them on every step as
-        `persona.perception` (services/journey-worker/node/src/personaDirector.js)
-        and nothing read them, so the pipeline measured two whole classes of
-        defect and then said nothing about them.
+    @staticmethod
+    def _persona_reasoning(journey: dict[str, Any], limit: int = 2) -> list[dict[str, str]]:
+        """What the persona said, in their own words, about not getting what they came for.
 
-          notPerceived   The element is in the accessibility tree and there is
-                         nothing legible where it lives, once this person's
-                         optics have been applied to the capture. Present but
-                         not perceivable, which is an accessibility defect a
-                         contrast checker on the CSS can miss entirely -- it is
-                         measured on the rendered pixels, after blur.
+        A finding is far more use with the reasoning behind it than without, and
+        the run already records it: the reflection names the gap between what was
+        expected and what arrived.
+        """
+        quotes = []
+        for event in journey.get("timeline") or []:
+            if event.get("type") != "persona.reflection":
+                continue
+            data = event.get("data") or {}
+            gap = (data.get("gap") or "").strip()
+            if gap and data.get("matched") != "yes" and gap not in {item["quote"] for item in quotes}:
+                quotes.append({"quote": gap, "personaId": journey.get("profileId")
+                               or journey.get("testerProfileId")})
+            if len(quotes) >= limit:
+                break
+        return quotes
+
+    @classmethod
+    def _pain_points_from_perception(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Findings from what the personas' eyes actually resolved on the page.
+
+        Two classes exist nowhere else in the report, because no check against the
+        DOM can produce either. A run records them on every step as
+        `persona.perception` and nothing read them, so the pipeline measured two
+        whole classes of defect and then said nothing about them.
+
+          notPerceived   In the accessibility tree, and nothing legible where it
+                         lives once this person's optics are applied to the
+                         capture. Present but not perceivable.
 
           missedWhatTheyCameFor
-                         The thing they came for was legible, on screen, and
-                         they never got to it: their patience ran out or
-                         something moving pulled them away. Not a defect in
-                         itself; it is the answer to "why did they not click the
-                         thing that was right there", which is the question a
-                         usability report exists to answer and could not.
+                         Legible, on screen, and never looked at -- the answer to
+                         "why did they not click the thing that was right there".
 
-        Grouped by element rather than by step. The same low-contrast caption is
-        unreadable on every step of a visit, and forty identical findings would
-        bury the rest of the report.
+        What decides whether either is reported, and how, is not the persona.
+        Filing every unreadable element as a high-severity accessibility defect
+        would mean a run that happened to include one very short-sighted profile
+        turned a compliant page into a failing one, and a reader would rightly
+        stop believing the report. So three things are separated:
+
+          * The **rendered contrast ratio**, measured on the page as drawn. This is
+            a fact about the site, true for every visitor, and it is what makes a
+            finding an accessibility defect -- cited against the WCAG threshold
+            that applies, whatever the run's personas happened to be.
+          * **Consistency** across personas. The same element missed by several
+            different profiles is about the page; missed by one is about that one.
+          * **How unusual the profile is.** An element that clears WCAG and was
+            missed only by a profile in the bottom few percent of corrected vision
+            is reported as what it is -- something that profile could not use -- and
+            kept out of the numbered problems, because the page is objectively fine
+            and one rare simulated visitor is not grounds to say otherwise.
+
+        Grouped by element across every run, not per step and not per persona: the
+        same low-contrast caption is unreadable on every step of every visit, and
+        forty identical findings would bury the rest of the report.
         """
-        by_element: dict[tuple, dict[str, Any]] = {}
+        groups: dict[tuple, dict[str, Any]] = {}
         for journey in journeys:
             run_id = journey.get("runId")
             persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            reasoning = cls._persona_reasoning(journey)
             for event in journey.get("timeline") or []:
                 if event.get("type") != "persona.perception":
                     continue
                 data = event.get("data") or {}
                 eyes = data.get("eyes") or {}
                 scan = data.get("scan") or {}
-                # The page as this person's eyes delivered it, written by the run
-                # for exactly the steps that found something unreadable.
                 seen_image = data.get("seenImage")
-                for item in data.get("notPerceived") or []:
-                    key = (run_id, "notPerceived", item.get("selector"))
-                    entry = by_element.setdefault(key, {"seen": 0, "item": item, "eyes": eyes,
-                                                        "scan": scan, "runId": run_id,
-                                                        "personaId": persona_id,
-                                                        "seenImage": seen_image})
-                    entry["seen"] += 1
-                    entry.setdefault("seenImage", seen_image)
-                for item in data.get("missedWhatTheyCameFor") or []:
-                    key = (run_id, "missed", item.get("selector"))
-                    entry = by_element.setdefault(key, {"seen": 0, "item": item, "eyes": eyes,
-                                                        "scan": scan, "runId": run_id,
-                                                        "personaId": persona_id})
-                    entry["seen"] += 1
+                for kind, items in (("notPerceived", data.get("notPerceived") or []),
+                                    ("missed", data.get("missedWhatTheyCameFor") or [])):
+                    for item in items:
+                        key = (kind, item.get("selector"))
+                        group = groups.setdefault(key, {
+                            "kind": kind, "item": item, "steps": 0, "personas": [], "eyes": {},
+                            "scan": scan, "runIds": [], "reasoning": [], "seenImage": None,
+                            "contrast": item.get("contrast") or {},
+                        })
+                        group["steps"] += 1
+                        group["item"] = item
+                        if persona_id and persona_id not in group["personas"]:
+                            group["personas"].append(persona_id)
+                            group["eyes"][persona_id] = eyes
+                            group["reasoning"].extend(reasoning)
+                        if run_id and run_id not in group["runIds"]:
+                            group["runIds"].append(run_id)
+                        group["seenImage"] = group["seenImage"] or seen_image
+                        group["contrast"] = group["contrast"] or item.get("contrast") or {}
 
         findings: list[dict[str, Any]] = []
-        for (run_id, kind, _selector), entry in by_element.items():
-            item, eyes, scan = entry["item"], entry["eyes"], entry["scan"]
-            name = (item.get("name") or "").strip()
-            what = f'"{name[:70]}"' if name else f"the {item.get('role') or 'element'} at "\
-                f"{int((item.get('box') or {}).get('x', 0))},{int((item.get('box') or {}).get('y', 0))}"
-            steps = f"on {entry['seen']} step(s)" if entry["seen"] > 1 else "on one step"
-            if kind == "notPerceived":
-                sight = (f"acuity {eyes.get('acuity')}, contrast sensitivity "
-                         f"{eyes.get('contrastSensitivity')}")
-                blur = f", which blurs the page by {eyes.get('blurPx')}px" if eyes.get("blurPx") else ""
-                findings.append({
-                    "severity": "high",
-                    "category": "accessibility",
-                    "title": f"Not readable to this person: {what}",
-                    "summary": (f"{what} is in the page, and after this person's eyes are applied to "
-                                f"the capture there is nothing legible where it sits: "
-                                f"{item.get('reason') or 'it does not stand out from its background'}. "
-                                f"Measured on the rendered pixels {steps}, for someone with {sight}{blur}."),
-                    "recommendation": ("Raise the contrast between this element and what is behind it, "
-                                       "or its size, until it resolves for this profile. Checking the "
-                                       "declared CSS colours is not enough: this is measured on what "
-                                       "was actually drawn."),
-                    "evidence": (f"internal contrast {item.get('internalContrast')}, "
-                                 f"edge contrast {item.get('edgeContrast')}, ink {item.get('ink')}"),
-                    # Not a screenshot of the page: the page as this person's eyes
-                    # delivered it, which is the only honest image to put beside
-                    # "they could not read this". A clean capture next to that
-                    # claim invites the reader to disagree with it, correctly.
-                    "evidenceScreenshot": entry.get("seenImage"),
-                    "evidenceIsAsTheySawIt": bool(entry.get("seenImage")),
-                    "observation": item.get("reason") or "",
-                    "source": "perception.notPerceived", "runId": run_id,
-                    "personaId": entry["personaId"],
-                })
-            else:
-                findings.append({
-                    "severity": "high",
-                    "category": "findability",
-                    "title": f"On screen and never looked at: {what}",
-                    "summary": (f"{what} is what this person came for, it was legible, and it was in "
-                                f"the viewport -- and they never looked at it {steps}. They scan "
-                                f"{scan.get('pattern') or 'the page'} with a budget of "
-                                f"{scan.get('fixationBudget')} fixations: "
-                                + "; ".join(scan.get("why") or []) + "."),
-                    "recommendation": ("Put it where this scan pattern actually goes, or make it "
-                                       "compete: this is a prominence problem, not a wording one. "
-                                       "The element is present and readable, so adding copy about it "
-                                       "elsewhere will not help."),
-                    "evidence": f"goal match {item.get('goalAffinity')}, never fixated {steps}",
-                    "evidenceScreenshot": None,
-                    "observation": "",
-                    "source": "perception.missed", "runId": run_id,
-                    "personaId": entry["personaId"],
-                })
+        for group in groups.values():
+            finding = (cls._unreadable_finding(group) if group["kind"] == "notPerceived"
+                       else cls._never_looked_at_finding(group))
+            if finding:
+                findings.append(finding)
         return findings
+
+    @staticmethod
+    def _element_phrase(item: dict[str, Any]) -> str:
+        name = (item.get("name") or "").strip()
+        if name:
+            return f'"{name[:70]}"'
+        box = item.get("box") or {}
+        return f"the {item.get('role') or 'element'} at {int(box.get('x', 0))},{int(box.get('y', 0))}"
+
+    @classmethod
+    def _unreadable_finding(cls, group: dict[str, Any]) -> dict[str, Any] | None:
+        """An element nobody could read, classified by what actually justifies it."""
+        item, contrast = group["item"], group["contrast"] or {}
+        what = cls._element_phrase(item)
+        personas = group["personas"]
+        ratio, required = contrast.get("ratio"), contrast.get("required")
+        fails_wcag = contrast.get("passes") is False
+        rare_only = (len(personas) <= 1
+                     and all(cls._profile_is_a_small_minority(eyes)
+                             for eyes in group["eyes"].values() or [{}]))
+
+        where = (f" Seen by {len(personas)} of the personas that visited."
+                 if len(personas) > 1 else "")
+        measured = (f" Its rendered contrast is {ratio}:1 against a WCAG AA minimum of "
+                    f"{required}:1, measured on the page as drawn"
+                    f" ({contrast.get('measured')})." if ratio else "")
+
+        if fails_wcag:
+            # A fact about the site rather than about whoever happened to look, so
+            # it stands on its own however rare the profile that surfaced it.
+            severity, category = "high", "accessibility"
+            title = f"Fails WCAG AA contrast: {what}"
+            summary = (f"{what} does not meet the contrast the guidelines require.{measured}"
+                       f" A persona could not read it at all after their own eyesight was applied "
+                       f"to the capture: {item.get('reason') or 'nothing stands out from its background'}."
+                       f"{where}")
+            recommendation = (f"Raise the contrast to at least {required}:1. This is measured on what "
+                              "the browser actually drew, so checking the declared CSS colours is not "
+                              "enough -- an overlay, a gradient or an image behind the text will not "
+                              "show up there.")
+        elif len(personas) > 1:
+            # The page clears the guideline and several different people still could
+            # not read it, which is worth saying and is not a compliance claim.
+            severity, category = "medium", "legibility"
+            title = f"Hard to read for several personas: {what}"
+            summary = (f"{what} clears the contrast guidelines.{measured} And "
+                       f"{len(personas)} different personas still could not resolve it: "
+                       f"{item.get('reason') or 'nothing stands out from its background'}. "
+                       "Consistent across profiles, so it is about the element rather than about "
+                       "one visitor.")
+            recommendation = ("Meeting the minimum is not the same as being easy to read. Increase the "
+                              "size or the weight, or give it more contrast than the guideline floor.")
+        elif rare_only:
+            # The honest version of a finding that cannot carry more weight than
+            # this: kept out of the numbered problems, and still said.
+            eyes = next(iter(group["eyes"].values()), {})
+            severity, category = "info", "profile-specific"
+            title = f"Unreadable for one low-vision profile only: {what}"
+            summary = (f"{what} meets the contrast guidelines.{measured} One persona "
+                       f"could not read it -- acuity {eyes.get('acuity')}, contrast sensitivity "
+                       f"{eyes.get('contrastSensitivity')}, a profile in the bottom few percent of "
+                       "corrected vision. No other persona had trouble with it. This is reported as "
+                       "what it is rather than as a defect: the page is compliant here, and one rare "
+                       "simulated visitor is not evidence that it is not.")
+            recommendation = ("No change is required for compliance. If this audience matters to you, "
+                              "the element would need to go well beyond the minimum.")
+        else:
+            severity, category = "low", "legibility"
+            title = f"One persona could not read: {what}"
+            summary = (f"{what} meets the contrast guidelines.{measured} One persona "
+                       f"still could not resolve it: {item.get('reason') or 'it does not stand out'}. "
+                       "Only one, so treat it as a hint rather than a finding.")
+            recommendation = "Worth a look if it is important; not yet evidence of a problem."
+
+        return {
+            "severity": severity, "category": category, "title": title, "summary": summary,
+            "recommendation": recommendation,
+            "evidence": (f"contrast {ratio}:1 (needs {required}:1); internal "
+                         f"{item.get('internalContrast')}, edge {item.get('edgeContrast')}, "
+                         f"seen on {group['steps']} step(s) by {len(personas) or 1} persona(s)"),
+            # The page as they saw it, not a clean capture: a clean one beside
+            # "they could not read this" invites the reader to disagree, correctly.
+            "evidenceScreenshot": group["seenImage"],
+            "evidenceIsAsTheySawIt": bool(group["seenImage"]),
+            "elementBox": item.get("box"),
+            "contrastRatio": ratio, "wcagRequired": required, "wcagPasses": contrast.get("passes"),
+            "observation": item.get("reason") or "",
+            "personaEvidence": group["reasoning"][:2],
+            "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+            "source": "perception.notPerceived",
+            "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+        }
+
+    @classmethod
+    def _never_looked_at_finding(cls, group: dict[str, Any]) -> dict[str, Any]:
+        """The thing they came for, readable, on screen, and never looked at."""
+        item, scan = group["item"], group["scan"] or {}
+        what = cls._element_phrase(item)
+        personas = group["personas"]
+        together = (f" {len(personas)} different personas missed it, so it is the page rather than "
+                    "one visitor." if len(personas) > 1 else "")
+        return {
+            # Several people coming for a thing and not seeing it is worse than one.
+            "severity": "high" if len(personas) > 1 else "medium",
+            "category": "findability",
+            "title": f"On screen and never looked at: {what}",
+            "summary": (f"{what} is what the persona came for, it was legible, and it was in the "
+                        f"viewport -- and they never looked at it. They scan "
+                        f"{scan.get('pattern') or 'the page'} with a budget of "
+                        f"{scan.get('fixationBudget')} fixations: "
+                        + "; ".join(scan.get("why") or []) + f".{together}"),
+            "recommendation": ("Put it where this scan pattern actually goes, or make it compete: this "
+                               "is a prominence problem, not a wording one. The element is present and "
+                               "readable, so adding copy about it elsewhere will not help."),
+            "evidence": (f"goal match {item.get('goalAffinity')}, never fixated across "
+                         f"{group['steps']} step(s) and {len(personas) or 1} persona(s)"),
+            "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
+            "elementBox": item.get("box"), "observation": "",
+            "personaEvidence": group["reasoning"][:2],
+            "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+            "source": "perception.missed",
+            "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+        }
 
     @staticmethod
     def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -992,10 +1127,19 @@ class JobExecutor:
                 image_bytes = Path(path).read_bytes()
             except OSError:
                 continue
-            crop = cls._screenshot_data_uri(image_bytes)
+            # Crop to the element when the finding knows where it is. A finding
+            # about one unreadable caption, illustrated with the whole page, makes
+            # the reader hunt for what it is talking about -- and on a capture
+            # degraded to that persona's eyesight, hunting is exactly what they
+            # cannot do.
+            box = finding.get("elementBox")
+            crop = cls._crop_element_data_uri(image_bytes, box) if box else None
+            is_region = bool(crop)
+            if not crop:
+                crop = cls._screenshot_data_uri(image_bytes)
             if crop:
                 finding["screenshotCrop"] = crop
-                finding["screenshotIsRegion"] = False
+                finding["screenshotIsRegion"] = is_region
                 finding["screenshotRef"] = path
 
     @staticmethod
@@ -1381,7 +1525,13 @@ class JobExecutor:
         except (OSError, ValueError):
             return None
 
-    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    # "info" sits below "low" on purpose. It is what a finding is downgraded to
+    # when the page is objectively compliant and only one unusual profile had
+    # trouble -- said out loud, and never counted or ranked among the problems.
+    _SEVERITY_RANK = {"info": -1, "low": 0, "medium": 1, "high": 2, "critical": 3}
+
+    # Severities that are not usability issues and must not be counted as such.
+    _NOT_A_PROBLEM = frozenset({"info"})
 
     @classmethod
     def _prepare_run_session(cls, job, data, personas):

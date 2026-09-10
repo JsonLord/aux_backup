@@ -27,7 +27,7 @@ from PIL import Image, UnidentifiedImageError
 
 from .goal import affinity as goal_affinity
 from .goal import terms as goal_terms
-from .optics import Eyes, legibility, see
+from .optics import Eyes, contrast_ratio, legibility, see
 from .salience import motion_map, salience_of
 from .scanpath import choose_pattern, scan
 
@@ -108,7 +108,14 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         readable = legibility(seen, box)
         entry = {"selector": element.get("selector") or element.get("elementId"),
                  "role": element.get("role", ""), "name": element.get("name") or element.get("text") or "",
-                 "box": box}
+                 "box": box,
+                 # Measured on the page as drawn, not on the degraded capture.
+                 # Whether *this* persona could read something is a fact about the
+                 # persona; whether the element clears 4.5:1 is a fact about the
+                 # site, true for every visitor, and the only half of an
+                 # accessibility finding a developer can act on without first
+                 # agreeing whose eyes to believe.
+                 "contrast": contrast_ratio(page, box)}
         if not readable["visible"]:
             not_perceived.append({**entry, **readable})
             continue
@@ -133,14 +140,15 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                  "motionAvailable": motion is not None},
         "perceived": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
                        "box": item["box"], "salience": item["salience"], "order": item["order"],
-                       "goalAffinity": item["goalAffinity"],
+                       "goalAffinity": item["goalAffinity"], "contrast": item["contrast"],
                        "drawnByMotion": item["drawnByMotion"]} for item in fixations],
         # In the tree, nothing legible where it lives.
         "notPerceived": not_perceived,
         # Legible, but this person never got to it.
         "notLookedAt": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
                          "box": item["box"], "salience": item["salience"],
-                         "goalAffinity": item["goalAffinity"]} for item in not_looked_at],
+                         "goalAffinity": item["goalAffinity"],
+                         "contrast": item["contrast"]} for item in not_looked_at],
         "counts": {"elements": len(elements), "legible": len(candidates),
                    "fixated": len(fixations), "notPerceived": len(not_perceived),
                    "notLookedAt": len(not_looked_at)},
