@@ -50,15 +50,32 @@ def test_space_demo_exposes_visible_browser_progress_and_named_api():
     assert len(named_dependencies[0]["outputs"]) == 4
 
 
-def test_every_journey_model_follows_the_one_the_space_is_configured_with():
-    """The Space runs against a router that picks the model itself, where the only
-    valid id is "auto". A second model id hardcoded anywhere -- a Blablador alias,
-    say -- would 400 with model_not_found on the endpoint that actually serves it."""
+def test_a_model_id_is_only_ever_named_alongside_the_endpoint_that_serves_it():
+    """Two providers now, so the failure to guard against is a model id sent to
+    the wrong one. "auto" exists only on the freellmapi router and 400s with
+    model_not_found anywhere else; a Blablador alias is the same mistake in
+    reverse. Naming one is fine -- naming one without its endpoint is not."""
     start = Path("spaces/aux-live/start-live.sh").read_text()
+
+    # The journey acts as "auto" on the primary router.
     assert 'export OPENAI_MODEL="${OPENAI_MODEL:-auto}"' in start
-    # The journey and its reflection both follow it rather than naming their own.
     assert 'export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-auto}}"' in start
-    assert 'export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-${OPENAI_MODEL}}"' in start
-    # And no provider-specific alias is baked into the deployment script.
-    for alias in ("alias-fast", "alias-code", "alias-large"):
-        assert alias not in start, f"{alias} is a Blablador id and does not exist on the Space's router"
+
+    # Reflecting and judging adherence run on a named small model, and therefore
+    # must carry the endpoint that has it.
+    assert 'export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-alias-fast}"' in start
+    assert "JOURNEY_REFLECT_BASE_URL" in start, (
+        "alias-fast does not exist on the primary router; naming it without its "
+        "own base URL is a 400 on every step")
+    assert "helmholtz-blablador" in start
+
+    # Its key comes from Blablador, never from the primary router. The wrong
+    # token is a 401 the adherence gate swallows by design, so the run would look
+    # fine while nothing ever checked the persona against itself.
+    assert 'export JOURNEY_REFLECT_API_KEY="${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}"' in start
+    assert 'export BLABLADOR_API_KEY="${BLABLADOR_API_KEY:-}"' in start, (
+        "BLABLADOR_API_KEY must not fall back to the primary router's token")
+
+    # And each endpoint is defaulted before anything reads it.
+    assert start.index("export BLABLADOR_BASE_URL=") < start.index("export JOURNEY_REFLECT_BASE_URL=")
+    assert start.index("export BLABLADOR_API_KEY=") < start.index("export JOURNEY_REFLECT_API_KEY=")
