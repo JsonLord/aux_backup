@@ -3016,7 +3016,9 @@ fixture absent from this sandbox, unrelated to any of the above.
 
 ### 53.2 What closes each remaining gap
 
-Ordered by value per unit of work, not by parameter number.
+Ordered by value per unit of work, not by parameter number. Each is tracked as a
+task, and the numbering below is the order to take them in rather than the task
+ids: 1 is #32, 2 is #33, 3 is #34, 4 is #35, 5 is #24, 6 is #36, 7 is #22.
 
 **1. Run the GEPA compile against a real corpus** — closes the last of #4.
 `services/persona_service/actor_program.py` is built and unproven: the judge is
