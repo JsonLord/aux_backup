@@ -8,6 +8,7 @@ const { setActiveSession } = require("./agentBrowser");
 const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
 const { configureStreamPort, startViewportStream, stopViewportStream } = require("./viewportStream");
 const { cursorKeeperStatus, startCursorKeeper, stopCursorKeeper } = require("./cursorKeeper");
+const { revealKeeperStatus, startRevealKeeper, stopRevealKeeper } = require("./revealKeeper");
 
 function safeId(value, fallback) {
   const normalized = String(value || fallback).replace(/[^a-zA-Z0-9._-]/g, "-");
@@ -235,6 +236,12 @@ async function runWithJourneyTest(input) {
   // `eval` is the one injection path 0.31.1 honours, and a navigation takes the
   // overlay with the old document, so it has to be put back rather than set once.
   startCursorKeeper();
+  // Scroll each new document through once, so content gated on
+  // IntersectionObserver has fired before anything captures the page. Without it
+  // a full-page screenshot paints the below-fold sections in their un-revealed
+  // state -- measured at 26 of 28 revealable elements still hidden -- and both
+  // the model and the report end up reasoning about blank rectangles.
+  startRevealKeeper();
   let result;
   try {
     result = await core.runJourney({
@@ -254,6 +261,7 @@ async function runWithJourneyTest(input) {
     // going away would have it evaluate into nothing every two seconds, and
     // leaving the socket open would serve a dead run's last frame to the next.
     stopCursorKeeper();
+    stopRevealKeeper();
     stopViewportStream();
     setActiveSession("");
   }
@@ -264,6 +272,9 @@ async function runWithJourneyTest(input) {
     // be able to say which it saw.
     authenticatedSession: Boolean(statePath),
     cursorOverlay: { ...cursorOverlay, keeper: cursorKeeperStatus() },
+    // Whether the pages this run captured had been scrolled through first, and
+    // what was still hidden after. A reader judging a screenshot needs to know.
+    revealPass: revealKeeperStatus(),
     reasoning: takeRunReasoning(captureId) };
 }
 
