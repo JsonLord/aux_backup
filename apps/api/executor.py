@@ -61,6 +61,20 @@ _PROBLEM_MARKERS = re.compile(
     r"contrast ratio|unlabel\w*|unreadable|illegible|inaccessible)\b", re.I)
 
 
+def _reads_as_timeout(error: BaseException) -> bool:
+    """Whether this urllib failure is "the answer did not arrive in time".
+
+    A read timeout surfaces as socket.timeout, which is TimeoutError since 3.10;
+    a connect timeout is wrapped in URLError with the same object as its reason.
+    Anything else -- refused, DNS, reset -- means the worker was never going to
+    answer, and there is nothing on disk to go looking for.
+    """
+    if isinstance(error, TimeoutError):
+        return True
+    reason = getattr(error, "reason", None)
+    return isinstance(reason, TimeoutError)
+
+
 def _reads_as_praise(title: str, description: str) -> bool:
     """True when a verdict finding describes a design decision that works.
 
@@ -252,18 +266,16 @@ class JobExecutor:
             try:
                 for persona in personas:
                     run_identity = issued.get(persona.get("id")) if issued else None
-                    payload = json.dumps({"runId": f"{job['job_id']}_{persona.get('id', len(journeys))}", "url": data.get("url"),
+                    run_id = f"{job['job_id']}_{persona.get('id', len(journeys))}"
+                    payload = json.dumps({"runId": run_id, "url": data.get("url"),
                         "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
                         **({"sessionStatePath": session_state_path} if session_state_path else {}),
                         **({"identity": run_identity} if run_identity else {})}).encode()
                     call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
                     try:
-                        with request.urlopen(call, timeout=float(os.getenv("JOURNEY_RUN_TIMEOUT", "600"))) as response:
+                        with request.urlopen(call, timeout=self._journey_run_timeout()) as response:
                             journey = json.loads(response.read())
-                            if journey.get("runStatus") == "error" or journey.get("error"):
-                                message = (journey.get("error") or {}).get("message", "unknown JourneyTest error")
-                                raise RuntimeError(f"JourneyTest run failed: {message}")
-                            journeys.append(journey)
+                            journeys.append(self._usable_journey(journey))
                     except request.HTTPError as error:
                         detail = error.read().decode("utf-8", errors="replace")[:2000]
                         if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
@@ -275,6 +287,26 @@ class JobExecutor:
                                 "allow_irreversible_actions: true (API) if the task is genuinely meant to "
                                 f"perform it. Raw detail: {detail}") from error
                         raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
+                    except (TimeoutError, request.URLError) as error:
+                        # Ordered after HTTPError, which subclasses URLError -- a
+                        # rejected run must keep its own message.
+                        if not _reads_as_timeout(error):
+                            raise
+                        # The run itself is still going and will still write its
+                        # result to disk; only this side of the socket gave up. The
+                        # artifact tree is reachable from here whenever the API and
+                        # the worker share a filesystem, which is how the Space runs
+                        # them -- so read the verdict from there rather than throw it
+                        # away with the connection.
+                        salvaged = self._journey_from_disk(run_id)
+                        if salvaged is None:
+                            raise RuntimeError(
+                                f"Journey worker did not answer within {self._journey_run_timeout():.0f}s "
+                                f"and no result for {run_id} was found on disk. Raise JOURNEY_RUN_TIMEOUT "
+                                f"if runs against this target legitimately take longer.") from error
+                        journeys.append(self._usable_journey(
+                            {**salvaged, "profileId": salvaged.get("profileId") or persona.get("id"),
+                             "simulationProfile": salvaged.get("simulationProfile") or persona}))
             finally:
                 # The session file is a live login. It exists for the runs that
                 # need it and not a moment longer -- including when one of them
@@ -297,7 +329,13 @@ class JobExecutor:
             preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys)
                                               + self._praise_as_strengths(vision_praise))
                         + self._preserved_from_verdicts(journeys))
-            evidence_language, journey_status = "observed", "completed"
+            # A run kept by _usable_journey() saw real pages but did not get to the
+            # end of the journey. Saying "completed" about it would overstate the
+            # coverage behind every finding below, so the status carries the
+            # difference and the limitation names what went wrong.
+            degraded = [journey for journey in journeys if journey.get("harnessError")]
+            evidence_language = "observed"
+            journey_status = "partial" if degraded else "completed"
             limitations = [
                 "Findings are JourneyTest's own evidence-grounded verdict (blockers/uxFindings/"
                 "suggestedImprovements/failed pass-criteria) from a real browser run against the "
@@ -319,6 +357,16 @@ class JobExecutor:
                     "critical_pain_points reflect JourneyTest's own task-completion verdict only, not a "
                     "deeper visual/accessibility critique of the screenshots."
                 )
+            for journey in degraded:
+                persona_id = journey.get("profileId") or journey.get("testerProfileId") or "unknown persona"
+                verdict_note = ("its verdict was recorded before the failure and is included"
+                                if journey.get("verdict")
+                                else "no verdict was reached, so this run contributes screenshots only")
+                limitations.append(
+                    f"The run for {persona_id} did not finish cleanly: {journey['harnessError']}. "
+                    f"The evidence it had already collected is real and is used, but the journey was cut "
+                    f"short -- {verdict_note}. Findings from this run cover only what it reached."
+                )
         else:
             findings = [{"severity": "medium", "category": "ux", "title": f"Validate task clarity: {task}",
                 "summary": "", "evidence": "Inferred from the configured task; JOURNEY_WORKER_URL is not "
@@ -330,9 +378,18 @@ class JobExecutor:
                            "browser evidence was collected, so these findings are inferred from "
                            "the configured task text alone."]
         if worker_url and not findings:
-            findings.append({"severity": "low", "category": "ux", "title": "No pain points detected",
-                "summary": "Neither JourneyTest's verdict nor the vision-based UX critique reported "
-                           "any blockers, UX findings, or failed pass criteria for the configured tasks.",
+            # "Nothing found" and "the run never got far enough to find anything"
+            # look identical from here, and only one of them is a clean bill of
+            # health. When every run was cut short, say which one this is.
+            cut_short = journey_status == "partial" and len(degraded) == len(journeys)
+            findings.append({"severity": "low", "category": "ux",
+                "title": "Journey ended early -- no findings collected" if cut_short else "No pain points detected",
+                "summary": ("Every run was cut short before it produced a verdict, and the vision critique "
+                            "found nothing in the screenshots it reached. This is not a clean result: the "
+                            "tasks were not fully exercised. See limitations for what went wrong."
+                            if cut_short else
+                            "Neither JourneyTest's verdict nor the vision-based UX critique reported "
+                            "any blockers, UX findings, or failed pass criteria for the configured tasks."),
                 "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
                 "source": "verdict"})
         # A harness failure is real but is not a usability finding about the product;
@@ -530,6 +587,86 @@ class JobExecutor:
         if preserve:
             parts.append(f"{len(preserve)} design decision(s) are working and should be preserved.")
         return " ".join(parts)
+
+    @staticmethod
+    def _journey_run_timeout() -> float:
+        """How long to wait for one Journey run before giving up on the socket.
+
+        The old 600s default was below every real measurement taken against this
+        stack: live runs of the same two-task journey finished in 855s and 1159s.
+        A default that expires mid-run turns a working pipeline into a job that
+        fails ten minutes in, so it is set past what runs actually take, and
+        JOURNEY_RUN_TIMEOUT still overrides it for slower or faster targets.
+        """
+        try:
+            return float(os.getenv("JOURNEY_RUN_TIMEOUT", "1800"))
+        except (TypeError, ValueError):
+            return 1800.0
+
+    @staticmethod
+    def _journey_artifact_root() -> Path:
+        """Where the worker writes runs -- the same resolution the worker itself uses
+        (services/journey-worker/node/src/journeytest.js)."""
+        return Path(os.getenv("JOURNEY_ARTIFACT_ROOT", "/tmp/aux-journeys"))
+
+    @classmethod
+    def _journey_from_disk(cls, run_id: str) -> dict[str, Any] | None:
+        """The run's own result file, when the HTTP answer never arrived.
+
+        journeytest-core writes `<root>/<startedAt>-<runId>/run.json` as the run
+        ends, so a verdict exists on disk whether or not the client is still
+        listening. Both the directory and the file's own `runId` carry that
+        timestamp prefix (a live file records "2026-09-10T00-33-40-422Z-live_fw_final"
+        for a run submitted as "live_fw_final"), so the id we sent is a suffix of
+        the one on disk, never an exact match. Newest first, because a re-run of the
+        same id writes a second directory beside the first.
+        """
+        root = cls._journey_artifact_root()
+        try:
+            candidates = sorted((path for path in root.glob(f"*{run_id}/run.json")),
+                                key=lambda path: path.stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        for candidate in candidates:
+            try:
+                result = json.loads(candidate.read_text())
+            except (OSError, ValueError):
+                continue
+            recorded = result.get("runId") if isinstance(result, dict) else None
+            if isinstance(recorded, str) and (recorded == run_id or recorded.endswith(f"-{run_id}")):
+                return result
+        return None
+
+    @staticmethod
+    def _usable_journey(journey: dict[str, Any]) -> dict[str, Any]:
+        """Keep what a run actually observed, even when the run ended badly.
+
+        A JourneyTest run has three separable outcomes: the browsing itself, the
+        director's verdict, and the bookkeeping around both (stopping the video,
+        writing the report). Previously any `runStatus == "error"` failed the whole
+        job -- so a run that browsed for fourteen minutes, took 37 screenshots and
+        recorded a verdict was discarded because `record stop` could not find
+        ffmpeg. Two live runs were lost exactly that way: their verdicts were
+        already written to run.json while the job reported nothing but the error.
+
+        So the error decides the *framing*, not whether the evidence survives:
+
+        - a verdict, however the run ended, is the run's own answer and is used;
+        - no verdict but screenshots on disk still support the vision critique,
+          which reads pixels rather than the director's conclusion;
+        - neither means nothing was observed, and that is the one case that fails.
+
+        `harnessError` marks a run whose evidence is real but incomplete, so the
+        report can say so rather than presenting a truncated run as a whole one.
+        """
+        error = journey.get("error") or {}
+        if not error and journey.get("runStatus") != "error":
+            return journey
+        message = error.get("message") or "unknown JourneyTest error"
+        screenshots = (journey.get("artifacts") or {}).get("screenshots") or []
+        if not journey.get("verdict") and not screenshots:
+            raise RuntimeError(f"JourneyTest run failed: {message}")
+        return {**journey, "harnessError": message}
 
     @staticmethod
     def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:

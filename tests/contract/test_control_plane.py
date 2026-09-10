@@ -1520,3 +1520,252 @@ def test_verdict_prose_is_still_used_when_no_reasoning_was_captured():
 
     assert sources == {"verdict", "verdict.uxFindings"}
     assert "model.reasoning" not in sources
+
+
+def _run_journey_job(tmp_path, monkeypatch, worker_payload, *, tasks=("Judge the offers",)):
+    """Drive one combined_test job against a stubbed Journey worker and return the report."""
+    import json as json_module
+    from urllib import error as error_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+
+    class WorkerResponse:
+        def __init__(self, request): self.request = request
+        def __enter__(self):
+            payload = json_module.loads(self.request.data)
+            body = dict(worker_payload)
+            body.setdefault("runId", payload["runId"])
+            body.setdefault("profileId", "persona_fw")
+            body.setdefault("simulationProfile", payload["profile"])
+            self.payload = json_module.dumps(body).encode()
+            return self
+        def __exit__(self, *args): pass
+        def read(self): return self.payload
+
+    def urlopen(call, timeout):
+        # The vision stage has its own worker and its own URL. It is best-effort by
+        # design, so an unreachable one exercises the Journey path on its own.
+        if "/v1/runs" not in call.full_url:
+            raise error_module.URLError("vision worker not configured for this test")
+        return WorkerResponse(call)
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.delenv("EYESON_WORKER_URL", raising=False)
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": list(tasks)},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    report = (json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+              if completed["output_artifacts"] else None)
+    return completed, report
+
+
+def test_run_that_errored_after_recording_its_verdict_is_still_reported(tmp_path, monkeypatch):
+    """A live run browsed for 19 minutes, produced a verdict, and then failed at
+    `agent-browser record stop` because ffmpeg was missing from the image. The
+    verdict was already written to run.json, yet the job reported nothing but the
+    error -- the whole run was thrown away over a bookkeeping step that runs after
+    the browsing is done. The verdict is the run's own answer and must survive."""
+    verdict = {
+        "status": "failed", "confidence": "high", "summary": "The offers were never explained.",
+        "criteria": [{"id": "tasks-completed", "result": "not-met", "explanation": "No pricing was found."},
+                     {"id": "tasks-blocked", "result": "not-met", "explanation": "Nothing blocked the run."}],
+        "blockers": [], "suggestedImprovements": [],
+        "uxFindings": [{"id": "finding-1", "severity": "major", "category": "content",
+                        "title": "Offers are never priced",
+                        "description": "No page states what any plan costs."}],
+    }
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "error",
+        "error": {"message": "agent-browser command failed: record stop -- ffmpeg not found"},
+        "verdict": verdict,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert "Offers are never priced" in {item["title"] for item in report["critical_pain_points"]}
+    # The run is not presented as a whole one: the status and a limitation both
+    # say it was cut short, and the limitation names the failure.
+    assert report["journey_outcome"]["status"] == "partial"
+    assert report["evidence_language"] == "observed"
+    cut = [line for line in report["limitations"] if "did not finish cleanly" in line]
+    assert cut and "ffmpeg not found" in cut[0]
+    assert "its verdict was recorded before the failure and is included" in cut[0]
+
+
+def test_run_that_died_before_any_verdict_keeps_its_screenshots(tmp_path, monkeypatch):
+    """The director's connection dropped 14 minutes in ("Pi director provider error:
+    terminated"), so no verdict was reached -- but 37 screenshots and a video were
+    already on disk. Those are still real evidence for the vision critique, and a
+    report that says "no pain points detected" about them would be a false clean
+    bill of health."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "error",
+        "error": {"message": "Pi director provider error: terminated"},
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png", "/tmp/run/screenshots/002.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert report["journey_outcome"]["status"] == "partial"
+    titles = {item["title"] for item in report["critical_pain_points"]}
+    assert "Journey ended early -- no findings collected" in titles
+    assert "No pain points detected" not in titles
+    cut = [line for line in report["limitations"] if "did not finish cleanly" in line]
+    assert cut and "no verdict was reached" in cut[0]
+
+
+def test_run_that_produced_neither_verdict_nor_evidence_fails_the_job(tmp_path, monkeypatch):
+    """Salvage is not a licence to report on nothing. A run that never reached a
+    page has no evidence to stand on, and a report built from it would be fiction."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "error",
+        "error": {"message": "agent-browser failed to launch: no usable Chromium"},
+        "artifacts": {"screenshots": []},
+    })
+
+    assert completed["status"] == "failed"
+    assert report is None
+    assert "no usable Chromium" in completed["error"]["message"]
+
+
+def test_clean_run_is_still_reported_as_completed(tmp_path, monkeypatch):
+    """The salvage path must not relabel healthy runs."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed",
+        "verdict": {"status": "passed", "confidence": "high", "summary": "All good.",
+                    "criteria": [{"id": "tasks-completed", "result": "met", "explanation": "Done."}],
+                    "blockers": [], "uxFindings": [], "suggestedImprovements": []},
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert report["journey_outcome"]["status"] == "completed"
+    assert not any("did not finish cleanly" in line for line in report["limitations"])
+    assert "No pain points detected" in {item["title"] for item in report["critical_pain_points"]}
+
+
+def test_verdict_is_read_from_disk_when_the_worker_answer_times_out(tmp_path, monkeypatch):
+    """A live two-task journey took 855s and another took 1159s, both past the old
+    600s client timeout. The run keeps going and writes its result to disk either
+    way, so a timed-out socket is not a lost verdict -- the artifact tree is shared
+    between the API and the worker in the Space, and the file is right there."""
+    import json as json_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Judge the offers"]},
+        "idempotency_key": None})
+
+    # The layout journeytest-core actually writes: a timestamp-prefixed directory,
+    # and a runId inside the file that carries the same prefix.
+    run_id = f"{job['job_id']}_persona_fw"
+    root = tmp_path / "journeys"
+    (root / f"2026-09-10T00-33-40-422Z-{run_id}").mkdir(parents=True)
+    (root / f"2026-09-10T00-33-40-422Z-{run_id}" / "run.json").write_text(json_module.dumps({
+        "runId": f"2026-09-10T00-33-40-422Z-{run_id}", "runStatus": "completed",
+        "artifacts": {"screenshots": []},
+        "verdict": {"status": "failed", "confidence": "high", "summary": "No pricing anywhere.",
+                    "criteria": [{"id": "tasks-completed", "result": "not-met", "explanation": "No pricing."}],
+                    "blockers": [{"id": "b1", "severity": "major", "category": "content",
+                                  "title": "Plans are never priced",
+                                  "description": "No page states what a plan costs."}],
+                    "uxFindings": [], "suggestedImprovements": []},
+    }))
+    monkeypatch.setenv("JOURNEY_ARTIFACT_ROOT", str(root))
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+
+    def urlopen(call, timeout):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+    assert "Plans are never priced" in {item["title"] for item in report["critical_pain_points"]}
+    # Salvaged from disk, but the run itself finished cleanly -- nothing to caveat.
+    assert report["journey_outcome"]["status"] == "completed"
+    # The persona the job asked for is re-attached, since the file records the run
+    # and not who the caller was running it as.
+    assert report["journey_outcome"]["runs"][0]["profileId"] == "persona_fw"
+
+
+def test_timeout_with_nothing_on_disk_fails_with_an_actionable_message(tmp_path, monkeypatch):
+    """No file means the run never got to write one. Say what to turn up rather than
+    reporting a bare socket error."""
+    import json as json_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Judge the offers"]},
+        "idempotency_key": None})
+    monkeypatch.setenv("JOURNEY_ARTIFACT_ROOT", str(tmp_path / "empty"))
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen",
+                        lambda call, timeout: (_ for _ in ()).throw(TimeoutError("timed out")))
+
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "failed"
+    assert "JOURNEY_RUN_TIMEOUT" in completed["error"]["message"]
+
+
+def test_a_refused_connection_is_not_treated_as_a_timeout(tmp_path, monkeypatch):
+    """Only "the answer did not arrive in time" justifies going to disk. A refused
+    or unresolvable worker never started a run, and its own error is the useful one."""
+    from urllib import error as error_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Judge the offers"]},
+        "idempotency_key": None})
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen",
+                        lambda call, timeout: (_ for _ in ()).throw(
+                            error_module.URLError(ConnectionRefusedError("connection refused"))))
+
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "failed"
+    assert "refused" in completed["error"]["message"]
+    assert "JOURNEY_RUN_TIMEOUT" not in completed["error"]["message"]
+
+
+def test_journey_run_timeout_default_covers_measured_run_lengths(monkeypatch):
+    """Both live runs of the sample journey outlasted the old 600s default."""
+    monkeypatch.delenv("JOURNEY_RUN_TIMEOUT", raising=False)
+    assert JobExecutor._journey_run_timeout() >= 1159
+    monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "45")
+    assert JobExecutor._journey_run_timeout() == 45
+    monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "not-a-number")
+    assert JobExecutor._journey_run_timeout() >= 1159
