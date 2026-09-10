@@ -23,21 +23,29 @@ def encode(image):
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def glyphs(draw, box, fill, stroke=2, gap=4):
+    """Something text-shaped. A solid bar has no internal structure, and text is
+    legible because it has some -- so a filled rectangle standing in for a
+    paragraph is unreadable, correctly, once text is judged on being readable."""
+    left, top, right, bottom = box
+    for x in range(left, right, gap):
+        draw.rectangle((x, top, min(x + stroke - 1, right), bottom), fill=fill)
+
+
 def page():
     image = Image.new("RGB", (1280, 900), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    draw.rectangle((100, 60, 700, 110), fill=(15, 15, 20))       # a heading
-    draw.rectangle((100, 400, 620, 424), fill=(245, 245, 245))   # a caption's ground
-    draw.rectangle((104, 406, 600, 418), fill=(233, 233, 233))   # grey on grey
-    draw.rectangle((100, 600, 340, 660), fill=(20, 130, 70))     # a button
+    glyphs(draw, (100, 60, 700, 110), (15, 15, 20), stroke=5, gap=11)   # a large heading
+    glyphs(draw, (104, 406, 600, 418), (153, 153, 153))                 # #999 small print
+    draw.rectangle((100, 600, 340, 660), fill=(20, 130, 70))            # a solid button
     return image
 
 
 ELEMENTS = [
     {"selector": "e1", "role": "heading", "name": "The headline",
-     "box": {"x": 100, "y": 60, "width": 600, "height": 50}},
+     "box": {"x": 100, "y": 60, "width": 600, "height": 50}, "fontPx": 40, "fontWeight": 700},
     {"selector": "p@100,400", "role": "text", "name": "Small print about pricing",
-     "box": {"x": 100, "y": 400, "width": 520, "height": 24}},
+     "box": {"x": 100, "y": 400, "width": 520, "height": 24}, "fontPx": 13},
     {"selector": "e2", "role": "button", "name": "Get started",
      "box": {"x": 100, "y": 600, "width": 240, "height": 60}},
 ]

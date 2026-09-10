@@ -56,18 +56,22 @@ def test_the_hunt_finds_the_price_before_it_reads_the_feature_copy():
     """The behaviour this file exists for, measured end to end."""
     image = Image.new("RGB", (1000, 800), (255, 255, 255))
     draw = ImageDraw.Draw(image)
+    # Text-shaped, not solid bars: a filled rectangle has no internal structure,
+    # so it is not readable and must not stand in for a line of copy.
     for top in range(60, 700, 90):
-        draw.rectangle((40, top, 700, top + 40), fill=(35, 35, 35))
+        for x in range(40, 700, 4):
+            draw.rectangle((x, top, x + 1, top + 40), fill=(35, 35, 35))
     buffer = io.BytesIO()
     image.save(buffer, format="PNG")
     encoded = base64.b64encode(buffer.getvalue()).decode("ascii")
 
     elements = [{"selector": f"f{index}", "role": "text",
                  "name": f"Everything you need for step {index} of your workflow.",
-                 "box": {"x": 40, "y": 60 + index * 90, "width": 660, "height": 40}}
+                 "box": {"x": 40, "y": 60 + index * 90, "width": 660, "height": 40},
+                 "fontPx": 16}
                 for index in range(6)]
     elements.append({"selector": "price", "role": "text", "name": "From EUR 49 per month",
-                     "box": {"x": 40, "y": 600, "width": 660, "height": 40}})
+                     "box": {"x": 40, "y": 600, "width": 660, "height": 40}, "fontPx": 22})
 
     hurried = {"patience": 0.1}
     hunting = perceive(image_base64=encoded, elements=elements, behavior=hurried,

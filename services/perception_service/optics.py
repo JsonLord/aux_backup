@@ -90,18 +90,46 @@ def apply_color_vision(image: Image.Image, kind: str) -> Image.Image:
     return Image.fromarray(np.clip(converted, 0, 255).astype(np.uint8))
 
 
-def apply_contrast(image: Image.Image, sensitivity: float) -> Image.Image:
-    """Pull everything toward mid-grey by however much contrast is lost.
+# What separates fine detail from coarse structure, in pixels. A 16px font's
+# strokes are about 2px wide and a 44px heading's about 5px, so a radius in
+# between is what tells the two apart.
+DETAIL_SIGMA = 3.0
 
-    Reduced contrast sensitivity does not darken a page; it shrinks the distance
-    between light and dark, which is why low-contrast grey-on-grey text is the
-    first thing to disappear and solid black on white is the last.
+# How much contrast coarse structure keeps when sensitivity is at its worst.
+# Not zero: somebody with very poor contrast sensitivity still makes out a large
+# dark headline on a light page, and a model that says otherwise is wrong about
+# the thing that matters most.
+COARSE_FLOOR = 0.45
+
+
+def apply_contrast(image: Image.Image, sensitivity: float) -> Image.Image:
+    """Lose contrast the way an eye loses it: fine detail first.
+
+    The first version of this multiplied every pixel's distance from mid-grey by
+    the sensitivity, uniformly. That is wrong in a way that matters more than any
+    other detail in this file: it crushes a 44px headline exactly as hard as 11px
+    fine print, so a persona with poor contrast sensitivity was reported as unable
+    to read a large low-contrast heading they could obviously read. Reduced
+    contrast sensitivity is not a volume knob on the whole image.
+
+    What it actually costs is high spatial frequency. Sensitivity to coarse
+    structure falls slowly; sensitivity to fine detail falls off a cliff. So the
+    image is split -- a blurred copy is the coarse structure, what is left over is
+    the detail -- and the detail is attenuated hard while the coarse structure
+    keeps most of what it had. That is why somebody who cannot read the body copy
+    on a page can still read its headline, which is the whole point.
     """
     if sensitivity >= 0.999:
         return image
-    pixels = np.asarray(image.convert("RGB"), dtype=np.float32)
-    flattened = 128.0 + (pixels - 128.0) * max(0.0, sensitivity)
-    return Image.fromarray(np.clip(flattened, 0, 255).astype(np.uint8))
+    rgb = image.convert("RGB")
+    pixels = np.asarray(rgb, dtype=np.float32)
+    coarse = np.asarray(rgb.filter(ImageFilter.GaussianBlur(radius=DETAIL_SIGMA)), dtype=np.float32)
+    detail = pixels - coarse
+
+    sensitivity = max(0.0, sensitivity)
+    kept_coarse = COARSE_FLOOR + (1.0 - COARSE_FLOOR) * sensitivity
+    seen = 128.0 + (coarse - 128.0) * kept_coarse + detail * sensitivity
+    return Image.fromarray(np.clip(seen, 0, 255).astype(np.uint8))
 
 
 def apply_glare(image: Image.Image, sensitivity: float) -> Image.Image:
@@ -130,7 +158,79 @@ def see(image: Image.Image, eyes: Eyes) -> Image.Image:
     return seen
 
 
-def legibility(image: Image.Image, box: dict, margin: int = 12) -> dict:
+# Normal vision resolves about one arcminute of detail. At a 60cm viewing
+# distance on a 96dpi display that is roughly 0.66 CSS pixels -- the number that
+# turns an acuity score into a size on the screen.
+ARCMINUTE_PX = 0.66
+
+# A regular-weight glyph's stroke is roughly an eighth of its font size, and it is
+# the stroke that has to be resolvable, not the letter. Bold strokes are thicker,
+# which is why the guidelines let bold text be smaller.
+STROKE_RATIO = 8.0
+BOLD_STROKE_RATIO = 6.0
+BOLD_WEIGHT = 600
+
+# Below this fraction of the size they can resolve, no amount of contrast helps:
+# the strokes are finer than the eye can separate at all.
+UNRESOLVABLE_BELOW = 0.6
+
+# The contrast a mark needs to survive the optics, for text exactly at the limit
+# of what this person resolves. Larger text needs proportionally less, which is
+# the same relationship the guidelines encode by asking 3:1 of large text and
+# 4.5:1 of body text.
+THRESHOLD_AT_LIMIT = 0.10
+MIN_THRESHOLD = 0.035
+MAX_THRESHOLD = 0.45
+
+
+def resolvable_stroke_px(acuity: float) -> float:
+    """The finest stroke these eyes can separate, in CSS pixels."""
+    return ARCMINUTE_PX / max(float(acuity), 0.05)
+
+
+def readable_size_px(acuity: float, bold: bool = False) -> float:
+    """The smallest font size this person can read, given good contrast.
+
+    At full acuity this is about 5px -- smaller than anyone sets text, which is
+    why size never comes up for a typical visitor. At 0.35 it is around 15px, so
+    16px body copy is marginal and a 34px heading is comfortable. That is the
+    difference the model was missing: it judged both by the same contrast bar.
+    """
+    ratio = BOLD_STROKE_RATIO if bold else STROKE_RATIO
+    return resolvable_stroke_px(acuity) * ratio
+
+
+def contrast_needed(text_px: float, acuity: float, bold: bool = False) -> dict:
+    """How much surviving contrast text of this size needs, for these eyes.
+
+    Text well above the resolution limit reads at low contrast -- which is why
+    somebody with poor eyesight can still read a large headline on a page whose
+    body copy is invisible to them. Text at the limit needs much more, and text
+    below it cannot be read at any contrast at all.
+    """
+    limit = readable_size_px(acuity, bold)
+    if not text_px or text_px <= 0:
+        # Nothing said about the size, so size cannot be held against it.
+        return {"threshold": THRESHOLD_AT_LIMIT, "comfort": None, "limitPx": round(limit, 1),
+                "resolvable": True}
+    comfort = float(text_px) / limit
+    if comfort < UNRESOLVABLE_BELOW:
+        return {"threshold": MAX_THRESHOLD, "comfort": round(comfort, 2),
+                "limitPx": round(limit, 1), "resolvable": False}
+    threshold = THRESHOLD_AT_LIMIT / (comfort ** 0.9)
+    return {"threshold": round(max(MIN_THRESHOLD, min(MAX_THRESHOLD, threshold)), 4),
+            "comfort": round(comfort, 2), "limitPx": round(limit, 1), "resolvable": True}
+
+
+# Roles whose whole purpose is to be read. Anything with a measured font size is
+# treated the same way whatever its role.
+TEXT_ROLES = frozenset({"heading", "text", "paragraph", "StaticText", "label", "caption",
+                        "listitem", "cell", "columnheader", "rowheader", "h1", "h2", "h3"})
+
+
+def legibility(image: Image.Image, box: dict, margin: int = 12, *,
+               font_px: float = 0.0, font_weight: int = 400, acuity: float = 1.0,
+               role: str = "") -> dict:
     """Whether there is anything to see where this element lives, after the optics.
 
     Not "is it in the DOM" -- it is, that is why we are looking -- but whether the
@@ -160,10 +260,27 @@ def legibility(image: Image.Image, box: dict, margin: int = 12) -> dict:
         return {"visible": False, "reason": "empty region",
                 "ink": 0.0, "internalContrast": 0.0, "edgeContrast": 0.0}
 
-    # Structure inside: marks standing away from the region's own background.
-    internal = float(region.max() - region.min()) / 255.0
-    background = float(np.median(region))
-    ink = float(np.mean(np.abs(region - background) > 12.0))
+    # Structure inside, measured strictly inside. A box includes the element's own
+    # boundary, and blur pulls the surround across it -- so a mid-grey button on
+    # white reported *more* internal contrast at 0.4 acuity (0.23) than with
+    # perfect vision (0.12), because blur had imported white into the edge pixels.
+    # The same way blur once "helped" a heading by bleeding white inward. Whatever
+    # is written on something is written inside it, so that is where to look.
+    inset = int(min(_MAX_INSET_PX, max(0, min(right - left, bottom - top) // 6)))
+    inner = np.asarray(grey.crop((left + inset, top + inset,
+                                  max(left + inset + 1, right - inset),
+                                  max(top + inset + 1, bottom - inset))), dtype=np.float32)
+    internal = float(inner.max() - inner.min()) / 255.0
+    background = float(np.median(inner))
+    # What counts as a mark has to scale with how much contrast survived. A fixed
+    # twelve grey levels meant that once the optics had compressed a page, every
+    # stroke sat within twelve levels of the background and the region read as
+    # blank -- so a 44px heading this person could plainly read was reported
+    # unreadable, having already passed the contrast test. The point of `ink` is to
+    # reject a region whose range comes from one stray pixel, and a share of the
+    # surviving range does that without also rejecting faint-but-real text.
+    mark = max(_MIN_MARK_LEVELS, internal * 255.0 * _MARK_SHARE)
+    ink = float(np.mean(np.abs(inner - background) > mark))
 
     # Difference from around it: a ring just outside the element's own box.
     outer = grey.crop((max(0, left - margin), max(0, top - margin),
@@ -178,19 +295,52 @@ def legibility(image: Image.Image, box: dict, margin: int = 12) -> dict:
     else:
         edge = 0.0
 
-    has_text = internal >= 0.08 and ink >= 0.005
+    # How much contrast a mark of this size needs to survive, for these eyes. A
+    # flat threshold judged a 34px heading and 11px small print by the same bar,
+    # and physically the first is readable at a contrast the second is not: blur
+    # takes out a 1px stroke and barely touches a 4px one. This is the same
+    # relationship the guidelines encode by asking less of large text.
+    sizing = contrast_needed(font_px, acuity, font_weight >= BOLD_WEIGHT)
+    required = sizing["threshold"]
+
+    has_text = sizing["resolvable"] and internal >= required and ink >= 0.005
     has_shape = edge >= 0.05
-    visible = has_text or has_shape
+
+    # Something you are meant to read is judged on whether you can read it, not on
+    # whether you can tell it is there. Letting edge contrast stand in for both
+    # made a paragraph of unresolvable grey smudge count as legible, because the
+    # smudge as a whole still differs from the white page around it -- and "there
+    # is something there" is not "I can read it". A solid control is the opposite
+    # case: it has no text of its own and its edge is the whole of it.
+    reads_as_text = bool(font_px) or role in TEXT_ROLES
+    visible = has_text if reads_as_text else (has_text or has_shape)
+
     if visible:
         reason = ""
+    elif reads_as_text and has_shape:
+        # The most useful thing this measurement can say, and it needs both halves
+        # to say it: they can see that something is written there and cannot make
+        # out what.
+        reason = ("they can see something is written here and cannot make out what"
+                  + (f" -- {int(font_px)}px at this contrast" if font_px else ""))
+    elif not sizing["resolvable"] and not has_shape:
+        reason = (f"at {int(font_px)}px it is finer than this person resolves "
+                  f"(they need about {sizing['limitPx']}px), so no amount of contrast helps")
     elif internal < 0.02 and edge < 0.02:
         reason = "the region and everything around it are the same flat colour"
-    elif internal < 0.08 and not has_shape:
-        reason = "too little contrast to make anything out"
+    elif internal < required and not has_shape:
+        reason = ("too little contrast to make anything out"
+                  + (f" at {int(font_px)}px, which for this person needs more than larger text would"
+                     if font_px and (sizing["comfort"] or 9) < 1.6 else ""))
     else:
         reason = "nothing in the region stands out from its background"
     return {"visible": visible, "reason": reason, "ink": round(ink, 4),
-            "internalContrast": round(internal, 4), "edgeContrast": round(edge, 4)}
+            "internalContrast": round(internal, 4), "edgeContrast": round(edge, 4),
+            "requiredContrast": required, "fontPx": int(font_px or 0),
+            "resolvableSizePx": sizing["limitPx"], "sizeComfort": sizing["comfort"],
+            # Whether they could tell something was there, which is a different
+            # question from whether they could read it.
+            "presentButUnreadable": bool(reads_as_text and has_shape and not has_text)}
 
 
 # WCAG 2.2 relative-luminance coefficients and the sRGB transfer function. These
@@ -215,6 +365,15 @@ LARGE_TEXT_PX = 24.0
 
 # How far outside a solid region to look for what it sits on.
 _SURROUND_PX = 12
+
+# How far inside an element to start measuring what is written on it, so its own
+# boundary -- and whatever blur has pulled across that boundary -- is excluded.
+_MAX_INSET_PX = 4
+
+# What counts as a mark rather than as background: a share of whatever contrast
+# survived the optics, with a floor so a flat region cannot manufacture marks.
+_MARK_SHARE = 0.35
+_MIN_MARK_LEVELS = 4.0
 
 
 def relative_luminance(pixels: np.ndarray) -> np.ndarray:

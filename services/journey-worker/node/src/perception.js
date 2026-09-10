@@ -52,6 +52,12 @@ const WALK = `(() => {
       name: (label || node.innerText || node.textContent || "").trim().slice(0, 120),
       x: Math.round(rect.x), y: Math.round(rect.y),
       width: Math.round(rect.width), height: Math.round(rect.height),
+      // Measured, not inferred from the box. Whether somebody can read something
+      // depends on how big the letters are as much as on their contrast, and a
+      // box height is a bad proxy: it is line height for one line and the whole
+      // paragraph for several.
+      fontPx: Math.round(Number.parseFloat(style.fontSize) || 0),
+      fontWeight: Number.parseInt(style.fontWeight, 10) || 400,
     });
   };
   document.querySelectorAll(INTERACTIVE).forEach((node) => push(node, "control"));
@@ -92,6 +98,8 @@ function linkRefs(elements, refs) {
       role: (hit && hit[1].role) || element.role || element.tag,
       name: element.name,
       box: { x: element.x, y: element.y, width: element.width, height: element.height },
+      fontPx: element.fontPx || 0,
+      fontWeight: element.fontWeight || 400,
       actionable: Boolean(hit),
     };
   });

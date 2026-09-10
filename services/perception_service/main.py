@@ -30,7 +30,8 @@ def perceive_page(body: PerceiveRequest):
     """
     elements = [
         {"selector": element.selector, "role": element.role, "name": element.name,
-         "box": (element.box or element.boundingBox).model_dump() if (element.box or element.boundingBox) else None}
+         "box": (element.box or element.boundingBox).model_dump() if (element.box or element.boundingBox) else None,
+         "fontPx": element.fontPx, "fontWeight": element.fontWeight}
         for element in body.elements
     ]
     elements = [element for element in elements if element["box"]]
@@ -47,7 +48,7 @@ def perceive_page(body: PerceiveRequest):
         undeclared = unnamed_elements(detections, elements)
         elements = elements + [
             {"selector": item["selector"], "role": item["role"], "name": item["name"],
-             "box": item["box"]} for item in undeclared
+             "box": item["box"], "fontPx": 0, "fontWeight": 400} for item in undeclared
         ]
 
     try:

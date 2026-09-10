@@ -97,6 +97,40 @@ keep the heading, the call to action and the normal-contrast link. Finding real
 problems means not making every page unusable for anyone with less than perfect
 sight.
 
+**Size is a first-class term, not an accident of the blur.** Contrast alone
+judged a 44px heading and 11px small print by the same bar, and physically the
+first is readable at a contrast the second is not. Acuity now converts to a
+smallest-readable size (one arcminute of resolution, a stroke about an eighth of
+the font size): 5px at full acuity -- smaller than anyone sets text, which is why
+size never came up for a typical visitor -- 15px at 0.35, 26px at 0.2. The
+contrast a mark needs falls as it gets bigger, and below the resolution limit no
+contrast is enough.
+
+Measured on identical `#888` (3.54:1): at acuity 0.35 the 44px heading reads and
+the 16px body copy does not. That agrees independently with WCAG, which accepts
+3:1 for large text and demands 4.5:1 for body -- two unrelated mechanisms reaching
+the same verdict.
+
+Four measurement errors were found getting there, each only visible from
+measuring:
+
+- Contrast loss was a volume knob on the whole image, so a persona with poor
+  contrast sensitivity was reported unable to read a large heading they could
+  obviously read. Reduced sensitivity costs *high spatial frequency*: the image is
+  split into coarse structure and fine detail, and the detail is attenuated hard
+  while the coarse structure keeps most of what it had.
+- Edge contrast stood in for readability, so a paragraph of unresolvable smudge
+  counted as legible because the smudge still differed from the page. Text is now
+  judged on being readable; a solid control, which has no text of its own, is
+  still judged on its edge. What that makes sayable is better than either: *they
+  can see something is written here and cannot make out what*.
+- Internal contrast was measured over a box that includes the element's own
+  boundary, so blur imported white from outside and a mid-grey button reported
+  *more* contrast at 0.4 acuity than at full sight. Measured inside now.
+- What counts as a mark was a fixed twelve grey levels, so once the optics had
+  compressed a page every stroke sat within twelve levels of its background and
+  the region read as blank. It scales with the contrast that survived.
+
 ## 6. The report is specific, and says how to fix things
 
 **Good:** a reader learns what is wrong, for whom, and what to change.

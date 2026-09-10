@@ -43,6 +43,12 @@ class Element(BaseModel):
     name: str = ""
     box: Box | None = None
     boundingBox: Box | None = None
+    # Measured from the page, not inferred from the box: a box height is line
+    # height for one line and the whole paragraph for several, and whether
+    # somebody can read something depends on how big the letters are as much as
+    # on their contrast.
+    fontPx: float = Field(default=0.0, ge=0, le=400)
+    fontWeight: int = Field(default=400, ge=1, le=1000)
 
 
 class Vision(BaseModel):

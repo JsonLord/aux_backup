@@ -23,26 +23,47 @@ def encode(image):
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+def glyphs(draw, box, fill, stroke=2, gap=4):
+    """Something text-shaped: strokes with paper between them.
+
+    Solid bars will not do, and finding that out was the point. Text is legible
+    because it has internal structure -- ink and background interleaved at glyph
+    scale -- and a filled rectangle has none. Once legibility judged text on
+    whether it could be *read* rather than on whether something was there, every
+    fixture drawing solid bars started reporting its "text" as unreadable, which
+    was the fixtures being wrong rather than the model.
+    """
+    left, top, right, bottom = box
+    for x in range(left, right, gap):
+        draw.rectangle((x, top, min(x + stroke - 1, right), bottom), fill=fill)
+
+
 def page(*, faint_text=True, width=1280, height=900):
     """A page with one bold heading, one faint caption and one solid button."""
     image = Image.new("RGB", (width, height), (255, 255, 255))
     draw = ImageDraw.Draw(image)
-    # A heading: near-black on white, unmissable.
-    draw.rectangle((100, 60, 700, 110), fill=(15, 15, 20))
-    # A caption: grey on slightly-lighter grey, the first thing to disappear.
-    caption = (233, 233, 233) if faint_text else (40, 40, 40)
-    draw.rectangle((100, 400, 620, 424), fill=(245, 245, 245))
-    draw.rectangle((104, 406, 600, 418), fill=caption)
-    # A button: solid green, high contrast.
+    # A heading: near-black on white, unmissable, and large.
+    glyphs(draw, (100, 60, 700, 110), (15, 15, 20), stroke=5, gap=11)
+    # A caption in the usual designer grey: #999 on white is 2.85:1, which a
+    # sharp-eyed reader manages and someone with reduced contrast sensitivity does
+    # not. Deliberately not #e9e9e9 on #f5f5f5 -- that is 1.11:1, unreadable to
+    # everybody, so it cannot show the difference between two people. It only
+    # looked like it could while an unreadable smudge still counted as legible
+    # because the block it sat in differed from the page.
+    caption = (153, 153, 153) if faint_text else (40, 40, 40)
+    glyphs(draw, (104, 406, 600, 418), caption, stroke=2, gap=4)
+    # A button: solid green, high contrast. No text of its own, so its edge is all
+    # there is to see -- which is the case the shape path exists for.
     draw.rectangle((100, 600, 340, 660), fill=(20, 130, 70))
     return image
 
 
 ELEMENTS = [
     {"selector": "h1", "role": "heading", "name": "The headline",
-     "box": {"x": 100, "y": 60, "width": 600, "height": 50}},
+     "box": {"x": 100, "y": 60, "width": 600, "height": 50}, "fontPx": 40, "fontWeight": 700},
     {"selector": "p.caption", "role": "text", "name": "Small print about pricing",
-     "box": {"x": 100, "y": 400, "width": 520, "height": 24}},
+     "box": {"x": 100, "y": 400, "width": 520, "height": 24}, "fontPx": 13, "fontWeight": 400},
+    # A solid control: no text of its own, judged on its edge against the page.
     {"selector": "a.cta", "role": "button", "name": "Get started",
      "box": {"x": 100, "y": 600, "width": 240, "height": 60}},
 ]
@@ -124,7 +145,7 @@ def test_a_short_fixation_budget_means_things_lower_down_are_never_seen():
     tall = Image.new("RGB", (1280, 2000), (255, 255, 255))
     draw = ImageDraw.Draw(tall)
     for index in range(30):
-        draw.rectangle((100, 100 + index * 60, 400, 140 + index * 60), fill=(30, 30, 30))
+        glyphs(draw, (100, 100 + index * 60, 400, 140 + index * 60), (30, 30, 30))
 
     hurried = perceive(image_base64=encode(tall), elements=many,
                        behavior={"patience": 0.1}, viewport={"width": 1280, "height": 900})
@@ -146,7 +167,7 @@ def test_the_actor_is_only_told_what_was_actually_looked_at():
     tall = Image.new("RGB", (1280, 1400), (255, 255, 255))
     draw = ImageDraw.Draw(tall)
     for index in range(20):
-        draw.rectangle((100, 100 + index * 60, 400, 140 + index * 60), fill=(30, 30, 30))
+        glyphs(draw, (100, 100 + index * 60, 400, 140 + index * 60), (30, 30, 30))
 
     result = perceive(image_base64=encode(tall), elements=many, behavior={"patience": 0.1})
     text = observation_text(result)
@@ -283,3 +304,104 @@ def test_every_element_carries_its_contrast_so_a_report_can_cite_it():
         assert "contrast" in item and "passes" in item["contrast"]
     for item in result["notPerceived"]:
         assert "contrast" in item
+
+
+def two_sizes_of_the_same_grey():
+    """One colour, two sizes. #888 on white is 3.54:1 -- which the guidelines
+    accept for large text and reject for body copy, entirely independently of any
+    simulation."""
+    image = Image.new("RGB", (900, 400), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    glyphs(draw, (40, 40, 620, 74), (136, 136, 136), stroke=3, gap=9)     # 44px
+    # A 16px font's strokes are about 2px, not 1: drawn thinner than the type it
+    # stands for, the fixture makes the model look harsher than it is.
+    glyphs(draw, (40, 160, 620, 172), (136, 136, 136), stroke=2, gap=4)   # 16px
+    elements = [
+        {"selector": "h1", "role": "heading", "name": "Plans and pricing",
+         "box": {"x": 40, "y": 40, "width": 580, "height": 34}, "fontPx": 44, "fontWeight": 700},
+        {"selector": "p", "role": "text", "name": "Billing is monthly",
+         "box": {"x": 40, "y": 160, "width": 580, "height": 12}, "fontPx": 16},
+    ]
+    return encode(image), elements
+
+
+def test_a_large_heading_is_read_at_a_contrast_that_loses_the_body_copy():
+    """The thing the model got wrong. Somebody with poor eyesight reads a large
+    headline on a page whose body copy is invisible to them, because size and
+    contrast trade off against each other -- and a flat contrast threshold cannot
+    tell a 44px heading from 16px small print at the same colour.
+    """
+    image, elements = two_sizes_of_the_same_grey()
+
+    dim = perceive(image_base64=image, elements=elements,
+                   abilities={"vision": {"acuity": 0.35, "contrastSensitivity": 0.25}},
+                   behavior={"patience": 0.95, "verificationTendency": 0.95})
+    lost = {item["selector"] for item in dim["notPerceived"]}
+    assert "p" in lost, "16px at 3.54:1 is below what these eyes resolve"
+    assert "h1" not in lost, "and the same colour at 44px is not -- it is the size that saves it"
+
+    # Sharp eyes read both, and so does a mild impairment: the model has to find
+    # real problems, not turn every grey into a defect. 0.5/0.45 is deliberately
+    # not asserted either way -- 16px at 3.54:1 is genuinely marginal there, and a
+    # test that pins a coin-flip is a test that will be wrong later.
+    for abilities in ({"vision": {"acuity": 1.0, "contrastSensitivity": 1.0}},
+                      {"vision": {"acuity": 0.75, "contrastSensitivity": 0.7}}):
+        result = perceive(image_base64=image, elements=elements, abilities=abilities,
+                          behavior={"patience": 0.95, "verificationTendency": 0.95})
+        assert result["counts"]["notPerceived"] == 0, abilities
+
+
+def test_the_size_a_person_can_read_follows_from_their_acuity():
+    """Full acuity resolves about 5px of text, which is smaller than anyone sets,
+    so size never comes up for a typical visitor. That is why it stayed missing."""
+    from services.perception_service.optics import contrast_needed, readable_size_px
+
+    assert 4.5 < readable_size_px(1.0) < 6.5
+    assert 14 < readable_size_px(0.35) < 17, "16px body copy is marginal at 0.35"
+    assert readable_size_px(0.2) > 24, "at 0.2 most body text is beyond reach"
+    # Bold strokes are thicker, which is why the guidelines let bold text be
+    # smaller before it counts as small.
+    assert readable_size_px(0.35, bold=True) < readable_size_px(0.35)
+
+    # Larger text needs less surviving contrast, and below the resolution limit no
+    # contrast is enough.
+    assert contrast_needed(44, 0.35)["threshold"] < contrast_needed(16, 0.35)["threshold"]
+    assert contrast_needed(8, 0.35)["resolvable"] is False
+
+
+def test_something_you_can_see_but_not_read_is_reported_as_that():
+    """The most useful thing this measurement can say, and it needs both halves of
+    it: they can tell something is there and cannot make out what it says.
+
+    A button is where this actually happens -- its own box is the control, so the
+    edge against the page is unmistakable, and a low-contrast label inside it is
+    not. "There is a button here and I cannot read it" is a different finding from
+    either "I cannot see it" or "I can see it fine".
+    """
+    image = Image.new("RGB", (600, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    draw.rectangle((40, 70, 320, 130), fill=(96, 112, 128))          # the control
+    glyphs(draw, (60, 92, 300, 108), (126, 142, 158), stroke=2, gap=4)   # its label
+    elements = [{"selector": "a.cta", "role": "button", "name": "Start free trial",
+                 "box": {"x": 40, "y": 70, "width": 280, "height": 60}, "fontPx": 14}]
+
+    result = perceive(image_base64=encode(image), elements=elements,
+                      abilities={"vision": {"acuity": 0.4, "contrastSensitivity": 0.3}},
+                      behavior={"patience": 0.95, "verificationTendency": 0.95})
+    lost = result["notPerceived"]
+    assert len(lost) == 1
+    assert lost[0]["presentButUnreadable"] is True
+    assert "cannot make out what" in lost[0]["reason"]
+
+    # Sharp eyes read the label, so this is about the persona and not the fixture.
+    sharp = perceive(image_base64=encode(image), elements=elements,
+                     behavior={"patience": 0.95, "verificationTendency": 0.95})
+    assert sharp["counts"]["notPerceived"] == 0
+
+
+def test_a_solid_control_is_still_judged_on_its_edge():
+    """It has no text of its own, so internal structure is the wrong question --
+    the case the shape path exists for, and it must survive the text rule."""
+    result = perceive(image_base64=encode(page()), elements=ELEMENTS,
+                      abilities={"vision": {"acuity": 0.35, "contrastSensitivity": 0.25}})
+    assert "a.cta" not in {item["selector"] for item in result["notPerceived"]}

@@ -105,7 +105,12 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         box = element.get("box") or element.get("boundingBox") or {}
         if not box:
             continue
-        readable = legibility(seen, box)
+        # Size and acuity together, not contrast alone. Somebody with poor
+        # eyesight reads a large headline on a page whose body copy is invisible
+        # to them, and a flat contrast threshold cannot tell those apart.
+        readable = legibility(seen, box, font_px=float(element.get("fontPx") or 0),
+                              font_weight=int(element.get("fontWeight") or 400),
+                              acuity=eyes.acuity, role=element.get("role", ""))
         entry = {"selector": element.get("selector") or element.get("elementId"),
                  "role": element.get("role", ""), "name": element.get("name") or element.get("text") or "",
                  "box": box,
