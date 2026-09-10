@@ -502,6 +502,39 @@ def generate_tasks(theme, customer_profile, url, outline=None):
     """
 
     models_to_try = [OPENAI_MODEL]
+    # Telling the model not to invent the site is a request. This checks.
+    # Against a real target the instruction alone still produced "Navigate to the
+    # 'Productivity for AEC' section" and "Explore the 'Solutions' menu" for a
+    # site whose navigation is Home / How it works / Install / Research /
+    # Pricing, so a rejected batch now comes back with the invented names quoted
+    # and one more attempt -- the same shape as the persona adherence gate.
+    from apps.gradio.page_summary import tasks_that_invent_the_site
+
+    correction = ""
+    # The least-invented batch seen so far. Ten real tasks with one invented
+    # section in them beat "Task 1 for {theme} (Manual fallback)" by a mile, so a
+    # batch that never comes back clean is still what gets used.
+    best = None
+    best_invented = None
+
+    def accept(candidates):
+        """The tasks, or None when they describe a site that is not there."""
+        nonlocal correction, best, best_invented
+        if not outline:
+            return candidates
+        invented = tasks_that_invent_the_site(candidates, outline)
+        if not invented:
+            return candidates
+        named = sorted({name for names in invented.values() for name in names})
+        print(f"Task batch named {len(named)} place(s) the page does not have: {named}")
+        if best_invented is None or len(named) < best_invented:
+            best, best_invented = candidates, len(named)
+        correction = ("\n    Your last attempt named places this page does not have: "
+                      + ", ".join(f'"{name}"' for name in named)
+                      + ". Use only what is listed above. If the persona wants something the "
+                      "page does not offer, write the task as looking for it and finding out "
+                      "whether it is there.\n")
+        return None
 
     for attempt in range(5):
         try:
@@ -509,11 +542,11 @@ def generate_tasks(theme, customer_profile, url, outline=None):
             if attempt > 0:
                 print(f"Retrying in parallel with {models_to_try}")
                 time.sleep(TASK_RETRY_WAIT_SECONDS)
-                response = call_llm_parallel(client, models_to_try, [{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+                response = call_llm_parallel(client, models_to_try, [{"role": "user", "content": prompt + correction}], response_format={"type": "json_object"})
             else:
                 response = client.chat.completions.create(
                     model=OPENAI_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": prompt + correction}],
                     response_format={"type": "json_object"},
                     max_tokens=OPENAI_MAX_COMPLETION_TOKENS,
                 )
@@ -527,7 +560,9 @@ def generate_tasks(theme, customer_profile, url, outline=None):
                         tasks_json = json.loads(json_match.group())
                         tasks = tasks_json.get("tasks", [])
                         if tasks and isinstance(tasks, list) and len(tasks) >= 5:
-                            return tasks[:10]
+                            accepted = accept(tasks[:10])
+                            if accepted:
+                                return accepted
                     except:
                         pass
 
@@ -535,12 +570,21 @@ def generate_tasks(theme, customer_profile, url, outline=None):
                 lines = [re.sub(r'^\d+[\.\)]\s*', '', l).strip() for l in content.split('\n') if l.strip()]
                 tasks = [l for l in lines if len(l) > 20 and not l.startswith('{') and not l.startswith('`')]
                 if len(tasks) >= 5:
-                    return tasks[:10]
+                    accepted = accept(tasks[:10])
+                    if accepted:
+                        return accepted
 
             print(f"Attempt {attempt+1} failed to yield valid tasks.")
         except Exception as e:
             print(f"Error in attempt {attempt+1}: {e}")
 
+    if best:
+        # Nothing came back clean. Say so rather than passing them off as checked,
+        # and use them anyway: they are about the right site, and the alternative
+        # is ten numbered placeholders.
+        print(f"No task batch came back free of invented places; using the closest, "
+              f"which named {best_invented}.")
+        return best
     return [f"Task {i+1} for {theme} (Manual fallback)" for i in range(10)]
 
 def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id,
