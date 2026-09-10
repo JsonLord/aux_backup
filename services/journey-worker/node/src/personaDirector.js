@@ -33,6 +33,7 @@ const path = require("node:path");
 const { AdherenceGate } = require("./adherence");
 const { BehaviorController } = require("./behavior");
 const { browsingFaculty } = require("./faculty");
+const { PersonaMemoryBank } = require("./memoryBank");
 const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
@@ -151,7 +152,7 @@ class PersonaDirector {
    */
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
     scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
-    frames = recentFrames, faculty, gate } = {}) {
+    frames = recentFrames, faculty, gate, memory } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -165,8 +166,19 @@ class PersonaDirector {
     this.perception = perception;
     this.walk = walk;
     this.frames = frames;
+    // What this person has already been told about themselves, kept across runs.
+    // Every judged action goes in; recurring criticism is consolidated into
+    // standing lessons that reach the next step through the faculty.
+    this.memory = memory === undefined
+      ? new PersonaMemoryBank({ personaId: this.profile.id,
+          // The same small model that judges also puts a recurring criticism
+          // into this person's own voice. A raw flaw shown back to the persona
+          // measured worse than showing nothing at all.
+          rewrite: actor.judgeAdherence,
+          vocabulary: browsingFaculty().actionsDefinitionsPrompt() })
+      : memory;
     this.faculty = faculty || browsingFaculty({ abilities: this.abilities,
-      seed: Number(this.profile.behavior?.seed) || 1 });
+      seed: Number(this.profile.behavior?.seed) || 1, memory: this.memory || undefined });
     // An action that does not sound like this person is sent back with the
     // reason, TinyTroupe-style. Without a judge the gate is simply off.
     this.gate = gate || new AdherenceGate({ judge: actor.judgeAdherence });
@@ -189,7 +201,9 @@ class PersonaDirector {
     let pending = null;             // the page as it was left, reused next turn
 
     await recorder.record("agent.start", "Persona director started", {
-      persona: this.profile.id, behavior: this.profile.behavior, abilities: this.abilities });
+      persona: this.profile.id, behavior: this.profile.behavior, abilities: this.abilities,
+      // What this person already knew about themselves when they arrived.
+      memory: this.memory ? this.memory.describe() : null });
 
     await browser.open(journey.app.baseUrl);
     lastUrl = await browser.getUrl().catch(() => journey.app.baseUrl);
@@ -233,6 +247,9 @@ class PersonaDirector {
 
       const ask = {
         profile: this.profile, tasks, observation,
+        // Everything the persona's capabilities have to say about how to use
+        // them -- including what the memory bank has learned about this person.
+        constraints: this.faculty.actionsConstraintsPrompt(),
         // How they feel is given to them, never asked of them: it is derived from
         // what the page has done to them so far.
         affect: affectInWords(controller.state),
@@ -254,6 +271,17 @@ class PersonaDirector {
         await recorder.record("persona.adherence_unavailable",
           "nothing checked whether these actions sound like this person",
           { reason: this.gate.unavailableReason });
+      }
+      if (settled.adherence && this.memory) {
+        // Stored before the action is carried out, so the lesson is available on
+        // the very next step rather than only on the next run. That is what
+        // makes the persona better with each action instead of each session.
+        this.memory.store({ ...settled.adherence, action: decision.action,
+          visible: decision.visible, expectation: decision.expectation });
+        // Said in their own words before the next step asks for constraints.
+        // Cached per lesson, so this costs one call the first time a criticism
+        // becomes a standing lesson and nothing on the steps after.
+        await this.memory.consolidate();
       }
       if (settled.adherence) {
         await recorder.record("persona.adherence",

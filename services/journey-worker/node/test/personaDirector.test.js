@@ -663,3 +663,58 @@ test("with no judge available the persona acts exactly as before", async () => {
   assert.ok(browser.calls.some((call) => call[0] === "click"));
   assert.equal(recorder.events.find((event) => event.type === "persona.adherence"), undefined);
 });
+
+test("what the second step is told includes what the first two steps got wrong", async () => {
+  // The claim: better with each action, not each session. A criticism that has
+  // come back twice is a standing lesson by the next step, without waiting for
+  // an offline compile or even for this run to end.
+  const { PersonaMemoryBank } = require("../src/memoryBank");
+  const memory = new PersonaMemoryBank({});
+  const constraintsSeen = [];
+
+  const flaws = [
+    "Low patience makes such lengthy rereading unlikely",
+    "His extreme impatience makes reading more vague copy improbable",
+    "",
+  ];
+  let step = 0;
+  const actor = async ({ constraints }) => {
+    constraintsSeen.push(constraints || "");
+    step += 1;
+    return step >= 3
+      ? { visible: "copy", expectation: "no price", action: { type: "GIVE_UP", content: "Enough." } }
+      : { visible: "copy", expectation: "a price", action: { type: "READ", target: "the copy" } };
+  };
+  // A judge that criticises the first two actions and passes the third.
+  actor.judgeAdherence = async () => {
+    const flaw = flaws[Math.min(step - 1, flaws.length - 1)];
+    return flaw ? `{"score": 2, "flaw": "${flaw}"}` : '{"score": 10, "flaw": ""}';
+  };
+
+  await run(new PersonaDirector({ profile: impatient, sleepFn: async () => {}, actor, memory,
+    // No regeneration, so each step's own judgement is the only thing stored.
+    gate: new (require("../src/adherence").AdherenceGate)({ judge: actor.judgeAdherence, maxAttempts: 1 }),
+  }), fakeBrowser(), fakeRecorder());
+
+  assert.equal(constraintsSeen[0].includes("know about yourself"), false,
+    "they arrive knowing nothing about themselves");
+  assert.match(constraintsSeen[2], /What you already know about yourself/,
+    "and by the third step the repeated criticism is a standing lesson");
+  assert.match(constraintsSeen[2], /rereading/);
+});
+
+test("the run says what the persona already knew when they arrived", async () => {
+  const { PersonaMemoryBank } = require("../src/memoryBank");
+  const memory = new PersonaMemoryBank({});
+  for (const flaw of ["Low patience makes lengthy rereading unlikely",
+    "Extreme impatience makes rereading vague copy improbable"]) {
+    memory.store({ action: { type: "READ" }, score: 2, flaw, passed: false });
+  }
+  const recorder = fakeRecorder();
+  await run(new PersonaDirector({ profile: impatient, sleepFn: async () => {}, memory,
+    actor: scriptedActor([{ type: "DONE", content: "fine" }]) }), fakeBrowser(), recorder);
+
+  const started = recorder.events.find((event) => event.type === "agent.start");
+  assert.equal(started.data.memory.episodes, 2);
+  assert.equal(started.data.memory.lessons.length, 1);
+});

@@ -254,9 +254,19 @@ class Faculty {
   }
 }
 
-/** The faculty a journey runs with. */
-function browsingFaculty({ abilities, seed } = {}) {
-  return new Faculty([new BrowserTool({ abilities, seed }), new JourneyTool()]);
+/**
+ * The faculty a journey runs with.
+ *
+ * `memory` is a PersonaMemoryBank when the run has one. It carries out no
+ * actions -- it steers them, by answering the constraints question with what
+ * this person has already learned about themselves. Passing it here rather than
+ * threading it through the prompt separately is the point: TinyTroupe makes
+ * memory a mental faculty for exactly this reason.
+ */
+function browsingFaculty({ abilities, seed, memory } = {}) {
+  const tools = [new BrowserTool({ abilities, seed }), new JourneyTool()];
+  if (memory) tools.push(memory);
+  return new Faculty(tools);
 }
 
 module.exports = { BrowserTool, Faculty, JourneyTool, Tool, browsingFaculty };

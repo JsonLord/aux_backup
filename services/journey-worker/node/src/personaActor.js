@@ -105,7 +105,7 @@ function personaInWords(profile) {
   return lines.join("\n");
 }
 
-function buildPrompt({ profile, tasks, observation, affect, history, notLikeYou }) {
+function buildPrompt({ profile, tasks, observation, affect, history, notLikeYou, constraints }) {
   const system = [
     personaInWords(profile),
     "",
@@ -127,7 +127,9 @@ function buildPrompt({ profile, tasks, observation, affect, history, notLikeYou 
     "Choose ONE action:",
     ACTION_VOCABULARY,
     "",
-    ACTION_CONSTRAINTS,
+    // The run's own faculty when it has one, so a memory bank's standing lessons
+    // arrive with the rest of the constraints rather than needing their own slot.
+    constraints || ACTION_CONSTRAINTS,
     "",
     'Reply as JSON only: {"visible": "...", "expectation": "...",',
     '"action": {"type": "...", "target": "...", "content": "..."}}',
@@ -385,6 +387,7 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
   const judgeUrl = reflectBaseUrl || baseUrl;
   async function decide(input, { notLikeYou = "" } = {}) {
     const { system, user } = buildPrompt({ ...input, notLikeYou });
+
     let lastText = "";
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const ask = attempt === 0 ? user
