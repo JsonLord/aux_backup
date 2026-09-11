@@ -9,6 +9,7 @@ import base64
 from html import escape
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path
 import re
@@ -266,6 +267,52 @@ def _evidence_reference_summary(evidence: dict[str, Any] | None, job_id: str = "
 # What a citation in a report looks like: the name an evidence artifact is listed
 # under (JobExecutor._download_name).
 _CITED_CAPTURE = re.compile(r"\bbrowser-(?:screenshot|snapshot|ui-change|video)-[\w.-]+", re.I)
+
+
+def _grey_at_luminance(luminance: float) -> str:
+    """The neutral grey with this relative luminance, as a hex the reader can try.
+
+    A luminance is not a colour -- many colours share one -- so this is offered as
+    a worked example of something dark enough rather than as the colour the page
+    should use. The inverse of the sRGB transfer function, which is what the WCAG
+    definition of relative luminance applies in the first place.
+    """
+    luminance = min(1.0, max(0.0, float(luminance)))
+    channel = (luminance * 12.92 if luminance <= 0.0031308
+               else 1.055 * (luminance ** (1 / 2.4)) - 0.055)
+    # Down, never to nearest. Rounding to nearest returned #777777 for a target of
+    # 0.1833 -- one step above it, at 0.1845, so the colour offered as the fix
+    # would itself have failed the check. A suggestion that does not clear the bar
+    # is worse than no suggestion.
+    value = max(0, min(255, math.floor(channel * 255)))
+    return f"#{value:02x}{value:02x}{value:02x}"
+
+
+def contrast_fix(contrast: dict[str, Any]) -> str:
+    """What to change on this page, from what was measured on it.
+
+    "Raise the contrast to at least 4.5:1" restates the guideline the finding has
+    already quoted; it is not a fix. The measurement knows both luminances and the
+    arithmetic gives the target exactly, so the report can say how far the darker
+    side has to move and offer a grey that gets there.
+    """
+    target = contrast.get("needsLuminanceBelow")
+    ink, paper = contrast.get("inkLuminance"), contrast.get("paperLuminance")
+    if target is None and ink is not None:
+        # No colour, black included, reaches the requirement against this
+        # background: telling anyone to darken the text is advice that cannot be
+        # taken, and the background is what has to move.
+        return ("No foreground colour can reach this ratio against the background it is on -- "
+                "black text would still fall short. The background is what has to change here, "
+                "not the text.")
+    if target is None or ink is None or paper is None:
+        return ""
+    if ink <= target:
+        return ""
+    return (f"Measured on the pixels: the darker side sits at {ink:g} relative luminance and has "
+            f"to reach {target:g} or below against a background at {paper:g}. "
+            f"{_grey_at_luminance(target)} is a neutral that gets there -- any colour at or below "
+            f"that luminance does.")
 
 
 def cited_captures(report: dict[str, Any]) -> set[str]:
@@ -1089,10 +1136,17 @@ class JobExecutor:
                        f" A persona could not read it at all after their own eyesight was applied "
                        f"to the capture: {item.get('reason') or 'nothing stands out from its background'}."
                        f"{where}")
-            recommendation = (f"Raise the contrast to at least {required}:1. This is measured on what "
-                              "the browser actually drew, so checking the declared CSS colours is not "
-                              "enough -- an overlay, a gradient or an image behind the text will not "
-                              "show up there.")
+            # The arithmetic first, when the measurement supports it: a reader can
+            # act on "the darker side has to reach 0.1833" and cannot act on "raise
+            # the contrast", which only repeats the minimum the summary just gave.
+            # The warning about CSS stays either way -- it is the part a developer
+            # is most likely to get wrong, and it is true of every one of these.
+            recommendation = " ".join(filter(None, [
+                contrast_fix(contrast) or f"Raise the contrast to at least {required}:1.",
+                "This is measured on what the browser actually drew, so checking the declared CSS "
+                "colours is not enough -- an overlay, a gradient or an image behind the text will "
+                "not show up there.",
+            ]))
         elif len(personas) > 1:
             # The page clears the guideline and several different people still could
             # not read it, which is worth saying and is not a compliance claim.

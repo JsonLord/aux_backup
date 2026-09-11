@@ -2219,3 +2219,51 @@ def test_a_report_says_so_when_a_capture_it_cites_was_never_kept():
     assert unresolvable_citations(report, cited_captures(report)) == []
     # A report citing nothing has nothing to resolve.
     assert unresolvable_citations({"executive_summary": "All clear."}, set()) == []
+
+
+def test_a_contrast_fix_names_the_change_rather_than_the_guideline():
+    """"Raise the contrast to at least 4.5:1" restates the minimum the finding has
+    already quoted. It is not a fix. The measurement knows both luminances and the
+    WCAG definition gives the target exactly, so the report can say how far the
+    darker side has to move."""
+    from apps.api.executor import contrast_fix
+
+    fix = contrast_fix({"inkLuminance": 0.45, "paperLuminance": 1.0,
+                        "needsLuminanceBelow": 0.1833})
+
+    assert "0.45" in fix and "0.1833" in fix
+    assert "#767676" in fix, "and offer a colour that actually gets there"
+    # Offered as a worked example, not as the colour the page must use: many
+    # colours share one luminance.
+    assert "any colour at or below that luminance does" in fix
+
+
+def test_a_suggested_colour_always_clears_the_bar_it_was_derived_from():
+    """Rounding to nearest returned #777777 for a target of 0.1833 -- one step
+    above it, at 0.1845 -- so the colour offered as the fix would itself have
+    failed the check it was calculated to pass."""
+    from apps.api.executor import _grey_at_luminance
+
+    def luminance(hex_colour: str) -> float:
+        channel = int(hex_colour[1:3], 16) / 255
+        channel = channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        return channel
+
+    for target in (0.1833, 0.3, 0.05, 0.5, 1.0, 0.0):
+        suggested = _grey_at_luminance(target)
+        assert luminance(suggested) <= target + 1e-9, (
+            f"{suggested} is above the {target} it was derived from, so it fails too")
+    # The canonical grey for 4.5:1 on white, as a sanity check against the spec.
+    assert _grey_at_luminance(0.1833) == "#767676"
+
+
+def test_a_background_no_text_colour_can_survive_is_said_as_such():
+    """When black itself would fall short, "darken the text" is advice that cannot
+    be taken."""
+    from apps.api.executor import contrast_fix
+
+    fix = contrast_fix({"inkLuminance": 0.02, "paperLuminance": 0.15,
+                        "needsLuminanceBelow": None})
+
+    assert "black text would still fall short" in fix
+    assert "background is what has to change" in fix

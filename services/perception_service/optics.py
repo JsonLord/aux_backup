@@ -384,6 +384,19 @@ def relative_luminance(pixels: np.ndarray) -> np.ndarray:
     return linear[..., 0] * _LUMA[0] + linear[..., 1] * _LUMA[1] + linear[..., 2] * _LUMA[2]
 
 
+def _luminance_for_ratio(lighter: float, required: float) -> float | None:
+    """The relative luminance the darker side must not exceed to reach `required`
+    against `lighter`.
+
+    From the WCAG definition itself: (L1 + 0.05) / (L2 + 0.05) >= required, solved
+    for L2. Returns None when no darker value can get there -- pure black against
+    this background still falls short, so the lighter side is what has to move,
+    and saying "darken the text" would be advice that cannot be followed.
+    """
+    target = (lighter + 0.05) / required - 0.05
+    return round(target, 4) if target >= 0 else None
+
+
 def contrast_ratio(image: Image.Image, box: dict) -> dict:
     """The rendered contrast of one element, as WCAG defines it.
 
@@ -443,4 +456,15 @@ def contrast_ratio(image: Image.Image, box: dict) -> dict:
         large = float(box.get("height", 0)) >= LARGE_TEXT_PX
         required = WCAG_AA_LARGE if large else WCAG_AA_TEXT
     return {"ratio": round(float(ratio), 2), "required": required,
-            "passes": bool(ratio >= required), "largeText": large, "measured": against}
+            "passes": bool(ratio >= required), "largeText": large, "measured": against,
+            # The two luminances the ratio was computed from, and what the darker
+            # of them would have to become to clear the requirement against the
+            # lighter one. A report can then say what to change rather than that
+            # something should change: "#8a8a8a on #f5f5f5, needs #595959 or
+            # darker" is a fix, "raise the contrast to at least 4.5:1" is a
+            # restatement of the guideline. Luminance rather than colour because
+            # that is what was measured -- many colours share one luminance, and
+            # naming a specific hex the page does not use would be a guess
+            # dressed as a measurement.
+            "inkLuminance": round(darker, 4), "paperLuminance": round(lighter, 4),
+            "needsLuminanceBelow": _luminance_for_ratio(lighter, required)}
