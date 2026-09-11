@@ -99,15 +99,47 @@ class MockSemanticEngine:
 class DirectLLMSemanticEngine:
     name = "openai-compatible-direct"
 
+    # Where this engine can run, most preferred first. Each entry is a *set* --
+    # endpoint, model and key together -- because they are one setting and not
+    # three. Taking the endpoint from one provider and the model id from another
+    # is the failure this list exists to prevent: BLABLADOR_BASE_URL used to
+    # default to the primary router's URL, so when it became a real second
+    # endpoint this engine started sending the primary's model id ("auto") to
+    # Blablador, which answered 404 on every persona compile.
+    _PROVIDERS = (
+        ("SEMANTIC_BASE_URL", "SEMANTIC_MODEL", "SEMANTIC_API_KEY", ""),
+        ("OPENAI_COMPATIBLE_ENDPOINT", "OPENAI_MODEL", "OPENAI_API_KEY", "auto"),
+        ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY", "auto"),
+        # Blablador serves specific small models by name and has no "auto".
+        ("BLABLADOR_BASE_URL", "BLABLADOR_MODEL", "BLABLADOR_API_KEY", "alias-fast"),
+    )
+
+    DEFAULT_BASE_URL = "https://debian-devil.tail3f341b.ts.net/v1"
+
     def __init__(self, api_key=None, base_url=None, model=None):
-        self.api_key = api_key or os.getenv("BLABLADOR_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.base_url = (base_url or os.getenv("BLABLADOR_BASE_URL")
-                         or os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
-                         or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
-        # The freellmapi router requires the literal model id "auto"; other ids 400.
-        self.model = model or os.getenv("OPENAI_MODEL", "auto")
+        resolved = self._resolve(base_url, model, api_key)
+        self.base_url = resolved["base_url"].rstrip("/")
+        self.model = resolved["model"]
+        self.api_key = resolved["api_key"]
         if not self.api_key:
             raise ValueError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
+
+    @classmethod
+    def _resolve(cls, base_url=None, model=None, api_key=None) -> dict:
+        """One provider's endpoint, model and key -- never a mixture of two."""
+        if base_url:
+            # An explicit endpoint takes an explicit model, or the primary's.
+            return {"base_url": base_url, "model": model or os.getenv("OPENAI_MODEL", "auto"),
+                    "api_key": api_key or os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")}
+        for url_name, model_name, key_name, default_model in cls._PROVIDERS:
+            endpoint = os.getenv(url_name)
+            if not endpoint:
+                continue
+            return {"base_url": endpoint,
+                    "model": model or os.getenv(model_name) or default_model,
+                    "api_key": api_key or os.getenv(key_name) or os.getenv("OPENAI_API_KEY")}
+        return {"base_url": cls.DEFAULT_BASE_URL, "model": model or os.getenv("OPENAI_MODEL", "auto"),
+                "api_key": api_key or os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")}
 
     @staticmethod
     def _parse_json_completion(content: str) -> dict:
