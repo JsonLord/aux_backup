@@ -1315,3 +1315,43 @@ test("a run with no perception configured does not complain every step", async (
     recorder.events.filter((event) => event.type === "persona.perception_fallback"), [],
     "nothing was lost, so nothing is reported lost");
 });
+
+test("the look before acting gets a second chance too", async () => {
+  // Cycle 24 lost the walk on the scroll that revealed the prices and again on
+  // the step after it, and the run concluded -- and the report published -- that
+  // the page does not state a cost. Three earlier runs read "£200 / user / year"
+  // off that same page. A view this person could not obtain is not evidence of
+  // what is not on the page.
+  let asked = 0;
+  const perception = {
+    available: true,
+    async perceive() {
+      asked += 1;
+      // The service answers, but with nothing usable, on the first try.
+      if (asked === 1) return null;
+      return { observation: "[p@1,2] £200 / user / year", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "p@1,2", name: "£200 / user / year" }],
+        notLookedAt: [] };
+    },
+  };
+  const seenByActor = [];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, frames: () => [],
+    walk: async () => ({
+      elements: [{ selector: "p@1,2", role: "paragraph", name: "£200 / user / year",
+        box: { x: 0, y: 0, width: 6, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    actor: async ({ observation }) => {
+      seenByActor.push(observation);
+      return { visible: "a price", expectation: "done", action: { type: "DONE", content: "£200" } };
+    },
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.match(seenByActor[0], /£200 \/ user \/ year/,
+    "the retry is what puts the price in front of the persona at all");
+  assert.ok(recorder.events.some((event) => event.type === "persona.perception"),
+    "and the step is recorded as a perceived one, not a lost one");
+});

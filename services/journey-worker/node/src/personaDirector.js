@@ -262,8 +262,19 @@ class PersonaDirector {
       // here would describe the same page twice and charge a second perception
       // pass for it; the point of carrying it is that reflection and the next
       // decision are then reasoning about one act of seeing rather than two.
-      const seen = pendingSeen || await this.look(page, tasks);
+      let seen = pendingSeen || await this.look(page, tasks);
       pendingSeen = null;
+      // One more chance, for the same reason the post-action look gets one: the
+      // things that stop a walk being usable are transient. Cycle 24 lost the
+      // walk on the scroll that revealed the prices and again on the step after,
+      // and the persona concluded -- and the report published -- that the page
+      // does not state a cost, about a page three earlier runs read
+      // "£200 / user / year" off. A view this person could not obtain is not
+      // evidence of what is not on the page.
+      if (!seen.perception && this.perception?.available) {
+        await this.sleep(LET_IT_COME_TO_REST_MS);
+        seen = await this.look(page, tasks);
+      }
       const { observation, perception } = seen;
       // One failed call disables the perception client for the rest of the run
       // (perception.js: `this.disabled = true`). That is the right behaviour --
