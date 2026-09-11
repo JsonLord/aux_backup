@@ -41,8 +41,10 @@ MONEY_MARKS = re.compile(r"[$£€¥]\s?\d|\d+[.,]\d{2}\b|\b\d+\s?(?:eur|usd|gbp
                          r"|\bper\s+(?:month|year|seat|user)\b|\b\d+\s?%\s?off\b", re.IGNORECASE)
 
 # Likewise for the other thing people most often arrive hunting for.
+# "touch" for "get in touch", which is how people most often say it and was the
+# one phrasing this set did not recognise.
 CONTACT_WORDS = frozenset({"contact", "support", "help", "phone", "email", "call", "reach",
-                           "address", "chat"})
+                           "address", "chat", "touch", "enquiry", "inquiry"})
 CONTACT_MARKS = re.compile(r"@[\w.-]+\.\w{2,}|\+?\d[\d\s().-]{7,}\d|\bcontact\b|\bsupport\b",
                            re.IGNORECASE)
 
@@ -100,8 +102,32 @@ def affinity(label: str, wanted: set[str], role: str = "") -> float:
         # word match: "From EUR 49 per month" shares no word with "find the
         # price" and is exactly what was being looked for.
         score = max(score, 0.85)
+    elif wanted & MONEY_WORDS and found & MONEY_WORDS:
+        # The goal is about money and so is this, in different words. "costs" and
+        # "Pricing" are not inflections of each other, so the prefix rule above
+        # cannot join them and correctly does not try -- but they are the same
+        # want, and this set already knows it. A live run gave the site's own
+        # Pricing link an affinity of 0.00 for a persona whose task was "find out
+        # what it costs", so the one link that promised the answer pulled the eye
+        # no harder than the feature copy around it; it spent five steps scrolling
+        # the homepage before clicking it.
+        #
+        # Below the mark score on purpose. The answer written out beats the link
+        # that promises the answer, which beats prose that merely mentions the
+        # subject -- 0.85, 0.8 with the control bonus below, 0.6 for the prose.
+        score = max(score, 0.6)
     if wanted & CONTACT_WORDS and CONTACT_MARKS.search(text):
         score = max(score, 0.8)
-    if found and _matches(found, wanted) and role in ("link", "button", "menuitem", "tab"):
+    elif wanted & CONTACT_WORDS and found & CONTACT_WORDS:
+        score = max(score, 0.6)
+    # A control that names the goal, in the task's words or in the topic's. The
+    # second half matters: the reason to add anything for a control is that a
+    # person clicks the thing promising the answer, and "Pricing" promises it to
+    # someone hunting for costs exactly as much as the word "costs" would.
+    names_the_goal = bool(found) and (
+        _matches(found, wanted)
+        or bool(wanted & MONEY_WORDS and found & MONEY_WORDS)
+        or bool(wanted & CONTACT_WORDS and found & CONTACT_WORDS))
+    if names_the_goal and role in ("link", "button", "menuitem", "tab"):
         score = min(1.0, score + 0.2)
     return round(score, 4)

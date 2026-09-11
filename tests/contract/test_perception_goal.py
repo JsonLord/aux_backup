@@ -94,3 +94,58 @@ def test_a_patient_reader_is_pulled_less_by_the_goal_than_a_hunter():
     hunter = choose_pattern({"patience": 0.1})
     reader = choose_pattern({"patience": 0.9, "verificationTendency": 0.9})
     assert hunter.goal_pull > reader.goal_pull * 2
+
+
+def test_a_goal_about_cost_is_pulled_to_the_link_that_says_pricing():
+    """"costs" and "Pricing" are not inflections of each other, so the prefix rule
+    cannot join them and correctly does not try. They are the same want, and
+    MONEY_WORDS already knows it -- it was only ever used to gate the currency
+    marks. A live run gave the site's own Pricing link an affinity of 0.00 for a
+    persona whose task was "find out what it costs", so the one link that promised
+    the answer pulled no harder than the feature copy around it; the run spent five
+    steps scrolling the homepage before clicking it."""
+    from services.perception_service.goal import affinity, terms
+
+    wanted = terms("Find out what it costs, and say plainly whether the page tells you.")
+
+    answer = affinity("£200 / user / year", wanted, "span")
+    promise = affinity("Pricing", wanted, "link")
+    mention = affinity("Our pricing is simple", wanted, "p")
+
+    assert answer > promise > mention > 0, (
+        "the answer written out beats the link promising it, which beats prose about it")
+    assert promise >= 0.8
+    # Other words for the same want, not just the one the task happened to use.
+    assert affinity("Plans", wanted, "link") >= 0.8
+    assert affinity("Subscription", wanted, "link") >= 0.8
+
+
+def test_a_free_trial_still_does_not_outrank_a_price():
+    """The failure this file was written for. "free" is money-adjacent enough to
+    match almost any marketing page, and letting it in made "Start free trial"
+    outrank "From EUR 49 per month" for somebody hunting for the price. Widening
+    the money match to synonyms must not quietly let it back."""
+    from services.perception_service.goal import affinity, terms
+
+    wanted = terms("Find out what it costs.")
+
+    assert affinity("Start free trial", wanted, "button") == 0.0
+    assert affinity("Start free. Keep what makes you sharper.", wanted, "heading") == 0.0
+    assert affinity("From EUR 49 per month", wanted, "p") > 0.8
+    # And an unrelated control gains nothing from the control bonus.
+    assert affinity("Sign in", wanted, "link") == 0.0
+
+
+def test_a_goal_about_getting_in_touch_finds_the_support_link():
+    """The same shape, for the other thing people most often arrive hunting for."""
+    from services.perception_service.goal import affinity, terms
+
+    plain = terms("Find out how to contact support about a billing problem.")
+    assert affinity("Support", plain, "link") >= 0.8
+    assert affinity("help@example.com", plain, "span") >= 0.8
+    assert affinity("Careers", plain, "link") == 0.0
+
+    # And the phrasing people actually use, which this set did not recognise.
+    colloquial = terms("Find a way to get in touch with someone about a billing problem.")
+    assert affinity("Support", colloquial, "link") >= 0.8
+    assert affinity("Careers", colloquial, "link") == 0.0
