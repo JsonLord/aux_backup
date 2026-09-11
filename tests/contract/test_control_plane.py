@@ -2517,3 +2517,27 @@ def test_a_broken_promise_summary_does_not_double_the_full_stop():
     assert '.".' not in summary
     assert 'as expected."' in summary
     assert 'reveal the price."' in summary
+
+
+def test_a_quote_is_attributed_to_whoever_actually_said_it():
+    """Quotes and names were kept in two parallel lists and zipped by position, so
+    one persona's sentence appeared under another's name as soon as they
+    contributed unequal numbers of them."""
+    runs = [
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Friedrich saw no price.", 0.20),
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Friedrich still saw no price.", 0.40)]),
+        _expectation_run("run_2", "sophie", [
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Sophie saw no price either.", 0.30)]),
+    ]
+
+    quotes = JobExecutor._pain_points_from_expectations(runs)[0]["personaEvidence"]
+
+    assert quotes, "a finding this well evidenced must carry the evidence"
+    for quote in quotes:
+        said_by = quote["quote"].split()[0]
+        assert quote["personaName"].startswith(said_by), (
+            f'{quote["personaName"]} is credited with "{quote["quote"]}"')

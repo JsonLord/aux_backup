@@ -1160,7 +1160,12 @@ class JobExecutor:
                         if run_id and run_id not in group["runs"]:
                             group["runs"].append(run_id)
                         if unmet["gap"]:
-                            group["gaps"].append(unmet["gap"])
+                            # Who said it travels with it. Pairing two parallel
+                            # lists by position put one persona's sentence under
+                            # another's name as soon as they contributed unequal
+                            # numbers of them.
+                            group["gaps"].append({"quote": unmet["gap"], "personaId": persona_id,
+                                                  "personaName": persona_name})
                         if unmet["expectation"]:
                             group["expectations"].append(unmet["expectation"])
                         group["actions"].append(unmet["action"])
@@ -1246,7 +1251,7 @@ class JobExecutor:
         else:
             severity = "low"
         expected = group["expectations"][0] if group["expectations"] else ""
-        happened = group["gaps"][-1] if group["gaps"] else ""
+        happened = group["gaps"][-1]["quote"] if group["gaps"] else ""
         again = (f" {len(personas)} different personas expected the same thing of it."
                  if len(personas) > 1 else
                  f" They tried it {hits} times." if hits > 1 else "")
@@ -1268,10 +1273,7 @@ class JobExecutor:
                          f"{len(personas) or 1} persona(s), costing {cost:.2f} frustration"),
             "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
             "elementName": label, "observation": happened,
-            "personaEvidence": [{"quote": gap, "personaName": name, "personaId": persona}
-                                for gap, name, persona in zip(
-                                    group["gaps"][:2], group["names"] + group["names"],
-                                    group["personas"] + group["personas"])],
+            "personaEvidence": group["gaps"][:2],
             "affectedPersonaIds": personas, "affectedPersonas": len(personas),
             "source": "persona.expectation",
             "runId": (group["runs"] or [None])[0], "personaId": (personas or [None])[0],
