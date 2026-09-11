@@ -9,7 +9,8 @@ const assert = require("node:assert/strict");
 const {
   ACTION_TYPES, ACTION_VOCABULARY, backoffMs, buildPrompt, completion, completionBudget, parseDecision,
   retryAfterMs, salvageAction,
-} = require("../src/personaActor");
+  buildReflectionPrompt,
+  describeTarget} = require("../src/personaActor");
 
 test("a decision cut off mid-sentence keeps what the person actually said", async () => {
   // Discarding it costs the run a turn and produces the "malformed" fallback --
@@ -122,4 +123,28 @@ test("the prompt carries what GEPA found, and nothing that needs GEPA to run", (
   // carrying "CLICK e17" into sentences meant for a human reader.
   assert.match(system, /I will click the 'Annual - save 17%' button/);
   assert.match(system, /not "I will click e17"/);
+});
+
+test("the reflection prompt names controls the way the acting prompt does", () => {
+  // The rule went into the acting prompt and only there, so reflection kept
+  // writing refs into prose a reader sees: "The Monthly button (e18) is still
+  // present" reached a live report as evidence.
+  const { system, user } = buildReflectionPrompt({
+    profile: { persona: { name: "Friedrich Wolf" } },
+    expectation: "the monthly price",
+    action: { type: "CLICK", target: "e18", content: "" },
+    observation: "[e18] button Monthly",
+    targetName: "Monthly",
+  });
+  assert.match(system, /Never mention refs, selectors or/, "the rule has to be stated here too");
+  assert.match(user, /What you did: CLICK the "Monthly"/,
+    "the prompt handed it the ref and then the model echoed it back");
+  assert.doesNotMatch(user.split("\n")[0], /e18/, "the ref is not what you did");
+});
+
+test("an unnamed target still says what was acted on", () => {
+  assert.equal(describeTarget({ type: "CLICK", target: "e18" }, ""), " e18",
+    "a ref nobody can read beats an action with no object at all");
+  assert.equal(describeTarget({ type: "CLICK", target: "" }, ""), "");
+  assert.equal(describeTarget({ type: "CLICK", target: "e18" }, "  Monthly  "), ' the "Monthly"');
 });

@@ -280,13 +280,33 @@ function parseReflection(content) {
   };
 }
 
-function buildReflectionPrompt({ profile, expectation, action, observation }) {
+/**
+ * The thing acted on, in words a person would use.
+ *
+ * Falls back to the raw target only when nothing looked at it had a name -- a
+ * ref the model cannot read is still better than an action with no object,
+ * which reads as though nothing was done to anything.
+ */
+function describeTarget(action, targetName) {
+  const named = String(targetName || "").trim();
+  if (named) return ` the "${named}"`;
+  return action.target ? ` ${action.target}` : "";
+}
+
+function buildReflectionPrompt({ profile, expectation, action, observation, targetName }) {
   const system = [
     personaInWords(profile),
     "",
     "You just did something on a website. Compare what you expected with what you got.",
     "Answer factually -- what is there, and whether it is what you were expecting. Do not",
     "say how you feel about it.",
+    "",
+    // The same rule the acting prompt carries. It was only ever put there, and
+    // reflection writes prose a reader sees too: a live run reported "The Monthly
+    // button (e18) is still present" straight into the report's evidence.
+    "Name things by what they say on them, the way you would to another person:",
+    "\"the 'Monthly' button\", not \"e18\". Never mention refs, selectors or",
+    "coordinates, even if they appear below.",
     "",
     'Reply as JSON only: {"observed": "...", "matched": "yes" | "partly" | "no", "gap": "..."}',
     '"matched" is about your expectation, not about whether the click worked:',
@@ -297,7 +317,7 @@ function buildReflectionPrompt({ profile, expectation, action, observation }) {
   ].join("\n");
 
   const user = [
-    `What you did: ${action.type}${action.target ? ` ${action.target}` : ""}`
+    `What you did: ${action.type}${describeTarget(action, targetName)}`
       + `${action.content ? ` (${action.content})` : ""}`,
     `What you expected: ${expectation || "(you did not say)"}`,
     "",
@@ -507,6 +527,7 @@ function scriptedActor(script) {
 }
 
 module.exports = {
+  describeTarget,
   backoffMs, retryAfterMs, ACTION_CONSTRAINTS, ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES,
   NON_RETRYABLE_STATUS, completionBudget, salvageAction, salvageDecision,
   affectInWords, buildPrompt,

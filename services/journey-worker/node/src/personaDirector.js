@@ -134,6 +134,20 @@ function taskText(task) {
 }
 
 /** What the persona can see of the page, bounded by what they can hold in mind. */
+/**
+ * What the thing acted on says on it, according to the eyes that chose it.
+ *
+ * The perception walk already carries a name for every element it resolved, and
+ * the selectors it uses are the same strings the actor targets -- so the run has
+ * always known that "e18" is the "Monthly" button and never told anyone.
+ */
+function nameOf(target, perception) {
+  if (!target || !perception) return "";
+  const items = [...(perception.perceived || []), ...(perception.notLookedAt || [])];
+  const found = items.find((item) => item && item.selector === target);
+  return found && typeof found.name === "string" ? found.name.trim() : "";
+}
+
 function observationFrom(snapshotText, abilities) {
   const lines = String(snapshotText || "").split("\n").map((line) => line.trim()).filter(Boolean);
   // Working memory is about what a person carries forward, so the newest lines
@@ -221,6 +235,7 @@ class PersonaDirector {
     let lastUrl = "";
     let skipAction = false;         // a re-read spends a turn looking, not acting
     let pending = null;             // the page as it was left, reused next turn
+    let pendingSeen = null;         // and how it looked through this person's eyes
 
     await recorder.record("agent.start", "Persona director started", {
       persona: this.profile.id, behavior: this.profile.behavior, abilities: this.abilities,
@@ -239,7 +254,13 @@ class PersonaDirector {
 
       const page = pending || await this.observe(browser);
       pending = null;
-      const { observation, perception } = await this.look(page, tasks);
+      // The walk that followed the last action, when there was one. Looking again
+      // here would describe the same page twice and charge a second perception
+      // pass for it; the point of carrying it is that reflection and the next
+      // decision are then reasoning about one act of seeing rather than two.
+      const seen = pendingSeen || await this.look(page, tasks);
+      pendingSeen = null;
+      const { observation, perception } = seen;
       // One failed call disables the perception client for the rest of the run
       // (perception.js: `this.disabled = true`). That is the right behaviour --
       // retrying a dead service every step would only slow the run down -- but it
@@ -361,7 +382,19 @@ class PersonaDirector {
       // an affect simulation that cannot be disappointed models nothing.
       const after = performed.acted ? await this.observe(browser) : page;
       const changed = after.url !== page.url || after.digest !== page.digest;
-      if (performed.acted) pending = after;
+      // Look at what the action produced, now, with the same eyes that chose it.
+      // Reflection used to be asked "did what you expected appear?" while holding
+      // the accessibility tree, when the expectation had been formed from what
+      // this person could actually see -- two different views of one page, and a
+      // question that compares across them manufactures gaps. A live run put the
+      // monthly prices in front of the persona, reflected against the tree, and
+      // concluded three times over that "the paragraph detailing the £20 per user
+      // per month pricing was not present". Frustration reached 1.00 and the
+      // report led on a fault the page does not have.
+      if (performed.acted) {
+        pendingSeen = await this.look(after, tasks);
+        pending = after;
+      }
       if (after.url && after.url !== lastUrl) {
         await this.capture(browser, context, `page-${steps}`);
       }
@@ -377,7 +410,9 @@ class PersonaDirector {
       // that follows it mean something.
       const reflection = decision.expectation && typeof this.actor.reflect === "function"
         ? await this.actor.reflect({ profile: this.profile, expectation: decision.expectation,
-            action: decision.action, observation: observationFrom(after.text, this.abilities) })
+            action: decision.action, targetName: nameOf(decision.action.target, perception),
+            observation: (performed.acted ? pendingSeen?.observation : observation)
+              || observationFrom(after.text, this.abilities) })
         : null;
       if (reflection) {
         await recorder.record("persona.reflection",
@@ -419,6 +454,9 @@ class PersonaDirector {
         for (let repeat = 1; repeat < (coping.repetitions || 2) && !ending; repeat += 1) {
           const again = await this.perform(decision.action, browser, context);
           history.push(`${decision.action.type} again${again.failed ? " (still nothing)" : ""}`);
+          // The page moved after it was carried, so what was carried describes a
+          // page that no longer exists. Drop it and let the next turn look.
+          if (again.acted) { pending = null; pendingSeen = null; }
         }
       } else if (coping.type === "backtrack") {
         await browser.press("Alt+ArrowLeft").catch(() => {});
@@ -665,4 +703,4 @@ class PersonaDirector {
   }
 }
 
-module.exports = { DEFAULT_MAX_STEPS, PersonaDirector, observationFrom, outcomeEvent };
+module.exports = { DEFAULT_MAX_STEPS, PersonaDirector, nameOf, observationFrom, outcomeEvent };

@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { PersonaDirector, observationFrom, outcomeEvent } = require("../src/personaDirector");
+const { PersonaDirector, nameOf, observationFrom, outcomeEvent } = require("../src/personaDirector");
 const { affectInWords, parseDecision, personaInWords, scriptedActor } = require("../src/personaActor");
 
 const JOURNEY = {
@@ -987,4 +987,97 @@ test("a reveal pass that fails does not cost the capture", async () => {
 
   assert.ok(recorder.events.some((event) => event.type === "browser.screenshot"),
     "a reveal pass is not worth losing the evidence over");
+});
+
+/**
+ * Reflection asks whether what was expected actually turned up. It was asked that
+ * while holding the accessibility tree, when the expectation had been formed from
+ * what the persona could see -- two views of one page, and a comparison across
+ * them invents gaps. A live run had the monthly prices in front of the persona,
+ * reflected against the tree, and concluded three separate times that "the
+ * paragraph detailing the £20 per user per month pricing was not present":
+ * frustration hit 1.00 and the report led on a fault the page does not have.
+ */
+test("reflection judges the page this person can see, not the accessibility tree", async () => {
+  const reflectedOn = [];
+  let walks = 0;
+  const perception = {
+    available: true,
+    async perceive() {
+      return {
+        observation: `[e18] button Monthly\n[p@1,2] 3-day free trial, then £20 / user / month.`,
+        eyes: {}, scan: {},
+        counts: { elements: 2, legible: 2, fixated: 2, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [],
+        perceived: [{ selector: "e18", name: "Monthly" }],
+        notLookedAt: [],
+      };
+    },
+  };
+  const actor = scriptedActor([
+    { type: "CLICK", target: "e18", visible: "a button", expectation: "the monthly price" },
+    { type: "DONE", content: "£20 a month" },
+  ]);
+  actor.reflect = async (input) => {
+    reflectedOn.push(input);
+    return { observed: "the monthly price", matched: "yes", gap: "" };
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception, actor,
+    walk: async () => {
+      walks += 1;
+      return { elements: [{ selector: "e18", role: "button", name: "Monthly",
+        box: { x: 0, y: 0, width: 60, height: 20 } }],
+        viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 };
+    },
+    frames: () => [],
+  });
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(reflectedOn.length, 1, "the click is reflected on");
+  assert.match(reflectedOn[0].observation, /£20 \/ user \/ month/,
+    "reflection is handed what the eyes delivered, so it cannot deny what they saw");
+  assert.doesNotMatch(reflectedOn[0].observation, /\[e1\] link Pricing/,
+    "and not the accessibility tree the fake browser returns");
+
+  // The walk that answers "what did the click produce?" is the same walk the next
+  // turn decides from. Looking twice would describe one page twice and charge a
+  // second perception pass for the privilege.
+  assert.equal(walks, 2, "one look per step: the post-action walk is carried, not repeated");
+});
+
+test("reflection is told what the thing says on it, not its ref", async () => {
+  const reflectedOn = [];
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[e18] button Monthly", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "e18", name: "Monthly" }], notLookedAt: [] };
+    },
+  };
+  const actor = scriptedActor([
+    { type: "CLICK", target: "e18", visible: "a button", expectation: "the monthly price" },
+    { type: "DONE", content: "done" },
+  ]);
+  actor.reflect = async (input) => { reflectedOn.push(input); return { observed: "", matched: "yes", gap: "" }; };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception, actor,
+    walk: async () => ({
+      elements: [{ selector: "e18", role: "button", name: "Monthly", box: { x: 0, y: 0, width: 6, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    frames: () => [],
+  });
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(reflectedOn[0].targetName, "Monthly",
+    "the run has always known e18 is the Monthly button and never said so");
+});
+
+test("a target nothing looked at keeps its raw name rather than vanishing", () => {
+  assert.equal(nameOf("e18", { perceived: [{ selector: "e18", name: "Monthly" }] }), "Monthly");
+  assert.equal(nameOf("e18", { perceived: [], notLookedAt: [{ selector: "e18", name: "Monthly" }] }),
+    "Monthly", "legible but never fixated is still a thing with a name on it");
+  assert.equal(nameOf("e99", { perceived: [{ selector: "e18", name: "Monthly" }] }), "");
+  assert.equal(nameOf("e18", null), "", "no perception, no name -- and no crash");
 });
