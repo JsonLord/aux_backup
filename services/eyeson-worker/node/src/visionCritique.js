@@ -148,7 +148,12 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
       + `{"category": one of ${JSON.stringify(FINDING_CATEGORIES)}, "severity": "low"|"medium"|"high"|"critical", `
       + '"title": short finding title, "description": what is wrong and why, '
       + `"elements": [{"elementSelector": exact selector string from the numbered list, "role": one of ${JSON.stringify(ELEMENT_ROLES)}}] `
-      + '(empty array for a page-wide finding with no single element to point to), '
+      + '-- name every element the finding is about. Across sixteen findings in a row this '
+      + 'came back empty every time, which leaves a reader nothing to look at and leaves the '
+      + 'claim unanchored to anything that can be checked. An empty array means the finding is '
+      + 'genuinely about the whole page -- its overall flow, tone or information architecture -- '
+      + 'and not that pointing at the elements would have taken a moment longer. If you can say '
+      + 'where on the screen the problem is, say which elements. '
       + '"estimatedImpact": {"frustration": 0-1, "confusion": 0-1, "trust": 0-1 (how much this would erode trust)} '
       + '-- your honest estimate of how a real user would react, not a fixed value, '
       + '"alternatives": [{"proposedChange": a specific, actionable fix, "rationale": why it would help, '

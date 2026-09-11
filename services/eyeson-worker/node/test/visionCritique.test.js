@@ -390,3 +390,23 @@ test("the capture's size is read from the capture", () => {
   assert.equal(captureSize("not an image"), null);
   assert.equal(captureSize(""), null);
 });
+
+test("naming the elements a finding is about is the default, not the exception", () => {
+  // Across sixteen vision findings in four live reports, the elements array came
+  // back empty every single time -- including both of the critical findings that
+  // turned out to be wrong. The plumbing was never at fault: toPainPoint maps
+  // elementSelector through and aggregate groups on it. The model was simply
+  // taking the "empty array for a page-wide finding" branch every time, which
+  // leaves a reader nothing to look at and leaves the claim anchored to nothing
+  // that can be checked against a measurement.
+  const { system } = buildPrompt({
+    url: "https://example.test/", task: "find the price",
+    elements: [{ selector: "e1", role: "link", text: "Pricing", boundingBox: {} }],
+  });
+
+  assert.match(system, /name every element the finding is about/);
+  assert.match(system, /If you can say\s+where on the screen the problem is, say which elements/);
+  // And what an empty array is allowed to mean.
+  assert.match(system, /genuinely about the whole page/);
+  assert.match(system, /not that pointing at the elements would have taken a moment longer/);
+});
