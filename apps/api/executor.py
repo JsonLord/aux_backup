@@ -263,6 +263,44 @@ def _evidence_reference_summary(evidence: dict[str, Any] | None, job_id: str = "
     return "; ".join(parts) if parts else "Evidence reference recorded without a readable field."
 
 
+# What a citation in a report looks like: the name an evidence artifact is listed
+# under (JobExecutor._download_name).
+_CITED_CAPTURE = re.compile(r"\bbrowser-(?:screenshot|snapshot|ui-change|video)-[\w.-]+", re.I)
+
+
+def cited_captures(report: dict[str, Any]) -> set[str]:
+    """Every capture name this report asks a reader to go and look at.
+
+    Read off the rendered citations rather than off the findings' fields, because
+    the citation is what the reader actually has to resolve. A finding may carry a
+    path that never became an artifact, and the report would still read as though
+    the evidence were there.
+    """
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            found.update(match.group(0) for match in _CITED_CAPTURE.finditer(value))
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(report)
+    return found
+
+
+def unresolvable_citations(report: dict[str, Any], available: set[str]) -> list[str]:
+    """Capture names the report cites that this session does not actually hold.
+
+    Evidence a reader cannot resolve from its citation is evidence the report did
+    not really produce, and it is worse than no citation: it reads as corroborated.
+    """
+    return sorted(cited_captures(report) - available)
+
+
 class JobExecutor:
     def __init__(self, store: Store):
         self.store = store
@@ -281,6 +319,24 @@ class JobExecutor:
         try:
             if job["type"] == "combined_test":
                 result = self._combined_test(job)
+                captures = self._browser_outputs(result)
+                # Every capture this session will actually hold, by the name a
+                # reader would search for. Checked before the report is rendered,
+                # because a citation that resolves to nothing is worse than no
+                # citation: it reads as corroborated. A live report cited
+                # "snapshot: 003-snapshot.txt" and no artifact in the session was
+                # called that.
+                available = {self._download_name(item[0], job_id,
+                                                 (item[3] if len(item) > 3 else {}).get("capture_stem"))
+                             for item in captures}
+                missing = unresolvable_citations(result, available)
+                if missing:
+                    result.setdefault("limitations", []).append(
+                        f"{len(missing)} capture(s) cited in this report were not kept as artifacts in "
+                        f"this session, so they cannot be opened from it: {', '.join(missing[:6])}"
+                        + ("..." if len(missing) > 6 else "")
+                        + ". The finding still stands on its measurement; only the pointer to the "
+                        "capture is broken.")
                 outputs = [
                     ("ux.report", "application/json", result),
                     ("ux.presentation", "text/html", self._presentation(result)),
@@ -292,7 +348,7 @@ class JobExecutor:
                         "runs": result.get("journey_outcome", {}).get("runs", []),
                     }),
                 ]
-                outputs.extend(self._browser_outputs(result))
+                outputs.extend(captures)
             elif job["type"] == "ui_adaptation":
                 result = self._ui_adaptation(job)
                 outputs = [("ui.prototype", "text/html", result)]

@@ -383,13 +383,31 @@ test("walking away needs a reason, not just a dice roll", async () => {
 });
 
 test("nearly leaving is recorded, because tolerating a page is not the same as liking it", async () => {
+  // Driven by a page that does not answer rather than by hunting for a seed on a
+  // contented persona. Feeling like leaving is what frustration produces, so the
+  // test produces frustration: a dead page, where nothing a click does changes
+  // anything. Searching seeds instead made this depend on how much probability
+  // mass "abandon" happened to carry -- it went quiet the moment the coping table
+  // learned to say "carry on", which is a correct change to the model and was not
+  // a reason for a test about giving up to fail.
+  // Someone dogged on a page that does not answer: the exact shape of the thing.
+  // Frustration climbs, so "abandon" gets real weight in the distribution and is
+  // sampled -- and their tolerance (repeatFailureTolerance 0.95 plus persistence
+  // 0.98) is past anything frustration can reach, so they never actually go. That
+  // is a page somebody is tolerating rather than enjoying, and it is worth
+  // recording.
   const seen = [];
   for (let seed = 1; seed <= 12 && !seen.length; seed += 1) {
     const recorder = fakeRecorder();
     await run(new PersonaDirector({
-      profile: { ...impatient, behavior: { ...impatient.behavior, seed } }, sleepFn: async () => {},
-      maxSteps: 12, actor: scriptedActor([{ type: "READ" }]) }), fakeBrowser(), recorder);
+      profile: { ...dogged, behavior: { ...dogged.behavior, seed } }, sleepFn: async () => {},
+      maxSteps: 14, actor: scriptedActor([{ type: "CLICK", target: "e1" }]) }),
+      fakeBrowser({ dead: true }), recorder);
     seen.push(...recorder.events.filter((event) => event.type === "persona.nearly_left"));
+    // Never actually left: that is what makes it "nearly".
+    assert.ok(!recorder.events.some((event) =>
+      event.type === "agent.end" && event.data?.type === "abandoned"),
+      "this persona's tolerance is past what frustration can reach");
   }
   assert.ok(seen.length > 0, "an urge to leave that was not acted on should still be evidence");
 });

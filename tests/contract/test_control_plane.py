@@ -2188,3 +2188,34 @@ def test_a_perception_finding_only_quotes_what_the_persona_said_about_it():
     # And it is said by somebody: personaName was never set, so the presentation
     # rendered every persona quote as "Synthetic user".
     assert findings[0]["personaEvidence"][0]["personaName"] == "Friedrich Wolf"
+
+
+def test_a_report_says_so_when_a_capture_it_cites_was_never_kept():
+    """Evidence a reader cannot resolve from its citation is worse than no
+    citation: it reads as corroborated. A live report cited "snapshot:
+    003-snapshot.txt" for its only finding and no artifact in the session was
+    called that."""
+    from apps.api.executor import cited_captures, unresolvable_citations
+
+    report = {
+        "critical_pain_points": [
+            {"title": "Spinner never resolves",
+             "evidence": f"screenshot: {JobExecutor._download_name('browser.screenshot', 'job_a', '003')}"},
+            {"title": "Low-contrast label",
+             "evidence": f"snapshot: {JobExecutor._download_name('browser.snapshot', 'job_a', '004-snapshot')}"},
+        ],
+        "elements_to_preserve": [{"description": "nothing cited here"}],
+    }
+    kept = {JobExecutor._download_name("browser.screenshot", "job_a", "003")}
+
+    # Citations are read off the rendered prose, wherever in the report it sits.
+    assert cited_captures(report) == {
+        JobExecutor._download_name("browser.screenshot", "job_a", "003"),
+        JobExecutor._download_name("browser.snapshot", "job_a", "004-snapshot"),
+    }
+    missing = unresolvable_citations(report, kept)
+    assert missing == [JobExecutor._download_name("browser.snapshot", "job_a", "004-snapshot")]
+    # Nothing is flagged when everything cited was kept.
+    assert unresolvable_citations(report, cited_captures(report)) == []
+    # A report citing nothing has nothing to resolve.
+    assert unresolvable_citations({"executive_summary": "All clear."}, set()) == []
