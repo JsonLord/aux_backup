@@ -400,7 +400,8 @@ def test_the_live_view_reads_frames_and_thoughts_from_the_worker(monkeypatch):
     try:
         assert [run["runId"] for run in gradio_app.fetch_live_runs()] == ["job_a_persona_1"]
 
-        image, thoughts, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
+        image, thoughts, note, timer, journey, _canvas = gradio_app.poll_live_run(
+            "job_a_persona_1", True, "")
 
         assert image["visible"] is True and frame in image["value"]
         assert "001-click-e21-after.png" in image["value"]
@@ -421,7 +422,8 @@ def test_the_live_view_stops_polling_when_the_run_ends(monkeypatch):
         "runId": "job_a_persona_1", "status": "finished", "frames": 0, "frame": None, "reasoning": []}})
     monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
     try:
-        image, _, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
+        image, _, note, timer, journey, _canvas = gradio_app.poll_live_run(
+            "job_a_persona_1", True, "")
         assert image["visible"] is False
         # The note is the signal the handoff keys on.
         assert "has finished" in note
@@ -437,7 +439,7 @@ def test_an_unreachable_worker_is_reported_and_does_not_spin(monkeypatch):
     monkeypatch.setenv("JOURNEY_WORKER_URL", "http://127.0.0.1:9")
     assert gradio_app.fetch_live_runs() == []
 
-    image, _, note, timer, journey = gradio_app.poll_live_run("job_a_persona_1", True, "")
+    image, _, note, timer, journey, _canvas = gradio_app.poll_live_run("job_a_persona_1", True, "")
     assert image["visible"] is False
     assert "Could not reach the journey worker" in note
     assert timer["active"] is False
@@ -451,7 +453,7 @@ def test_a_live_run_that_has_not_written_a_frame_yet_still_follows(monkeypatch):
         "reasoning": [{"elapsedMs": 500, "text": "Opening the base URL."}]}})
     monkeypatch.setenv("JOURNEY_WORKER_URL", f"http://127.0.0.1:{server.server_port}")
     try:
-        image, thoughts, note, timer, journey = gradio_app.poll_live_run("r", True, "")
+        image, thoughts, note, timer, journey, _canvas = gradio_app.poll_live_run("r", True, "")
         assert image["visible"] is False
         assert "has not written a frame yet" in note
         assert "Opening the base URL." in thoughts
@@ -564,3 +566,117 @@ def test_saving_a_persona_reports_a_rejected_token_and_keeps_the_edit(monkeypatc
     _, editor, _, status = gradio_app.save_manual_persona("not json", [], 0, "ws", None, None)
     assert "not valid JSON" in status
     assert editor == "not json"
+
+
+def test_the_thought_log_renders_the_personas_own_thought_pattern():
+    """The persona director records the thought pattern the product is built
+    around -- what is visible, what they therefore expect, whether that sounded
+    like them, what actually arrived, and how the gap left them feeling. Every one
+    of those is a ``persona.*`` timeline event, and the log tab rendered none of
+    them: it matched ``model.reasoning``, ``agent.message.end``, ``browser.*`` and
+    ``journey.*`` only, so a persona run showed its clicks and its ``+4.7s``
+    timings with nothing in between."""
+    import json
+
+    import app as gradio_app
+
+    log = {"runs": [{"runId": "run_1", "director": "persona",
+                     "simulationProfile": {"persona": {"name": "Friedrich Wolf"}},
+                     "verdict": {"status": "passed", "confidence": "high", "summary": "Done."},
+                     "reasoning": [],
+                     "timeline": [
+                         {"type": "persona.perception", "elapsedMs": 1200, "data": {
+                             "counts": {"fixated": 4, "elements": 31},
+                             "eyes": {"acuity": 0.35, "contrastSensitivity": 0.25},
+                             "scan": {"pattern": "layer-cake"},
+                             "notPerceived": ["#plan-price"],
+                             "missedWhatTheyCameFor": [
+                                 {"selector": "#pricing", "name": "See pricing", "goalAffinity": 0.8}]}},
+                         {"type": "persona.expectation", "elapsedMs": 2400, "data": {
+                             "visible": "A headline about an AI layer, and a row of buttons.",
+                             "expectation": "The Pricing link should take me to numbers.",
+                             "action": {"type": "CLICK", "target": "Pricing"}}},
+                         {"type": "persona.adherence", "elapsedMs": 2500, "data": {
+                             "score": 4, "passed": False, "flaw": "reads every word before acting"}},
+                         {"type": "persona.reflection", "elapsedMs": 4700, "data": {
+                             "matched": False, "observed": "A pricing page with plan names but no amounts.",
+                             "gap": "The page loaded, but the numbers I came for are not on it."}},
+                         {"type": "persona.affect", "elapsedMs": 4800, "data": {
+                             "feeling": "mildly irritated and unsure where to look next",
+                             "state": {"frustration": 0.42, "confusion": 0.31, "effort": 0.2},
+                             "coping": {"type": "reread"}}},
+                     ]}]}
+
+    rendered = gradio_app.format_persona_thought_log(json.dumps(log))
+
+    # The header must not claim a run had no thinking when it recorded five thoughts.
+    assert "5 persona thought(s)" in rendered
+    assert "No model reasoning was captured" not in rendered
+    # The pattern, in the order a person thinks it.
+    for earlier, later in zip(
+        ["took in **4 of 31** things", "The Pricing link should take me to numbers.",
+         "sounded like them: **4/10**", "The page loaded, but the numbers I came for are not on it.",
+         "mildly irritated and unsure where to look next"],
+        ["The Pricing link should take me to numbers.", "sounded like them: **4/10**",
+         "The page loaded, but the numbers I came for are not on it.",
+         "mildly irritated and unsure where to look next", ""],
+    ):
+        if later:
+            assert rendered.index(earlier) < rendered.index(later), f"{earlier!r} must precede {later!r}"
+    # Their eyes as numbers, so an unreadable page can be told from unusual eyes.
+    assert "acuity 0.35" in rendered and "contrast sensitivity 0.25" in rendered
+    # Two different claims, never merged: illegible where it lives is a defect in
+    # the page; legible and never reached explains a choice.
+    assert "could not read:** #plan-price" in rendered
+    assert "never got to what they came for:** See pricing" in rendered
+    # A regenerated action is the gate working, so its reason is shown.
+    assert "reads every word before acting" in rendered
+    # The feeling is derived and worded, with the measurement kept beside it.
+    assert "frustration 0.42" in rendered
+    assert "**reread**" in rendered
+    # The persona never states the emotion as a label of its own.
+    assert "emotion:" not in rendered.lower()
+
+
+def test_a_persona_runs_raw_completions_are_kept_but_not_shown_as_the_person():
+    """The model's raw completion tokens are the machinery -- first person plural,
+    about refs and evidence capture ("We'll click 'How it works' link (ref=e3)").
+    Interleaved under a heading reading "in the persona's own words" they pass for
+    the person's thinking, which is exactly what the persona director replaces. A
+    persona run folds them away, labelled; an agent run, having nothing else to
+    show, still interleaves them."""
+    import json
+
+    import app as gradio_app
+
+    raw = "We need screenshot evidence. We'll click 'How it works' link (ref=e3)."
+    persona_run = {"runs": [{"runId": "run_1", "director": "persona",
+                             "simulationProfile": {"persona": {"name": "Friedrich Wolf"}},
+                             "verdict": {"status": "passed", "confidence": "high", "summary": "Done."},
+                             "reasoning": [{"elapsedMs": 4687, "text": raw}],
+                             "timeline": [{"type": "persona.expectation", "elapsedMs": 2400, "data": {
+                                 "visible": "A row of buttons.",
+                                 "expectation": "Pricing should show numbers.",
+                                 "action": {"type": "CLICK", "target": "Pricing"}}}]}]}
+
+    rendered = gradio_app.format_persona_thought_log(json.dumps(persona_run))
+
+    # Kept: a reader auditing an odd action needs the working that produced it.
+    assert raw in rendered
+    # Folded, named, and outside the persona narrative.
+    assert "<details>" in rendered and "not the person's voice" in rendered
+    assert rendered.index("Pricing should show numbers.") < rendered.index("<details>")
+    assert rendered.index("<details>") < rendered.index(raw)
+
+    agent_run = json.loads(json.dumps(persona_run))
+    agent_run["runs"][0]["director"] = "pi-sdk"
+    agent_run["runs"][0]["timeline"] = [
+        {"type": "browser.click", "summary": "Clicked 'Pricing'", "elapsedMs": 3000}]
+    agent_rendered = gradio_app.format_persona_thought_log(json.dumps(agent_run))
+
+    # No persona voice to protect, so the working is the narrative -- inline, and
+    # under a heading that does not call it the person's own words.
+    assert "<details>" not in agent_rendered
+    assert raw in agent_rendered
+    assert "in the persona's own words" not in agent_rendered
+    assert "step by step" in agent_rendered

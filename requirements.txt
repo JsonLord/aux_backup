@@ -16,6 +16,8 @@ python-docx
 markdown
 jupyter
 matplotlib
+Pillow
+cryptography
 pydantic
 textdistance
 scipy

@@ -6,6 +6,9 @@ const { BehaviorController } = require("./behavior");
 const { EvidenceCoordinator, normalizeStepEvidence } = require("./evidence");
 const { runWithJourneyTest } = require("./journeytest");
 const { liveRunState } = require("./liveRun");
+const { captureLogin } = require("./loginCapture");
+const { sendViewportInput } = require("./viewportStream");
+const { beginTakeover, endTakeover, noteInput, takeoverActive, takeoverState } = require("./takeover");
 const { listLiveRuns } = require("./reasoningCapture");
 const { replayFromEvidence } = require("./replay");
 const { validateBrowserSafety } = require("./safety");
@@ -110,6 +113,43 @@ const server = http.createServer(async (request, response) => {
       const runId = decodeURIComponent(request.url.slice("/v1/runs/".length, -"/live".length));
       if (!runId) return json(response, 422, { error: "invalid_request", message: "runId is required" });
       return json(response, 200, await liveRunState(runId));
+    }
+    // Sign in once and keep the session, so later runs test the product a user
+    // actually sees. Held open for the duration like /v1/runs is: a capture that
+    // is waiting on a second factor is waiting on a person, and the status
+    // updates it emits are what the caller shows them meanwhile.
+    // Hand the browser to a person, so they can finish what the agent cannot --
+    // a second factor, or a challenge that is asking whether a human is there.
+    if (request.method === "GET" && request.url === "/v1/takeovers") {
+      return json(response, 200, takeoverState());
+    }
+    if (request.method === "POST" && request.url === "/v1/takeovers") {
+      return json(response, 201, beginTakeover(await body(request)));
+    }
+    if (request.method === "DELETE" && request.url === "/v1/takeovers") {
+      const finished = endTakeover();
+      return json(response, 200, { ended: Boolean(finished), takeover: finished });
+    }
+    // Input is refused without a handover: an agent mid-action and a person
+    // clicking are two hands on the same pointer, and the run is then evidence
+    // of neither one's behaviour.
+    if (request.method === "POST" && request.url === "/v1/input") {
+      if (!takeoverActive()) {
+        return json(response, 409, { error: "no_takeover",
+          message: "take over the browser before sending input" });
+      }
+      const outcome = sendViewportInput(await body(request));
+      if (!outcome.sent) return json(response, 502, { error: "input_not_sent", message: outcome.error });
+      noteInput();
+      return json(response, 202, outcome);
+    }
+    if (request.method === "POST" && request.url === "/v1/login-captures") {
+      const payload = await body(request);
+      const updates = [];
+      const outcome = await captureLogin({ ...payload, onStatus: (update) => updates.push(update) });
+      // The state is a bearer credential: returned to the caller that asked for
+      // it, and never written to this worker's logs or artifacts.
+      return json(response, 201, { ...outcome, updates });
     }
     if (request.method === "POST" && request.url === "/v1/runs") return json(response, 201, await runJourney(await body(request)));
     if (request.method === "POST" && request.url === "/v1/replays") return json(response, 201, replayFromEvidence(await body(request)));

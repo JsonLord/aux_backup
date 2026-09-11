@@ -46,14 +46,31 @@ function filterWorkingMemory(facts, abilities) {
   return facts.slice(-limit);
 }
 
+// How far a hand with no precision at all strays from where it was aimed, in CSS
+// pixels. Chosen against WCAG 2.5.5, which asks for targets of 44x44: at this
+// scatter a 44px control is hit nearly always, a 24px one often missed, and a
+// 16px icon missed more often than not.
+const POINTER_SCATTER_PX = 24;
+
+/**
+ * Where this person's pointer actually lands when aiming at something.
+ *
+ * The scatter is a property of the movement, not of the target. Scaling it to
+ * the target -- as this did, at half the smaller dimension -- said that a person
+ * aims more precisely at a small button, and made every control larger than 8px
+ * impossible to miss. That is backwards, and it quietly guaranteed that no
+ * pointer-precision simulation could ever surface an undersized-target problem,
+ * which is the one thing it exists to find.
+ */
 function simulatePointer(target, abilities, seed = 1) {
   const precision = Math.max(0, Math.min(1, abilities?.motor?.pointerPrecision ?? 1));
   const random = seededRandom(seed);
-  const radius = (1 - precision) * Math.max(4, Math.min(target.width, target.height) / 2);
+  const radius = (1 - precision) * POINTER_SCATTER_PX;
   return { x: Number((target.x + target.width / 2 + (random() * 2 - 1) * radius).toFixed(3)),
     y: Number((target.y + target.height / 2 + (random() * 2 - 1) * radius).toFixed(3)),
-    seed, simulationVersion: "pointer-simulation-v1" };
+    seed, radius: Number(radius.toFixed(3)), simulationVersion: "pointer-simulation-v2" };
 }
 
-module.exports = { perceivedScreenshot, renderPerceivedSvg, materializePerceivedArtifact,
-  readingDurationMs, filterWorkingMemory, simulatePointer, colorMatrices };
+module.exports = { POINTER_SCATTER_PX, perceivedScreenshot, renderPerceivedSvg,
+  materializePerceivedArtifact, readingDurationMs, filterWorkingMemory, simulatePointer,
+  colorMatrices };

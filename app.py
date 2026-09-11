@@ -3,7 +3,7 @@ import sys
 
 import base64
 from io import BytesIO
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import subprocess
 import importlib.util
 import re
@@ -18,6 +18,7 @@ import shutil
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
+from apps.gradio import credentials_panel, live_control
 from apps.gradio.github_backup import (GitHubAuthError, confirm_backup_repo, push_session_to_github,
                                         validate_and_list_repos)
 
@@ -440,16 +441,53 @@ def generate_personas(theme, customer_profile, num_personas, persona_client=None
     """Compatibility wrapper for legacy callbacks during tab migration."""
     return (persona_client or persona_runtime).generate(theme, customer_profile, num_personas, scenario=theme)
 
-def generate_tasks(theme, customer_profile, url):
+def page_outline_for_tasks(url):
+    """What the target page actually contains, or None if it cannot be read.
+
+    Never fatal: a site that blocks us, times out, or answers with something that
+    is not a web page falls back to the old URL-only behaviour rather than
+    stopping the run. The caller says so in the status either way, because tasks
+    written without looking at the page are worth much less and a reader should
+    know which kind they got.
+    """
+    try:
+        from apps.gradio.page_summary import fetch_page_outline
+        return fetch_page_outline(url)
+    except Exception as error:      # noqa: BLE001 - any failure degrades, none stops the run
+        print(f"Could not read {url} for task generation: {error}")
+        return None
+
+
+def generate_tasks(theme, customer_profile, url, outline=None):
     client = get_llm_client()
     if not client:
         return [f"Task {i+1} for {theme} (OPENAI_API_KEY not set)" for i in range(10)]
+
+    # Look at the page before writing tasks about it. Given only the URL string,
+    # the model invents the site's structure from the domain name and the persona
+    # -- against a real target it produced "Navigate to the 'Productivity for AEC'
+    # section" and "Explore the 'Solutions' menu" for a site whose navigation is
+    # Home / How it works / Install / Research / Pricing / Sign in / Get started.
+    # Well-written tasks for a site that does not exist.
+    if outline is None:
+        outline = page_outline_for_tasks(url)
+    if outline:
+        from apps.gradio.page_summary import outline_as_prompt_block
+        page_block = ("\n" + outline_as_prompt_block(outline) + "\n\n"
+                      "    Every task must refer to sections, links, buttons or content that appear above. "
+                      "Do not invent navigation, product names, or page sections that are not listed. "
+                      "If the page does not offer something the persona wants (pricing, contact, a demo), "
+                      "write the task as looking for it and finding out whether it is there.\n")
+    else:
+        page_block = ("\n    The page could not be read before writing these tasks, so keep them "
+                      "general: describe what the persona is trying to achieve rather than naming "
+                      "sections or menus, which would be guesses.\n")
 
     prompt = f"""
     Generate EXACTLY 10 sequential tasks for a user to perform on the website: {url}
     The theme of the analysis is: {theme}.
     The user persona profile is: {customer_profile}.
-
+{page_block}
     The tasks should cover:
     1. Communication
     2. Purchase decisions
@@ -464,6 +502,39 @@ def generate_tasks(theme, customer_profile, url):
     """
 
     models_to_try = [OPENAI_MODEL]
+    # Telling the model not to invent the site is a request. This checks.
+    # Against a real target the instruction alone still produced "Navigate to the
+    # 'Productivity for AEC' section" and "Explore the 'Solutions' menu" for a
+    # site whose navigation is Home / How it works / Install / Research /
+    # Pricing, so a rejected batch now comes back with the invented names quoted
+    # and one more attempt -- the same shape as the persona adherence gate.
+    from apps.gradio.page_summary import tasks_that_invent_the_site
+
+    correction = ""
+    # The least-invented batch seen so far. Ten real tasks with one invented
+    # section in them beat "Task 1 for {theme} (Manual fallback)" by a mile, so a
+    # batch that never comes back clean is still what gets used.
+    best = None
+    best_invented = None
+
+    def accept(candidates):
+        """The tasks, or None when they describe a site that is not there."""
+        nonlocal correction, best, best_invented
+        if not outline:
+            return candidates
+        invented = tasks_that_invent_the_site(candidates, outline)
+        if not invented:
+            return candidates
+        named = sorted({name for names in invented.values() for name in names})
+        print(f"Task batch named {len(named)} place(s) the page does not have: {named}")
+        if best_invented is None or len(named) < best_invented:
+            best, best_invented = candidates, len(named)
+        correction = ("\n    Your last attempt named places this page does not have: "
+                      + ", ".join(f'"{name}"' for name in named)
+                      + ". Use only what is listed above. If the persona wants something the "
+                      "page does not offer, write the task as looking for it and finding out "
+                      "whether it is there.\n")
+        return None
 
     for attempt in range(5):
         try:
@@ -471,11 +542,11 @@ def generate_tasks(theme, customer_profile, url):
             if attempt > 0:
                 print(f"Retrying in parallel with {models_to_try}")
                 time.sleep(TASK_RETRY_WAIT_SECONDS)
-                response = call_llm_parallel(client, models_to_try, [{"role": "user", "content": prompt}], response_format={"type": "json_object"})
+                response = call_llm_parallel(client, models_to_try, [{"role": "user", "content": prompt + correction}], response_format={"type": "json_object"})
             else:
                 response = client.chat.completions.create(
                     model=OPENAI_MODEL,
-                    messages=[{"role": "user", "content": prompt}],
+                    messages=[{"role": "user", "content": prompt + correction}],
                     response_format={"type": "json_object"},
                     max_tokens=OPENAI_MAX_COMPLETION_TOKENS,
                 )
@@ -489,7 +560,9 @@ def generate_tasks(theme, customer_profile, url):
                         tasks_json = json.loads(json_match.group())
                         tasks = tasks_json.get("tasks", [])
                         if tasks and isinstance(tasks, list) and len(tasks) >= 5:
-                            return tasks[:10]
+                            accepted = accept(tasks[:10])
+                            if accepted:
+                                return accepted
                     except:
                         pass
 
@@ -497,12 +570,21 @@ def generate_tasks(theme, customer_profile, url):
                 lines = [re.sub(r'^\d+[\.\)]\s*', '', l).strip() for l in content.split('\n') if l.strip()]
                 tasks = [l for l in lines if len(l) > 20 and not l.startswith('{') and not l.startswith('`')]
                 if len(tasks) >= 5:
-                    return tasks[:10]
+                    accepted = accept(tasks[:10])
+                    if accepted:
+                        return accepted
 
             print(f"Attempt {attempt+1} failed to yield valid tasks.")
         except Exception as e:
             print(f"Error in attempt {attempt+1}: {e}")
 
+    if best:
+        # Nothing came back clean. Say so rather than passing them off as checked,
+        # and use them anyway: they are about the right site, and the alternative
+        # is ten numbered placeholders.
+        print(f"No task batch came back free of invented places; using the closest, "
+              f"which named {best_invented}.")
+        return best
     return [f"Task {i+1} for {theme} (Manual fallback)" for i in range(10)]
 
 def handle_generate(theme, customer_profile, num_personas, method, example_file, url, workspace_id,
@@ -520,9 +602,23 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
             if ex_personas:
                 current_profile = ex_personas[0].get('minibio', customer_profile)
 
-        progress(0.02, desc="Thinking...")
+        progress(0.02, desc="Reading the page...")
+        yield "Reading the page...", None, None, None
+        # Read the target once, here, so the status can say whether the tasks that
+        # follow were written against the real page or only against its URL.
+        outline = page_outline_for_tasks(url)
+        page_note = ""
+        if outline:
+            page_note = (f" Tasks were written against the live page "
+                         f"({len(outline.get('navigation') or [])} navigation link(s), "
+                         f"{len(outline.get('headings') or [])} heading(s) read).")
+        else:
+            page_note = (" The page could not be read, so these tasks are general: they describe "
+                         "what the persona wants rather than naming sections, which would be guesses.")
+
+        progress(0.06, desc="Thinking...")
         yield "Thinking...", None, None, None
-        tasks = generate_tasks(theme, current_profile, url)
+        tasks = generate_tasks(theme, current_profile, url, outline=outline)
         tasks_text = "\n".join(tasks) if isinstance(tasks, list) else str(tasks)
 
         requested = int(num_personas)
@@ -570,7 +666,7 @@ def handle_generate(theme, customer_profile, num_personas, method, example_file,
             personas = select_or_create_personas(theme, customer_profile, requested, force_method=method, example_file=example_file, persona_client=personas_client)
 
         progress(1.0, desc="Generation complete!")
-        yield "Generation complete!", tasks_text, personas, tasks
+        yield "Generation complete!" + page_note, tasks_text, personas, tasks
     except Exception as e:
         yield f"Error during generation: {str(e)}", None, None, None
 
@@ -653,6 +749,104 @@ _SEVERITY_ORDER = {"critical": 0, "high": 1, "medium": 2, "low": 3}
 _QUIET_BROWSER_EVENT_TYPES = {"browser.snapshot", "browser.screenshot", "browser.get_url", "browser.get_title",
                               "browser.console_evidence", "browser.network_evidence",
                               "browser.network_har.start", "browser.network_har.stop"}
+
+
+def _persona_thought(event_type: str, data: dict, at: str) -> str | None:
+    """One line of the persona's own thinking, in the order a person thinks it.
+
+    The persona director records the thought pattern the product is built around:
+    what is visible, what they therefore expect, whether that sounded like them,
+    what actually arrived, and -- derived from the gap rather than declared -- how
+    they now feel. Every one of those is a `persona.*` event, and none of them was
+    rendered: the log tab matched `model.reasoning`, `agent.message.end`,
+    `browser.*` and `journey.*`, so a persona run showed its clicks and its
+    timings with the reasoning left as an empty attribution. Returns None for an
+    event this renderer has nothing to say about, so the caller can fall through.
+    """
+    if event_type == "persona.perception":
+        counts = data.get("counts") or {}
+        eyes = data.get("eyes") or {}
+        scan = data.get("scan") or {}
+        seen, total = counts.get("fixated"), counts.get("elements")
+        bits = []
+        if isinstance(seen, int) and isinstance(total, int):
+            bits.append(f"took in **{seen} of {total}** things on the page")
+        if scan.get("pattern"):
+            bits.append(f"scanning in a {scan['pattern']} pattern")
+        # Their eyes, as numbers, because a reader has to be able to tell an
+        # unreadable page from an unusual pair of eyes.
+        if eyes.get("acuity") is not None or eyes.get("contrastSensitivity") is not None:
+            bits.append(f"acuity {eyes.get('acuity', '?')}, contrast sensitivity "
+                        f"{eyes.get('contrastSensitivity', '?')}")
+        line = f"- 👁️ {'; '.join(bits) or 'looked at the page'}{at}"
+        # Present and illegible is a defect in the page. Legible and never
+        # reached is the answer to "why did they not click it". They are
+        # different claims and are never merged.
+        if data.get("notPerceived"):
+            line += ("\n    - **could not read:** "
+                     + ", ".join(str(item) for item in data["notPerceived"][:6]))
+        if data.get("missedWhatTheyCameFor"):
+            missed = ", ".join(str(item.get("name") or item.get("selector"))
+                               for item in data["missedWhatTheyCameFor"][:4])
+            line += f"\n    - **never got to what they came for:** {missed}"
+        return line
+    if event_type == "persona.expectation":
+        visible = str(data.get("visible") or "").strip()
+        expectation = str(data.get("expectation") or "").strip()
+        action = data.get("action") or {}
+        parts = []
+        if visible:
+            parts.append(f"> 👀 {visible}")
+        if expectation:
+            parts.append(f"> 🤔 {expectation}")
+        if action.get("type"):
+            target = action.get("target") or action.get("ref") or action.get("text") or ""
+            parts.append(f"> ➡️ **{action['type']}**{f' {target}' if target else ''}")
+        if not parts:
+            return None
+        return "\n>\n".join(parts) + f"\n>\n> — _what they see, expect, and do_{at}\n"
+    if event_type == "persona.adherence":
+        score, passed = data.get("score"), data.get("passed")
+        mark = "✅" if passed else "🔁"
+        flaw = str(data.get("flaw") or "").strip()
+        line = f"- {mark} sounded like them: **{score}/10**"
+        if not passed:
+            # A regenerated action is the gate working, so the reason it sent the
+            # first one back belongs in the log next to it.
+            line += f" — sent back: {flaw}" if flaw else " — sent back"
+        return line + at
+    if event_type == "persona.adherence_unavailable":
+        reason = str(data.get("reason") or "").strip()
+        return ("- ⚠️ _nothing checked whether these actions sound like this person_"
+                + (f" ({reason})" if reason else "") + at)
+    if event_type == "persona.reflection":
+        gap = str(data.get("gap") or "").strip()
+        observed = str(data.get("observed") or "").strip()
+        matched = data.get("matched")
+        head = "as expected" if matched else "not what they expected"
+        body = gap or observed
+        return (f"> 🔍 **{head}.** {body}\n>\n> — _comparing what arrived with what "
+                f"they expected_{at}\n") if body else f"- 🔍 {head}{at}"
+    if event_type == "persona.affect":
+        # The feeling is derived from the reflection and rendered in words. The
+        # numbers stay beside it: a reader has to be able to disagree with the
+        # wording without losing the measurement.
+        feeling = str(data.get("feeling") or "").strip()
+        state = data.get("state") or {}
+        coping = (data.get("coping") or {}).get("type")
+        numbers = ", ".join(
+            f"{label} {state[key]:.2f}" for key, label in
+            (("frustration", "frustration"), ("confusion", "confusion"), ("effort", "effort"))
+            if isinstance(state.get(key), (int, float)))
+        line = f"- 💗 _{feeling or 'no change in how they feel'}_"
+        if numbers:
+            line += f"  ({numbers})"
+        if coping and coping != "continue":
+            line += f" → **{coping.replace('_', ' ')}**"
+        return line + at
+    if event_type == "persona.nearly_left":
+        return f"- 🚪 _felt like giving up, but had no real reason to yet_{at}"
+    return None
 
 
 def generate_design_agent_brief(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
@@ -784,28 +978,52 @@ def format_persona_thought_log(content_json: str) -> str:
             # Say up front whether this run has the model's real thinking or
             # only its actions, rather than leaving a reader to infer it from
             # an absence.
+            # A persona run's thinking is not in `reasoning` at all: the director
+            # records it as persona.* events, in the order a person thinks. Saying
+            # "no model reasoning was captured" over a full thought timeline is
+            # the wrong thing to tell a reader, so count both.
+            persona_thoughts = [event for event in (run.get("timeline") or [])
+                                if str(event.get("type") or "").startswith("persona.")]
             if reasoning:
                 model_name = next((item.get("model") for item in reasoning if item.get("model")), None)
                 lines.append(f"🧠 **{len(reasoning)} model thought(s)** captured from the director's own "
                              f"reasoning tokens{f' ({model_name})' if model_name else ''}, shown below as "
                              "`💭 … — model reasoning`.\n")
-            else:
+            if persona_thoughts:
+                lines.append(f"🎭 **{len(persona_thoughts)} persona thought(s)** — what they saw, what they "
+                             "expected, whether it sounded like them, what arrived, and how that left them "
+                             f"feeling. Browsed as **{run.get('director') or 'persona'}**.\n")
+            elif not reasoning:
                 lines.append("🧠 _No model reasoning was captured for this run, so the thoughts below are "
                              "the agent's recorded text output and browser actions only._\n")
             # The model's real reasoning is captured from the completions
             # responses (services/journey-worker/node/src/reasoningCapture.js)
             # because journeytest-core drops `thinking` blocks before writing
-            # the timeline. Interleave it by elapsed time so the log reads as
-            # one journey rather than two parallel streams.
+            # the timeline.
+            #
+            # Where it goes depends on whether the run has a persona voice of its
+            # own. Raw completion tokens are the model talking to itself about
+            # machinery -- "We'll click 'How it works' link (ref=e3)", "we need
+            # screenshot evidence" -- in the first person plural, about refs and
+            # evidence rather than about a page. Interleaved with the persona's
+            # thinking under a heading that says "in the persona's own words",
+            # that reads as the person's thinking, and it is not: it is what the
+            # product exists to replace. So a persona run keeps it, labelled as
+            # the model's own working and folded away from the narrative, and an
+            # agent run -- which has no other thinking to show -- interleaves it
+            # as before.
+            model_thoughts = [{"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
+                               "data": {"text": item.get("text")}}
+                              for item in (run.get("reasoning") or [])
+                              if str(item.get("text") or "").strip()]
+            folded_reasoning = model_thoughts if persona_thoughts else []
             timeline = sorted(
-                list(run.get("timeline") or []) + [
-                    {"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
-                     "data": {"text": item.get("text")}}
-                    for item in (run.get("reasoning") or [])
-                    if str(item.get("text") or "").strip()],
+                list(run.get("timeline") or []) + ([] if persona_thoughts else model_thoughts),
                 key=lambda event: event.get("elapsedMs") or 0)
             if timeline:
-                lines.append("**What happened, in the persona's own words:**\n")
+                lines.append("**What happened, in the persona's own words:**\n"
+                             if persona_thoughts else
+                             "**What happened, step by step:**\n")
                 for event in timeline:
                     event_type, event_data = event.get("type", ""), event.get("data") or {}
                     elapsed = event.get("elapsedMs")
@@ -828,6 +1046,9 @@ def format_persona_thought_log(content_json: str) -> str:
                         lines.append(f"> 💭 {thought}\n>\n> — _agent text output_{at}\n")
                     elif event_type == "agent.message.error" and event_data.get("errorMessage"):
                         lines.append(f"- ⚠️ **Model error:** {event_data['errorMessage']}{when}")
+                    elif event_type.startswith("persona.") and (
+                            thought_line := _persona_thought(event_type, event_data, at)):
+                        lines.append(thought_line)
                     elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENT_TYPES:
                         summary = event.get("summary") or event_type
                         lines.append(f"- 🖱️ {summary}{when}")
@@ -838,6 +1059,18 @@ def format_persona_thought_log(content_json: str) -> str:
                 if items:
                     lines.append(f"\n**{label}:**")
                     lines.extend(f"- **{item.get('title', 'Finding')}**: {item.get('description', '')}" for item in items)
+            if folded_reasoning:
+                # Kept, never deleted -- it is the evidence for how a decision was
+                # reached, and a reader auditing an odd action needs it. Folded and
+                # named for what it is, so it is not mistaken for the person.
+                lines.append(f"\n<details><summary>🔧 The model's own working "
+                             f"({len(folded_reasoning)} completions) — machinery behind the thoughts "
+                             "above, not the person's voice</summary>\n")
+                for item in folded_reasoning:
+                    elapsed = item.get("elapsedMs")
+                    at = f" · +{elapsed / 1000:.1f}s" if isinstance(elapsed, (int, float)) else ""
+                    lines.append(f"> 💭 {str(item['data']['text']).strip()}\n>\n> — _model reasoning_{at}\n")
+                lines.append("</details>\n")
             sections.append("\n".join(lines))
         return "\n\n---\n\n".join(sections) if sections else "_No runs recorded in this log._"
     if isinstance(data, dict) and ("behavior" in data or "abilities" in data):
@@ -993,6 +1226,73 @@ def fetch_live_state(run_id: str) -> dict:
                 "reasoning": [], "error": str(error)}
 
 
+def render_live_panes(frame: str, cursor: dict | None, caption: str = "", zoom: float = 2.75) -> str:
+    """The running browser, twice: the whole viewport, and a close-up of the pointer.
+
+    The full pane answers "where is it" and the close-up answers "what is it
+    actually touching" -- at viewport scale a 22px marker over a small control is
+    too coarse to tell a near miss from a hit, which is exactly what a usability
+    reader is trying to see.
+
+    Both panes are the same frame, so the close-up costs no extra capture, no
+    second browser and no second stream. It is a background-position crop of the
+    image already on screen.
+
+    Without a pointer there is nothing to centre on, so the close-up says so
+    rather than magnifying the middle of the page and implying that is where the
+    agent is looking.
+
+    A pointer marked `stale` is where the pointer last actually was, not where it
+    is: every navigation destroys the on-page marker, and in a run that clicks
+    through links that is most of the time. It is still the right place to look,
+    so it is shown -- dimmed, and captioned as "last seen", so the close-up is
+    never read as a live position it cannot support.
+    """
+    image = escape(frame, quote=True)
+    pane = ("flex:1 1 0;min-width:0;border-radius:.5rem;border:1px solid #334155;"
+            "background:#fff;overflow:hidden")
+    label = "font-size:.68rem;letter-spacing:.14em;text-transform:uppercase;opacity:.6;margin:.3rem 0 0"
+
+    full = (f'<div style="{pane}"><img src="{image}" alt="The running browser" '
+            'style="display:block;width:100%"></div>')
+
+    if cursor and cursor.get("viewport", {}).get("width"):
+        viewport = cursor["viewport"]
+        # Percentage background-position pans the magnified image with the
+        # pointer and clamps itself at the edges, so no pane pixel size is needed.
+        x = max(0.0, min(100.0, float(cursor["x"]) / float(viewport["width"]) * 100))
+        y = max(0.0, min(100.0, float(cursor["y"]) / float(viewport["height"]) * 100))
+        stale = bool(cursor.get("stale"))
+        close_up = (
+            f'<div style="{pane};aspect-ratio:{viewport["width"]}/{viewport["height"]};'
+            f'background-image:url({image});background-repeat:no-repeat;'
+            f'background-size:{zoom * 100:.0f}% auto;background-position:{x:.2f}% {y:.2f}%'
+            + (';opacity:.55;filter:grayscale(.35)' if stale else '')
+            + '"></div>')
+        where = f'{int(cursor["x"])}, {int(cursor["y"])}'
+        if stale:
+            age = cursor.get("ageMs")
+            ago = f' {age / 1000:.0f}s ago' if isinstance(age, (int, float)) else ""
+            close_up_caption = f'pointer last seen at {where}{ago} · {zoom:g}×'
+        else:
+            close_up_caption = f'pointer at {where} · {zoom:g}×'
+    else:
+        close_up = (f'<div style="{pane};aspect-ratio:16/10;display:flex;align-items:center;'
+                    'justify-content:center;color:#64748b;font-size:.85rem">'
+                    "The pointer has not moved yet</div>")
+        close_up_caption = "waiting for the pointer"
+
+    return (
+        '<div style="display:flex;gap:12px;flex-wrap:wrap;align-items:flex-start">'
+        f'<div style="flex:1 1 320px;min-width:0">{full}'
+        f'<p style="{label}">Full viewport</p></div>'
+        f'<div style="flex:1 1 320px;min-width:0">{close_up}'
+        f'<p style="{label}">Pointer close-up — {escape(close_up_caption)}</p></div>'
+        "</div>"
+        + (f'<p style="opacity:.6;font-size:.85em">{escape(caption)}</p>' if caption else "")
+    )
+
+
 def render_live_thoughts(reasoning: list[dict]) -> str:
     """The agent's thinking as it arrives, newest first.
 
@@ -1015,7 +1315,21 @@ log_choices_kinds = ("journey.log", "persona.profile")
 
 
 # Gradio UI
-with gr.Blocks(title="UX Analysis Orchestrator") as demo:
+_CREDENTIAL_STORE = None
+
+
+def _credential_store():
+    """Opened lazily so importing this module never touches the database."""
+    global _CREDENTIAL_STORE
+    if _CREDENTIAL_STORE is None:
+        from apps.api.credentials import CredentialStore
+
+        _CREDENTIAL_STORE = CredentialStore()
+    return _CREDENTIAL_STORE
+
+
+with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS,
+               js=credentials_panel.JS) as demo:
     gr.Markdown("# UX Analysis Orchestrator")
     with gr.Row():
         login_button = gr.LoginButton()
@@ -1030,6 +1344,7 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
         # the actual OAuth token, so this dropdown only needs to offer choices, not
         # gate them.
         workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True, allow_custom_value=True)
+        credentials_panel.render(_credential_store(), workspace_selector)
     login_status = gr.Markdown("Sign in with Hugging Face to load your personal and organization workspaces.")
 
     # Connecting GitHub belongs with signing in, not buried in the backup tab: it is
@@ -1642,22 +1957,48 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             compare_videos = [compare_video_1, compare_video_2, compare_video_3, compare_video_4]
 
             with gr.Group(visible=False) as live_group:
-                gr.Markdown("**Following a run as it happens.** The recording is only finalized when the run "
-                            "ends, so there is no video to stream yet \u2014 this is the newest frame the "
-                            "browser has written, beside the model's thinking as it arrives.")
+                gr.Markdown("**Following a run as it happens.** The recording is only finalized when the "
+                            "run ends, so there is no video yet \u2014 this is the browser's own viewport "
+                            "as it paints, with a close-up of what the pointer is touching, and the "
+                            "model's thinking as it arrives.")
                 with gr.Row():
                     live_run = gr.Dropdown(label="Live run", choices=[], interactive=True, allow_custom_value=True)
                     live_refresh = gr.Button("Find live runs")
                     live_follow = gr.Checkbox(label="Follow", value=True)
-                with gr.Row():
-                    live_frame = gr.HTML(visible=False)
-                    live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
+                # The two browser panes take the full width between them; the
+                # model's thinking reads as a column underneath rather than
+                # squeezed into a third of the row beside them.
+                live_frame = gr.HTML(visible=False)
+                live_thoughts = gr.Markdown("_Waiting for the model's first thought..._")
+                # Handing the browser over, for what a run cannot finish on its own:
+                # a second factor, or a challenge that is asking for a human.
+                with gr.Accordion("Take over the browser", open=False):
+                    gr.Markdown(
+                        "Click the picture below to click the same spot in the real browser, and "
+                        "type to send keystrokes. Use it to answer a second factor or a bot "
+                        "challenge, then hand the browser back so the run can carry on.\n\n"
+                        "_The run records that a person intervened: a step someone completed by "
+                        "hand is not a step the product afforded._")
+                    with gr.Row():
+                        takeover_on = gr.Button("Take over", variant="primary")
+                        takeover_off = gr.Button("Hand back")
+                    takeover_status = gr.Markdown("_The agent is driving._")
+                    takeover_canvas = gr.Image(label="Click to click the real browser",
+                                               interactive=False, visible=False,
+                                               show_download_button=False, type="filepath")
+                    with gr.Row():
+                        takeover_text = gr.Textbox(label="Type into the page", scale=3)
+                        takeover_submit = gr.Checkbox(label="Press Enter after", value=False)
+                        takeover_send = gr.Button("Send", scale=1)
                 live_note = gr.Markdown()
                 live_timer = gr.Timer(2.0, active=False)
                 # journeytest-core's own run id for the live run, which is what the
                 # stored artifacts are tagged with. Remembered while the run is live
                 # because the worker forgets the run the moment it ends.
                 live_journey_run = gr.State("")
+                # Whether a person currently has the browser. The poll reads it so
+                # it only pays to decode a frame while somebody is clicking on it.
+                takeover_driving = gr.State(False)
 
             with gr.Group(visible=False) as gallery_group:
                 gallery_run = gr.Dropdown(label="Persona run", choices=[], interactive=True, allow_custom_value=True)
@@ -1851,23 +2192,37 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 return (gr.update(choices=choices, value=choices[0][1]),
                         f"{len(choices)} run(s) in flight.")
 
-            def poll_live_run(run_id, following, journey_run):
+            def _frame_to_image(frame: str):
+                """The streamed frame as an image Gradio can report clicks on.
+
+                Only decoded while somebody is driving: at two seconds a tick it
+                is pure waste the rest of the time.
+                """
+                try:
+                    import base64 as _b64, io as _io
+                    from PIL import Image as _Image
+                    return _Image.open(_io.BytesIO(_b64.b64decode(frame.split(",", 1)[1])))
+                except Exception:
+                    return None
+
+            def poll_live_run(run_id, following, journey_run, driving=False):
                 """One tick of the live view."""
                 if not run_id:
-                    return gr.update(visible=False), "_Pick a live run._", "", gr.update(), journey_run
+                    return (gr.update(visible=False), "_Pick a live run._", "", gr.update(),
+                            journey_run, gr.update())
                 state = fetch_live_state(run_id)
                 thoughts = render_live_thoughts(state.get("reasoning") or [])
                 if state.get("status") == "unreachable":
                     return (gr.update(visible=False), thoughts,
                             f"\u26a0\ufe0f Could not reach the journey worker: {state.get('error', '')}",
-                            gr.update(active=False), journey_run)
+                            gr.update(active=False), journey_run, gr.update())
                 if state.get("status") == "finished":
                     # The capture is cleared when a run ends, so its absence *is* the
                     # end of the run. Stop polling; the handoff below turns the live
                     # view into the ordinary recording of the same run.
                     return (gr.update(visible=False), thoughts,
                             "\u2714\ufe0f This run has finished \u2014 loading its recording\u2026",
-                            gr.update(active=False), journey_run)
+                            gr.update(active=False), journey_run, gr.update())
                 frame = state.get("frame")
                 elapsed = (state.get("elapsedMs") or 0) / 1000
                 note = (f"Live \u00b7 {state.get('frames', 0)} frame(s) captured \u00b7 "
@@ -1876,12 +2231,13 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
                 if not frame:
                     return (gr.update(visible=False), thoughts,
                             note + " \u2014 the browser has not written a frame yet.",
-                            gr.update(active=bool(following)), journey_run)
-                image = (f'<img src="{escape(frame, quote=True)}" alt="Newest frame of the running journey" '
-                         'style="width:100%;border-radius:.5rem;border:1px solid #334155;background:#fff">')
-                caption = escape(str(state.get("frameName") or ""))
-                return (gr.update(visible=True, value=f'{image}<p style="opacity:.6;font-size:.85em">{caption}</p>'),
-                        thoughts, note, gr.update(active=bool(following)), journey_run)
+                            gr.update(active=bool(following)), journey_run, gr.update())
+                panes = render_live_panes(frame, state.get("cursor"),
+                                          caption=str(state.get("frameName") or ""))
+                canvas = (gr.update(value=_frame_to_image(frame), visible=True)
+                          if driving else gr.update())
+                return (gr.update(visible=True, value=panes),
+                        thoughts, note, gr.update(active=bool(following)), journey_run, canvas)
 
             recordings_mode.change(switch_recordings_mode, [recordings_mode, recordings_layout, live_follow],
                                    [single_video_group, compare_group, live_group, gallery_group,
@@ -1923,8 +2279,53 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
 
             # api_name so the live view can be exercised against a real running
             # journey, not only through the browser.
-            live_timer.tick(poll_live_run, [live_run, live_follow, live_journey_run],
-                            [live_frame, live_thoughts, live_note, live_timer, live_journey_run],
+            def _take_over(run_id):
+                outcome = live_control.begin_takeover(run_id or "", reason="manual")
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}", gr.update(visible=False), False
+                return ("**You are driving.** Click the picture to click the page. "
+                        "Hand back when the obstacle is cleared."), gr.update(visible=True), True
+
+            def _hand_back():
+                outcome = live_control.end_takeover()
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}", gr.update(), True
+                return "_The agent is driving._", gr.update(visible=False, value=None), False
+
+            def _click_on_canvas(event: gr.SelectData):
+                """A click in the picture is a click at the same point in the page.
+
+                The frame is a render of the page viewport, so the coordinates
+                need no conversion.
+                """
+                x, y = event.index
+                outcome = live_control.click_at(x, y)
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}"
+                return f"Clicked the page at {int(x)}, {int(y)}."
+
+            def _send_keys(text, submit):
+                if not str(text or ""):
+                    return "Type something to send first."
+                outcome = live_control.type_text(text, submit=bool(submit))
+                if outcome.get("error"):
+                    return f"\u26a0\ufe0f {outcome['error']}"
+                return f"Sent {outcome['typed']} character(s)" + (" and Enter." if submit else ".")
+
+            takeover_on.click(_take_over, [live_run],
+                              [takeover_status, takeover_canvas, takeover_driving],
+                              api_name="take_over_browser")
+            takeover_off.click(_hand_back, None,
+                               [takeover_status, takeover_canvas, takeover_driving],
+                               api_name="hand_back_browser")
+            takeover_canvas.select(_click_on_canvas, None, [takeover_status])
+            takeover_send.click(_send_keys, [takeover_text, takeover_submit], [takeover_status],
+                                api_name="send_keys_to_browser")
+
+            live_timer.tick(poll_live_run,
+                            [live_run, live_follow, live_journey_run, takeover_driving],
+                            [live_frame, live_thoughts, live_note, live_timer, live_journey_run,
+                             takeover_canvas],
                             api_name="poll_live_run").then(
                 hand_off_finished_run, [live_note, live_journey_run, evidence_session, workspace_selector],
                 [recordings_mode, journey_runs_state, recording_slider, journey_video, compare_pick, journey_status],
@@ -2250,6 +2651,63 @@ with gr.Blocks(title="UX Analysis Orchestrator") as demo:
             sid.change(fn=sync_session_ids, inputs=[sid], outputs=session_id_sync_list)
             sid.change(fn=lambda x: x, inputs=[sid], outputs=[active_session_state])
 
+# The provider answered, or did not, as of this many seconds ago. Readiness is
+# polled -- by a deploy script, by a load balancer, by anyone watching -- and a
+# round trip to the model on every poll would be both slow and rude.
+PROVIDER_PROBE_TTL_S = 30.0
+
+
+def build_model_provider_probe(ttl_s: float = PROVIDER_PROBE_TTL_S):
+    """Whether the model endpoint answers, rather than whether a key is set.
+
+    `liveExecutionReady` was computed from `bool(os.getenv("OPENAI_API_KEY"))`:
+    the presence of a string in the environment. Every other dependency in the
+    readiness endpoint gets a real round trip to /healthz; the one thing no run
+    can proceed without got a truthiness test.
+
+    So the Space reported `status: ready`, `personaRuntime: ok`,
+    `liveExecutionReady: true` through four consecutive cycles in which it could
+    not compile a single persona, and the first anyone knew of it was a 500 from
+    a workflow call. A check that cannot fail is not a check.
+
+    /models is the OpenAI-compatible discovery route: it costs no tokens, and a
+    provider that serves it is a provider that is listening. The key goes where
+    it already goes -- in the Authorization header, to the configured endpoint --
+    and only the scheme and host are ever reported back.
+    """
+    held = {"at": 0.0, "result": None}
+
+    def probe():
+        now = time.monotonic()
+        if held["result"] is not None and now - held["at"] < ttl_s:
+            return held["result"]
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
+        base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
+                    or os.getenv("BLABLADOR_BASE_URL")
+                    or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
+        # Scheme and host only. A base URL can carry a key in a query string, and
+        # readiness is the most public thing this service serves.
+        split = urlsplit(base_url)
+        where = f"{split.scheme}://{split.netloc}" if split.netloc else "(not configured)"
+        if not api_key:
+            result = {"status": "unconfigured", "endpoint": where,
+                      "error": "no OPENAI_API_KEY or BLABLADOR_API_KEY in the environment"}
+        else:
+            try:
+                response = requests.get(f"{base_url}/models",
+                                        headers={"authorization": f"Bearer {api_key}"}, timeout=8)
+                response.raise_for_status()
+                result = {"status": "ok", "endpoint": where}
+            except requests.RequestException as error:
+                # str() on a requests failure carries the URL but never the
+                # Authorization header, so this cannot leak the key.
+                result = {"status": "unreachable", "endpoint": where, "error": str(error)[:300]}
+        held.update(at=now, result=result)
+        return result
+
+    return probe
+
+
 if __name__ == "__main__":
     print("Starting workspace-scoped UX analysis application")
 
@@ -2411,6 +2869,8 @@ if __name__ == "__main__":
         return {"session": session, "personas": personas, "job": completed,
                 "artifacts": session_client.list_artifacts(session["session_id"])}
 
+    model_provider_probe = build_model_provider_probe()
+
     @fastapi_app.get("/api/readiness")
     def readiness():
         services = {}
@@ -2427,11 +2887,17 @@ if __name__ == "__main__":
             except requests.RequestException as error:
                 services[name] = {"status": "unavailable", "error": str(error)}
         model_configured = bool(os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY"))
+        provider = model_provider_probe()
+        services_ok = all(item.get("status") in {"ok", "ready"} for item in services.values())
         return {
-            "status": "ready" if all(item.get("status") in {"ok", "ready"} for item in services.values()) else "degraded",
+            # A run needs the model as much as it needs any of the four services,
+            # so the provider counts towards the overall word the same way they do.
+            "status": "ready" if services_ok and provider["status"] == "ok" else "degraded",
             "services": services,
+            "modelProvider": provider,
             "modelCredentialsConfigured": model_configured,
-            "liveExecutionReady": model_configured and services.get("personaRuntime", {}).get("tinytroupeAvailable", False)
+            "liveExecutionReady": provider["status"] == "ok"
+                and services.get("personaRuntime", {}).get("tinytroupeAvailable", False)
                 and services.get("journeyWorker", {}).get("engine") == "journeytest",
         }
 

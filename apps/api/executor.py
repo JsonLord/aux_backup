@@ -9,9 +9,11 @@ import base64
 from html import escape
 from io import BytesIO
 import json
+import math
 import os
 from pathlib import Path
 import re
+import shutil
 from typing import Any
 from urllib import request
 
@@ -60,6 +62,20 @@ _PROBLEM_MARKERS = re.compile(
     r"contrast ratio|unlabel\w*|unreadable|illegible|inaccessible)\b", re.I)
 
 
+def _reads_as_timeout(error: BaseException) -> bool:
+    """Whether this urllib failure is "the answer did not arrive in time".
+
+    A read timeout surfaces as socket.timeout, which is TimeoutError since 3.10;
+    a connect timeout is wrapped in URLError with the same object as its reason.
+    Anything else -- refused, DNS, reset -- means the worker was never going to
+    answer, and there is nothing on disk to go looking for.
+    """
+    if isinstance(error, TimeoutError):
+        return True
+    reason = getattr(error, "reason", None)
+    return isinstance(reason, TimeoutError)
+
+
 def _reads_as_praise(title: str, description: str) -> bool:
     """True when a verdict finding describes a design decision that works.
 
@@ -84,13 +100,34 @@ _PROSE_STOPWORDS = frozenset({
     "might", "seem", "seems", "about", "other", "each", "between", "than", "then", "because",
     "while", "where", "what",
 })
-_SUFFIXES = ("ations", "ation", "ings", "ing", "ers", "er", "ies", "ied", "es", "ed", "s")
+# Plural stripping is handled first and on its own (see _stem), so these must not
+# contain a plural rule: two rules that can both fire on one word are how the
+# stemmer came to disagree with itself about "price" and "prices".
+_SUFFIXES = ("ations", "ation", "ings", "ing", "ers", "er", "ied", "ed")
+# English adds "es" rather than "s" after a sibilant. Without this, "classes"
+# stemmed to "classe" while "class" stemmed to "class".
+_SIBILANTS = "sxzhi"
 
 
 def _stem(word: str) -> str:
-    """Crude suffix stripping, enough that "navigation"/"navigate",
-    "control"/"controls" and "confusion"/"confusing" compare equal. Two findings
-    describing one problem rarely reuse the same inflections."""
+    """Crude suffix stripping, enough that "control"/"controls" and
+    "price"/"prices" compare equal. Two findings describing one problem rarely
+    reuse the same inflections.
+
+    The plural comes off first, once, and by English's own rules, because the
+    length guard below made two of these rules disagree on exactly the pair they
+    exist for: "prices" is six letters, so it cleared `len > len("es") + 3` and
+    stemmed to "pric", while "price" is five, cleared nothing, and stayed "price".
+    A live report threw away the one quote that was genuinely about its finding --
+    "No price was visible anywhere." under a finding about text reading "Prices
+    exclude VAT" -- because the two words shared no stem.
+    """
+    if len(word) > 4 and word.endswith("ies"):
+        word = word[:-3] + "y"                       # policies -> policy
+    elif len(word) > 3 and word.endswith("es") and word[-3] in _SIBILANTS:
+        word = word[:-2]                             # classes -> class, boxes -> box
+    elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        word = word[:-1]                             # prices -> price, links -> link
     for suffix in _SUFFIXES:
         if len(word) > len(suffix) + 3 and word.endswith(suffix):
             return word[: -len(suffix)]
@@ -125,36 +162,199 @@ def _is_run_diagnostic(finding: dict[str, Any]) -> bool:
     return any(pattern.search(text) for pattern in _RUN_DIAGNOSTIC_PATTERNS)
 
 
-def _capture_name(path: str | None) -> str:
+# A run's own instruments failing. Each is recorded by the persona director the
+# moment it happens, and each makes the run weaker in a way a reader cannot infer
+# from the findings: the measurement stopped, so an absence of findings means
+# nothing. Matching on finding *text* (above) can never catch these -- they
+# produce no finding at all, which is exactly the problem.
+_INSTRUMENT_FAILURES = {
+    "persona.perception_unavailable": (
+        "The run stopped seeing the page through this person's eyes",
+        "The perception service stopped answering, so the rest of this run reasoned about the "
+        "accessibility tree instead of the rendered pixels. No eyesight finding -- text too small "
+        "or too low-contrast for this person to read, anything they never looked at -- could be "
+        "made after that point. Their absence from this report is not evidence that the page has "
+        "none."),
+    "persona.adherence_unavailable": (
+        "Nothing checked whether the actions sounded like this person",
+        "The adherence judge stopped answering, so from that point the persona's actions were "
+        "taken as-is rather than scored against who they are and sent back when they did not fit. "
+        "The run still browsed as this person's abilities and patience dictate; what stopped is "
+        "the check on whether its choices read like them."),
+}
+
+
+def _instrument_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run diagnostics for a run whose own instruments failed mid-flight.
+
+    A live report came back with `run_diagnostics: []` on a run where the whole
+    perception path had never executed. Nothing was wrong with the diagnostic
+    mechanism: it filters *findings* by their wording, and an instrument that stops
+    answering produces no finding to filter. So read the events the director writes
+    when it notices, and report those.
+    """
+    diagnostics = []
+    for journey in journeys:
+        run_id = journey.get("runId")
+        for event in journey.get("timeline") or []:
+            entry = _INSTRUMENT_FAILURES.get(str(event.get("type") or ""))
+            if not entry:
+                continue
+            title, summary = entry
+            data = event.get("data") or {}
+            reason = str(data.get("reason") or "").strip()
+            diagnostics.append({
+                "severity": "high", "category": "harness", "title": title,
+                "summary": summary + (f" Reported reason: {reason}" if reason else ""),
+                "recommendation": "Check the service is reachable from the worker and re-run; the "
+                                  "findings this run could not make are still unknown, not absent.",
+                "evidence": f"{event.get('type')} at step {data.get('sinceStep', '?')} of run {run_id}",
+                "source": "instrument", "runId": run_id,
+                "personaId": journey.get("profileId")})
+    return diagnostics
+
+
+def _capture_name(path: str | None, kind: str = "", job_id: str = "") -> str:
     """The name a capture is known by, not where the container happened to write it.
 
     A live deck rendered "snapshot: /home/user/artifacts/journeys/2026-08-30T10-57-
     43-548Z-job_08147074e9f648a58d3c/snapshots/005-snapshot.txt" as its root-cause
     analysis. The absolute path says nothing to a reader and is meaningless once the
-    container is gone; the capture's own name ("005-snapshot.txt") is what the
-    evidence artifacts in the workspace are listed under."""
-    return Path(str(path)).name if path else ""
+    container is gone.
+
+    The capture's own file name is no better for finding the thing: the run writes
+    "003-snapshot.txt" and the workspace lists the same capture as
+    "browser-snapshot-<job>-003-snapshot.json" (JobExecutor._download_name). A live
+    report cited "snapshot: 003-snapshot.txt" for its only finding, and no artifact
+    in the session was called that -- the evidence existed and was unreachable by
+    the name given for it. With the kind and job known, cite the name the artifact
+    is actually listed under; otherwise fall back to the capture's own name, which
+    at least names the capture."""
+    if not path:
+        return ""
+    name = Path(str(path)).name
+    if not kind or not job_id:
+        return name
+    return JobExecutor._download_name(kind, job_id, Path(name).stem)
 
 
-def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
+def _evidence_reference_summary(evidence: dict[str, Any] | None, job_id: str = "") -> str:
     """Render a JourneyTest EvidenceReference (screenshot/snapshot/observation/... path
-    or text) into a single human-readable string for the report's ``evidence`` field."""
+    or text) into a single human-readable string for the report's ``evidence`` field.
+
+    ``job_id`` is what lets a citation name the artifact a reader can actually
+    download rather than the file name the run happened to use. It is optional
+    because a finding is still worth reporting when it is not known."""
     if not evidence:
         return "No evidence reference recorded on this finding."
     parts = []
     if evidence.get("observation"):
         parts.append(evidence["observation"])
     if evidence.get("screenshot"):
-        parts.append(f"screenshot: {_capture_name(evidence['screenshot'])}")
+        parts.append(f"screenshot: {_capture_name(evidence['screenshot'], 'browser.screenshot', job_id)}")
     if evidence.get("snapshot"):
-        parts.append(f"snapshot: {_capture_name(evidence['snapshot'])}")
+        parts.append(f"snapshot: {_capture_name(evidence['snapshot'], 'browser.snapshot', job_id)}")
     if evidence.get("uiChangeTimeline"):
-        parts.append(f"UI change timeline: {_capture_name(evidence['uiChangeTimeline'])}")
+        parts.append("UI change timeline: "
+                     f"{_capture_name(evidence['uiChangeTimeline'], 'browser.ui-change', job_id)}")
     if evidence.get("url"):
         parts.append(f"url: {evidence['url']}")
     if evidence.get("videoTimeMs") is not None:
         parts.append(f"video @ {evidence['videoTimeMs']}ms")
     return "; ".join(parts) if parts else "Evidence reference recorded without a readable field."
+
+
+# What a citation in a report looks like: the name an evidence artifact is listed
+# under (JobExecutor._download_name).
+# A label a persona quoted while saying what it expected -- the human name for a
+# control the action record only has a ref for.
+_QUOTED_LABEL = re.compile(r"['\u2018\u201c\"]([^'\u2019\u201d\"]{2,60})['\u2019\u201d\"]")
+# "Clicking the Annual button will..." -- the thing a sentence names as the one
+# being acted on, when the persona did not put quotes round it.
+_NAMED_CONTROL = re.compile(
+    r"\b(?:click(?:ing)?|press(?:ing)?|select(?:ing)?|tapp?(?:ing)?)\s+(?:on\s+)?(?:the\s+)?"
+    r"([\w'\u2019\u00b7][\w'\u2019\u00b7\- ]{0,40}?)\s+(?:button|link|tab|toggle|control|icon)\b",
+    re.IGNORECASE)
+_CITED_CAPTURE = re.compile(r"\bbrowser-(?:screenshot|snapshot|ui-change|video)-[\w.-]+", re.I)
+
+
+def _grey_at_luminance(luminance: float) -> str:
+    """The neutral grey with this relative luminance, as a hex the reader can try.
+
+    A luminance is not a colour -- many colours share one -- so this is offered as
+    a worked example of something dark enough rather than as the colour the page
+    should use. The inverse of the sRGB transfer function, which is what the WCAG
+    definition of relative luminance applies in the first place.
+    """
+    luminance = min(1.0, max(0.0, float(luminance)))
+    channel = (luminance * 12.92 if luminance <= 0.0031308
+               else 1.055 * (luminance ** (1 / 2.4)) - 0.055)
+    # Down, never to nearest. Rounding to nearest returned #777777 for a target of
+    # 0.1833 -- one step above it, at 0.1845, so the colour offered as the fix
+    # would itself have failed the check. A suggestion that does not clear the bar
+    # is worse than no suggestion.
+    value = max(0, min(255, math.floor(channel * 255)))
+    return f"#{value:02x}{value:02x}{value:02x}"
+
+
+def contrast_fix(contrast: dict[str, Any]) -> str:
+    """What to change on this page, from what was measured on it.
+
+    "Raise the contrast to at least 4.5:1" restates the guideline the finding has
+    already quoted; it is not a fix. The measurement knows both luminances and the
+    arithmetic gives the target exactly, so the report can say how far the darker
+    side has to move and offer a grey that gets there.
+    """
+    target = contrast.get("needsLuminanceBelow")
+    ink, paper = contrast.get("inkLuminance"), contrast.get("paperLuminance")
+    if target is None and ink is not None:
+        # No colour, black included, reaches the requirement against this
+        # background: telling anyone to darken the text is advice that cannot be
+        # taken, and the background is what has to move.
+        return ("No foreground colour can reach this ratio against the background it is on -- "
+                "black text would still fall short. The background is what has to change here, "
+                "not the text.")
+    if target is None or ink is None or paper is None:
+        return ""
+    if ink <= target:
+        return ""
+    return (f"Measured on the pixels: the darker side sits at {ink:g} relative luminance and has "
+            f"to reach {target:g} or below against a background at {paper:g}. "
+            f"{_grey_at_luminance(target)} is a neutral that gets there -- any colour at or below "
+            f"that luminance does.")
+
+
+def cited_captures(report: dict[str, Any]) -> set[str]:
+    """Every capture name this report asks a reader to go and look at.
+
+    Read off the rendered citations rather than off the findings' fields, because
+    the citation is what the reader actually has to resolve. A finding may carry a
+    path that never became an artifact, and the report would still read as though
+    the evidence were there.
+    """
+    found: set[str] = set()
+
+    def walk(value: Any) -> None:
+        if isinstance(value, str):
+            found.update(match.group(0) for match in _CITED_CAPTURE.finditer(value))
+        elif isinstance(value, dict):
+            for item in value.values():
+                walk(item)
+        elif isinstance(value, list):
+            for item in value:
+                walk(item)
+
+    walk(report)
+    return found
+
+
+def unresolvable_citations(report: dict[str, Any], available: set[str]) -> list[str]:
+    """Capture names the report cites that this session does not actually hold.
+
+    Evidence a reader cannot resolve from its citation is evidence the report did
+    not really produce, and it is worse than no citation: it reads as corroborated.
+    """
+    return sorted(cited_captures(report) - available)
 
 
 class JobExecutor:
@@ -175,6 +375,24 @@ class JobExecutor:
         try:
             if job["type"] == "combined_test":
                 result = self._combined_test(job)
+                captures = self._browser_outputs(result)
+                # Every capture this session will actually hold, by the name a
+                # reader would search for. Checked before the report is rendered,
+                # because a citation that resolves to nothing is worse than no
+                # citation: it reads as corroborated. A live report cited
+                # "snapshot: 003-snapshot.txt" and no artifact in the session was
+                # called that.
+                available = {self._download_name(item[0], job_id,
+                                                 (item[3] if len(item) > 3 else {}).get("capture_stem"))
+                             for item in captures}
+                missing = unresolvable_citations(result, available)
+                if missing:
+                    result.setdefault("limitations", []).append(
+                        f"{len(missing)} capture(s) cited in this report were not kept as artifacts in "
+                        f"this session, so they cannot be opened from it: {', '.join(missing[:6])}"
+                        + ("..." if len(missing) > 6 else "")
+                        + ". The finding still stands on its measurement; only the pointer to the "
+                        "capture is broken.")
                 outputs = [
                     ("ux.report", "application/json", result),
                     ("ux.presentation", "text/html", self._presentation(result)),
@@ -186,7 +404,7 @@ class JobExecutor:
                         "runs": result.get("journey_outcome", {}).get("runs", []),
                     }),
                 ]
-                outputs.extend(self._browser_outputs(result))
+                outputs.extend(captures)
             elif job["type"] == "ui_adaptation":
                 result = self._ui_adaptation(job)
                 outputs = [("ui.prototype", "text/html", result)]
@@ -243,33 +461,72 @@ class JobExecutor:
         # field was never included, so any such task failed unconditionally
         # with no way to opt in.
         browser_safety = data.get("browserSafety") or {}
+        # A run browses signed in when it is handed a session file. Without this
+        # the credentials a workspace has stored were unreachable from a run, so
+        # every run tested the logged-out product however many were saved.
+        session_state_path, issued = self._prepare_run_session(job, data, personas)
         if worker_url:
-            for persona in personas:
-                payload = json.dumps({"runId": f"{job['job_id']}_{persona.get('id', len(journeys))}", "url": data.get("url"),
-                    "tasks": tasks, "profile": persona, "browserSafety": browser_safety}).encode()
-                call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
-                try:
-                    with request.urlopen(call, timeout=float(os.getenv("JOURNEY_RUN_TIMEOUT", "600"))) as response:
-                        journey = json.loads(response.read())
-                        if journey.get("runStatus") == "error" or journey.get("error"):
-                            message = (journey.get("error") or {}).get("message", "unknown JourneyTest error")
-                            raise RuntimeError(f"JourneyTest run failed: {message}")
-                        journeys.append(journey)
-                except request.HTTPError as error:
-                    detail = error.read().decode("utf-8", errors="replace")[:2000]
-                    if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
-                        raise RuntimeError(
-                            "Journey worker rejected run (422): one of the configured tasks reads as a "
-                            "potentially irreversible action (purchase, account deletion, submission, "
-                            "production deploy, ...). This run did not opt in to allow it -- re-run with "
-                            "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
-                            "allow_irreversible_actions: true (API) if the task is genuinely meant to "
-                            f"perform it. Raw detail: {detail}") from error
-                    raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
+            try:
+                for persona in personas:
+                    run_identity = issued.get(persona.get("id")) if issued else None
+                    run_id = f"{job['job_id']}_{persona.get('id', len(journeys))}"
+                    payload = json.dumps({"runId": run_id, "url": data.get("url"),
+                        "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
+                        **({"sessionStatePath": session_state_path} if session_state_path else {}),
+                        **({"identity": run_identity} if run_identity else {})}).encode()
+                    call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
+                    try:
+                        with request.urlopen(call, timeout=self._journey_run_timeout()) as response:
+                            journey = json.loads(response.read())
+                            journeys.append(self._usable_journey(journey))
+                    except request.HTTPError as error:
+                        detail = error.read().decode("utf-8", errors="replace")[:2000]
+                        if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
+                            raise RuntimeError(
+                                "Journey worker rejected run (422): one of the configured tasks reads as a "
+                                "potentially irreversible action (purchase, account deletion, submission, "
+                                "production deploy, ...). This run did not opt in to allow it -- re-run with "
+                                "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
+                                "allow_irreversible_actions: true (API) if the task is genuinely meant to "
+                                f"perform it. Raw detail: {detail}") from error
+                        raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
+                    except (TimeoutError, request.URLError) as error:
+                        # Ordered after HTTPError, which subclasses URLError -- a
+                        # rejected run must keep its own message.
+                        if not _reads_as_timeout(error):
+                            raise
+                        # The run itself is still going and will still write its
+                        # result to disk; only this side of the socket gave up. The
+                        # artifact tree is reachable from here whenever the API and
+                        # the worker share a filesystem, which is how the Space runs
+                        # them -- so read the verdict from there rather than throw it
+                        # away with the connection.
+                        salvaged = self._journey_from_disk(run_id)
+                        if salvaged is None:
+                            raise RuntimeError(
+                                f"Journey worker did not answer within {self._journey_run_timeout():.0f}s "
+                                f"and no result for {run_id} was found on disk. Raise JOURNEY_RUN_TIMEOUT "
+                                f"if runs against this target legitimately take longer.") from error
+                        journeys.append(self._usable_journey(
+                            {**salvaged, "profileId": salvaged.get("profileId") or persona.get("id"),
+                             "simulationProfile": salvaged.get("simulationProfile") or persona}))
+            finally:
+                # The session file is a live login. It exists for the runs that
+                # need it and not a moment longer -- including when one of them
+                # raises, which is exactly when it would otherwise be left behind.
+                if session_state_path:
+                    shutil.rmtree(Path(session_state_path).parent, ignore_errors=True)
         if worker_url:
-            findings = self._pain_points_from_journeys(journeys)
-            cohort_runs, screenshot_bytes, raw_strengths, vision_error = self._collect_vision_pain_points(
-                journeys, tasks, personas, data.get("url"))
+            findings = self._pain_points_from_journeys(journeys, job["job_id"])
+            # What the persona's eyes made of the page. Two finding classes that
+            # exist nowhere else, because no check against the DOM can produce
+            # either -- see _pain_points_from_perception.
+            findings += self._pain_points_from_perception(journeys)
+            # What the page looked like it would do and then did not. First-hand,
+            # falsifiable, and invisible to every other source here.
+            findings += self._pain_points_from_expectations(journeys)
+            cohort_runs, screenshot_bytes, raw_strengths, vision_error, repeated_captures = \
+                self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             # The vision model has a "strengths" array and still puts praise in
             # "issues" -- a live run published "Familiar and clean layout" as a
@@ -278,16 +535,29 @@ class JobExecutor:
             vision_praise = [item for item in vision_findings
                              if _reads_as_praise(item.get("title"), item.get("summary"))]
             vision_findings = [item for item in vision_findings if item not in vision_praise]
+            # The vision model reads screenshots confidently, and two of the things
+            # it says are checkable against what this run recorded. Where they
+            # disagree the measurement wins, and the report says so rather than
+            # quietly rewriting a severity.
+            tempered = (self._temper_contradicted_findings(vision_findings, journeys)
+                        + self._cap_claimed_impact(vision_findings, journeys))
             findings.extend(vision_findings)
             preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys)
                                               + self._praise_as_strengths(vision_praise))
                         + self._preserved_from_verdicts(journeys))
-            evidence_language, journey_status = "observed", "completed"
+            # A run kept by _usable_journey() saw real pages but did not get to the
+            # end of the journey. Saying "completed" about it would overstate the
+            # coverage behind every finding below, so the status carries the
+            # difference and the limitation names what went wrong.
+            degraded = [journey for journey in journeys if journey.get("harnessError")]
+            evidence_language = "observed"
+            journey_status = "partial" if degraded else "completed"
             limitations = [
                 "Findings are JourneyTest's own evidence-grounded verdict (blockers/uxFindings/"
                 "suggestedImprovements/failed pass-criteria) from a real browser run against the "
                 "target URL, not text inferred from the task description.",
             ]
+            limitations.extend(tempered)
             if vision_findings:
                 limitations.append(
                     "Findings tagged source=eyeson-vision-synthesis are cross-persona-aggregated (spec.md "
@@ -304,6 +574,24 @@ class JobExecutor:
                     "critical_pain_points reflect JourneyTest's own task-completion verdict only, not a "
                     "deeper visual/accessibility critique of the screenshots."
                 )
+            if repeated_captures:
+                limitations.append(
+                    f"{len(repeated_captures)} full-page capture(s) came back as one viewport band repeated "
+                    "down a very tall image -- what a stitched screenshot produces when the page pins its "
+                    "layout to the viewport. They were trimmed to the single band that is a faithful "
+                    "screenshot before anything was asked about them, so findings from those captures "
+                    "describe the top of the page rather than its full length. Untrimmed, a live run "
+                    "reported the repetition itself as a critical defect in a site that does not have one.")
+            for journey in degraded:
+                persona_id = journey.get("profileId") or journey.get("testerProfileId") or "unknown persona"
+                verdict_note = ("its verdict was recorded before the failure and is included"
+                                if journey.get("verdict")
+                                else "no verdict was reached, so this run contributes screenshots only")
+                limitations.append(
+                    f"The run for {persona_id} did not finish cleanly: {journey['harnessError']}. "
+                    f"The evidence it had already collected is real and is used, but the journey was cut "
+                    f"short -- {verdict_note}. Findings from this run cover only what it reached."
+                )
         else:
             findings = [{"severity": "medium", "category": "ux", "title": f"Validate task clarity: {task}",
                 "summary": "", "evidence": "Inferred from the configured task; JOURNEY_WORKER_URL is not "
@@ -315,9 +603,18 @@ class JobExecutor:
                            "browser evidence was collected, so these findings are inferred from "
                            "the configured task text alone."]
         if worker_url and not findings:
-            findings.append({"severity": "low", "category": "ux", "title": "No pain points detected",
-                "summary": "Neither JourneyTest's verdict nor the vision-based UX critique reported "
-                           "any blockers, UX findings, or failed pass criteria for the configured tasks.",
+            # "Nothing found" and "the run never got far enough to find anything"
+            # look identical from here, and only one of them is a clean bill of
+            # health. When every run was cut short, say which one this is.
+            cut_short = journey_status == "partial" and len(degraded) == len(journeys)
+            findings.append({"severity": "low", "category": "ux",
+                "title": "Journey ended early -- no findings collected" if cut_short else "No pain points detected",
+                "summary": ("Every run was cut short before it produced a verdict, and the vision critique "
+                            "found nothing in the screenshots it reached. This is not a clean result: the "
+                            "tasks were not fully exercised. See limitations for what went wrong."
+                            if cut_short else
+                            "Neither JourneyTest's verdict nor the vision-based UX critique reported "
+                            "any blockers, UX findings, or failed pass criteria for the configured tasks."),
                 "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
                 "source": "verdict"})
         # A harness failure is real but is not a usability finding about the product;
@@ -325,6 +622,10 @@ class JobExecutor:
         # journey" was) misrepresents both.
         run_diagnostics = [finding for finding in findings if _is_run_diagnostic(finding)]
         findings = self._merge_similar_findings([finding for finding in findings if finding not in run_diagnostics])
+        # Added after the split, not before: an instrument failure is a diagnostic by
+        # construction and must never be merged into, or dropped by, the usability
+        # findings it is reported alongside.
+        run_diagnostics = _instrument_diagnostics(journeys) + run_diagnostics
         findings, unverified = self._drop_unverifiable_quotes(findings, self._visible_text_corpus(journeys))
         if unverified:
             quoted = "; ".join(f"{item['title']!r} (quoted {', '.join(repr(q) for q in item['quotes'])})"
@@ -345,6 +646,16 @@ class JobExecutor:
         self._attach_verdict_screenshots(findings, journeys)
         self._attach_redesigns(findings, data.get("url"))
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
+        if any(source.startswith("persona.") for source in sources):
+            limitations.append(
+                "Persona quotes are the person's own account of the page, recorded by the persona director as "
+                "it browsed: what they expected a control to do before they touched it "
+                "(`persona.expectation`), what actually arrived and how it differed (`persona.reflection`), "
+                "and how that left them (`persona.affect`, worded from the gap rather than declared). They "
+                "are first-person statements about a page. They are not the model's completion tokens, which "
+                "are its own working about refs and evidence capture and are kept out of the report's quotes "
+                "for exactly that reason."
+            )
         if "model.reasoning" in sources:
             limitations.append(
                 "Persona quotes are the director model's own reasoning tokens for each request, captured "
@@ -363,7 +674,8 @@ class JobExecutor:
                 "`timeline`, or `verdict*`); they are not interchangeable."
             )
         return {"schema_version": "1.1", "mode": "user_journey", "url": data.get("url"),
-                "executive_summary": self._executive_summary(data.get("url"), tasks, personas, findings, preserve),
+                "executive_summary": self._executive_summary(data.get("url"), tasks, personas,
+                                                             findings, preserve, journeys),
                 "synthetic_users": personas, "persona_artifacts": persona_artifacts,
                 "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys},
                 "critical_pain_points": findings,
@@ -423,6 +735,21 @@ class JobExecutor:
         scored 0.86 and every wrong one 0.29 or less.
         """
         for finding in findings:
+            # A finding that arrived with its own quotes keeps them. The
+            # broken-promise finding pairs each quote to the exact step that
+            # produced it -- the reflection recorded immediately after that
+            # action -- and this matches by title similarity across the whole
+            # run, which is strictly worse evidence for the same claim.
+            #
+            # Overwriting it put the persona's *expectation* under a finding as
+            # evidence of what went wrong: "Clicking the Monthly toggle button
+            # will display the specific monthly cost amounts" quoted as the
+            # complaint, when the complaint the run recorded was "monthly cost
+            # amounts for the tiers are not shown". A prediction presented as an
+            # observation, and the expectation scored better only because the
+            # title is made from it.
+            if finding.get("personaEvidence"):
+                continue
             persona_ids = finding.get("affectedPersonaIds") or (
                 [finding["personaId"]] if finding.get("personaId") else [])
             subject = (cls._text_tokens(finding.get("title") or "")
@@ -503,21 +830,1040 @@ class JobExecutor:
 
     @staticmethod
     def _executive_summary(url: str | None, tasks: list[str], personas: list[dict[str, Any]],
-                           findings: list[dict[str, Any]], preserve: list[dict[str, Any]]) -> str:
-        """State what was actually found, not what was merely prepared."""
-        blocking = sum(1 for finding in findings
-                       if str(finding.get("severity")) in {"critical", "high"}
-                       and finding.get("title") != "No pain points detected")
-        real = [finding for finding in findings if finding.get("title") != "No pain points detected"]
-        parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) against {url or 'the target site'}."]
+                           findings: list[dict[str, Any]], preserve: list[dict[str, Any]],
+                           journeys: list[dict[str, Any]] | None = None) -> str:
+        """State what was actually found, not what was merely prepared.
+
+        A count is not a summary. "12 usability issues were identified, 3 of them
+        high-severity" is true of almost any report and tells a reader nothing
+        they can act on -- they still have to read all twelve to learn whether
+        the site has a pricing problem or a checkout problem. So the worst
+        finding is named, and the two classes that only this pipeline can produce
+        are called out by name when they occur, because a reader will not know to
+        look for them.
+        """
+        real = [finding for finding in findings
+                if finding.get("title") != "No pain points detected"
+                and str(finding.get("severity")) not in JobExecutor._NOT_A_PROBLEM]
+        noted = [finding for finding in findings
+                 if str(finding.get("severity")) in JobExecutor._NOT_A_PROBLEM]
+        blocking = [finding for finding in real
+                    if str(finding.get("severity")) in {"critical", "high"}]
+        parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) "
+                 f"against {url or 'the target site'}."]
+        # How far the runs actually got, before any count of what they found. A
+        # live report opened "1 synthetic user(s) attempted 2 task(s) ... 10
+        # usability issue(s) were identified" over a run that errored after a
+        # single action on a 429 from the model endpoint. Every other part of the
+        # report was honest about it -- journey_outcome.status said "partial", a
+        # limitation named the error -- but the one line most readers read
+        # presented a collapsed run as a finished review. A caveat five items into
+        # a limitations array is a caveat nobody reads.
+        cut_short = [journey for journey in (journeys or []) if journey.get("harnessError")]
+        if cut_short:
+            steps = sum(1 for journey in cut_short for event in journey.get("timeline") or []
+                        if event.get("type") == "persona.expectation")
+            parts.append(
+                f"{len(cut_short)} of those run(s) stopped early and did not finish the tasks"
+                + (f" -- one got {steps} action(s) in" if len(cut_short) == 1 and steps else "")
+                + ", so what follows is what was seen before that, not a full review.")
         parts.append(f"{len(real)} usability issue(s) were identified"
-                     + (f", {blocking} of them high-severity or blocking." if blocking else "."))
+                     + (f", {len(blocking)} of them high-severity or blocking." if blocking else "."))
+
+        # The single thing to fix first, named rather than counted.
+        worst = (blocking or real)
+        if worst:
+            parts.append(f"The most serious is: {worst[0].get('title')}.")
+
+        unreadable = [f for f in real if f.get("source") == "perception.notPerceived"]
+        missed = [f for f in real if f.get("source") == "perception.missed"]
+        if unreadable:
+            parts.append(f"{len(unreadable)} element(s) are present in the page but not legible "
+                         "once these users' eyesight is applied to what was actually drawn.")
+        if missed:
+            parts.append(f"{len(missed)} thing(s) a user came for were readable and on screen, "
+                         "and were never looked at -- a prominence problem rather than a wording one.")
+        if noted:
+            # Said, and deliberately not counted: the page is compliant in these
+            # places and one unusual profile had trouble, which is worth knowing
+            # and is not a defect.
+            parts.append(f"{len(noted)} further observation(s) apply to one unusual profile each "
+                         "rather than to the site.")
         if preserve:
             parts.append(f"{len(preserve)} design decision(s) are working and should be preserved.")
         return " ".join(parts)
 
     @staticmethod
-    def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _journey_run_timeout() -> float:
+        """How long to wait for one Journey run before giving up on the socket.
+
+        The old 600s default was below every real measurement taken against this
+        stack: live runs of the same two-task journey finished in 855s and 1159s.
+        A default that expires mid-run turns a working pipeline into a job that
+        fails ten minutes in, so it is set past what runs actually take, and
+        JOURNEY_RUN_TIMEOUT still overrides it for slower or faster targets.
+        """
+        try:
+            return float(os.getenv("JOURNEY_RUN_TIMEOUT", "1800"))
+        except (TypeError, ValueError):
+            return 1800.0
+
+    @staticmethod
+    def _journey_artifact_root() -> Path:
+        """Where the worker writes runs -- the same resolution the worker itself uses
+        (services/journey-worker/node/src/journeytest.js)."""
+        return Path(os.getenv("JOURNEY_ARTIFACT_ROOT", "/tmp/aux-journeys"))
+
+    @classmethod
+    def _journey_from_disk(cls, run_id: str) -> dict[str, Any] | None:
+        """The run's own result file, when the HTTP answer never arrived.
+
+        journeytest-core writes `<root>/<startedAt>-<runId>/run.json` as the run
+        ends, so a verdict exists on disk whether or not the client is still
+        listening. Both the directory and the file's own `runId` carry that
+        timestamp prefix (a live file records "2026-09-10T00-33-40-422Z-live_fw_final"
+        for a run submitted as "live_fw_final"), so the id we sent is a suffix of
+        the one on disk, never an exact match. Newest first, because a re-run of the
+        same id writes a second directory beside the first.
+        """
+        root = cls._journey_artifact_root()
+        try:
+            candidates = sorted((path for path in root.glob(f"*{run_id}/run.json")),
+                                key=lambda path: path.stat().st_mtime, reverse=True)
+        except OSError:
+            return None
+        for candidate in candidates:
+            try:
+                result = json.loads(candidate.read_text())
+            except (OSError, ValueError):
+                continue
+            recorded = result.get("runId") if isinstance(result, dict) else None
+            if isinstance(recorded, str) and (recorded == run_id or recorded.endswith(f"-{run_id}")):
+                return result
+        return None
+
+    @staticmethod
+    def _usable_journey(journey: dict[str, Any]) -> dict[str, Any]:
+        """Keep what a run actually observed, even when the run ended badly.
+
+        A JourneyTest run has three separable outcomes: the browsing itself, the
+        director's verdict, and the bookkeeping around both (stopping the video,
+        writing the report). Previously any `runStatus == "error"` failed the whole
+        job -- so a run that browsed for fourteen minutes, took 37 screenshots and
+        recorded a verdict was discarded because `record stop` could not find
+        ffmpeg. Two live runs were lost exactly that way: their verdicts were
+        already written to run.json while the job reported nothing but the error.
+
+        So the error decides the *framing*, not whether the evidence survives:
+
+        - a verdict, however the run ended, is the run's own answer and is used;
+        - no verdict but screenshots on disk still support the vision critique,
+          which reads pixels rather than the director's conclusion;
+        - neither means nothing was observed, and that is the one case that fails.
+
+        `harnessError` marks a run whose evidence is real but incomplete, so the
+        report can say so rather than presenting a truncated run as a whole one.
+        """
+        error = journey.get("error") or {}
+        if not error and journey.get("runStatus") != "error":
+            return journey
+        message = error.get("message") or "unknown JourneyTest error"
+        screenshots = (journey.get("artifacts") or {}).get("screenshots") or []
+        if not journey.get("verdict") and not screenshots:
+            raise RuntimeError(f"JourneyTest run failed: {message}")
+        return {**journey, "harnessError": message}
+
+    # A profile far enough from the population norm that one of them failing to
+    # read something is not, on its own, evidence about the site. Roughly the
+    # bottom few percent of corrected vision -- not "wears glasses".
+    _RARE_ACUITY = 0.45
+    _RARE_CONTRAST = 0.35
+
+    @staticmethod
+    def _profile_is_a_small_minority(eyes: dict[str, Any]) -> bool:
+        """Whether these eyes are unusual enough to need corroborating evidence."""
+        try:
+            acuity = float(eyes.get("acuity", 1.0))
+            contrast = float(eyes.get("contrastSensitivity", 1.0))
+        except (TypeError, ValueError):
+            return False
+        return acuity <= JobExecutor._RARE_ACUITY or contrast <= JobExecutor._RARE_CONTRAST
+
+    @staticmethod
+    def _persona_reasoning(journey: dict[str, Any], limit: int = 8) -> list[dict[str, str]]:
+        """What the persona said, in their own words, about not getting what they came for.
+
+        A finding is far more use with the reasoning behind it than without, and
+        the run already records it: the reflection names the gap between what was
+        expected and what arrived.
+
+        Every gap in the run is collected, not the first two. Which of them belongs
+        to a given finding is decided against that finding's own subject, once it
+        exists (`_relevant_quotes`). Taking the first two put "Clicking 'How it
+        works' did not navigate to a detailed service explanation" under a contrast
+        finding about the site's logo in a live report -- the same mistake
+        `_attach_persona_evidence` already carries a comment about, made again here.
+
+        The persona's name comes along with the quote. Without it the report
+        rendered every one of these as being said by nobody: `personaName` was
+        never set, and the presentation falls back to "Synthetic user".
+        """
+        profile = journey.get("simulationProfile") or {}
+        name = ((profile.get("persona") or {}).get("name")
+                or profile.get("name") or journey.get("profileId")
+                or journey.get("testerProfileId") or "Synthetic user")
+        quotes: list[dict[str, str]] = []
+        for event in journey.get("timeline") or []:
+            if event.get("type") != "persona.reflection":
+                continue
+            data = event.get("data") or {}
+            gap = (data.get("gap") or "").strip()
+            if gap and data.get("matched") != "yes" and gap not in {item["quote"] for item in quotes}:
+                quotes.append({"quote": gap, "personaName": name,
+                               "personaId": journey.get("profileId")
+                               or journey.get("testerProfileId")})
+            if len(quotes) >= limit:
+                break
+        return quotes
+
+    @classmethod
+    def _what_stopped_them(cls, journey: dict[str, Any]) -> str:
+        """The thing the run kept doing that never worked, in the run's own terms.
+
+        A failed or blocked criterion arrived with no recommendation at all -- a
+        critical finding reading "FIX: None". The run knows exactly what happened
+        and nothing read it: a live persona clicked the same pricing toggle three
+        separate times expecting a price to appear, was told "Clicking the button
+        did not reveal any annual price information" each time, went from calm to
+        fed up over twelve actions, and left.
+
+        Returns the action that was tried repeatedly without its expectation being
+        met, with the last thing the persona said about it. Empty when the run did
+        not repeat itself -- there is no honest single cause to name then, and a
+        guess would be worse than the silence it replaces.
+        """
+        attempts: dict[str, list[str]] = {}
+        named: dict[str, str] = {}
+        pending: dict[str, Any] | None = None
+        expected = ""
+        for event in journey.get("timeline") or []:
+            kind, data = event.get("type"), event.get("data") or {}
+            if kind == "persona.expectation":
+                pending = data.get("action") or {}
+                expected = str(data.get("expectation") or "")
+            elif kind == "persona.reflection" and pending is not None:
+                if str(data.get("matched") or "").lower() != "yes":
+                    target = str(pending.get("target") or pending.get("content") or "").strip()
+                    key = f"{pending.get('type', 'action')} {target}".strip()
+                    attempts.setdefault(key, []).append(str(data.get("gap") or "").strip())
+                    # "CLICK e17" is the ref the agent used; nobody reading a report
+                    # knows what e17 is. The persona named the thing in its own
+                    # expectation -- "Clicking the 'Annual - save 17%' button will
+                    # reveal..." -- so prefer that label and keep the ref beside it.
+                    label = _QUOTED_LABEL.search(expected)
+                    if label and key not in named:
+                        named[key] = label.group(1).strip()
+                pending = None
+        if not attempts:
+            return ""
+        action, gaps = max(attempts.items(), key=lambda item: len(item[1]))
+        if len(gaps) < 2:
+            return ""
+        # The persona's sentences end in a full stop of their own; a quote closed
+        # with one and then followed by another reads as a typo.
+        said = next((gap for gap in reversed(gaps) if gap), "").rstrip(" .")
+        verb, _, ref = action.partition(" ")
+        # Whether this was a control, from the verb rather than from whether a
+        # target string happens to be present: a SCROLL carries "down" as its
+        # target, which is not a thing on the page to go and look at.
+        control = verb.upper() in cls._PROMISING_ACTIONS
+        what = f'the "{named[action]}" control' if action in named else (ref if control else "")
+        attempt = (f"They tried to {verb.lower()} {what} {len(gaps)} times".replace("  ", " ")
+                   if control else
+                   f"They tried to {verb.lower()} their way to it {len(gaps)} times")
+        follow = (" Start there -- that is where this visitor's patience went." if control else
+                  " Whatever they were looking for was not where they kept looking for it.")
+        return (attempt + " and it never did what they expected"
+                + (f': "{said}"' if said else "") + "." + follow)
+
+    # How much of the shorter of {what this finding is about} and {what the persona
+    # said} the two must share before the quote is published as evidence for the
+    # finding.
+    _PERCEPTION_QUOTE_RELEVANCE = 0.2
+
+    @classmethod
+    def _relevant_quotes(cls, finding: dict[str, Any]) -> list[dict[str, str]]:
+        """The quotes on this finding that are actually about it.
+
+        A finding the persona never mentioned gets no quote rather than an
+        unrelated one: an irrelevant quote under a finding does not read as
+        "unrelated", it reads as evidence. A live report put "Clicking 'How it
+        works' did not navigate to a detailed service explanation" and "No price or
+        selection indicator appeared after clicking the annual button" under a
+        contrast finding about the site's own logo.
+
+        The subject is the element and the finding's title -- what the finding is
+        *about* -- and deliberately not its summary. A perception summary is two
+        sentences of measurement vocabulary (contrast ratios, WCAG minima, fixation
+        budgets) that no persona ever utters, so including it only inflates the
+        denominator: the one true pairing in the live case shared a single word out
+        of some forty, scoring 0.025 against a 0.2 bar and being thrown away with
+        the wrong ones.
+
+        Containment, not Jaccard, and against the shorter side: "No price was
+        visible anywhere." is six words about an element whose name is a
+        twelve-word sentence, and asking either to cover most of the other would
+        reject a quote that is plainly about it.
+        """
+        subject = (cls._text_tokens(finding.get("elementName") or "")
+                   | cls._text_tokens(finding.get("title") or ""))
+        if not subject:
+            return []
+        kept = []
+        for quote in finding.get("personaEvidence") or []:
+            words = cls._text_tokens(quote.get("quote") or "")
+            if not words:
+                continue
+            shared = len(subject & words)
+            if shared / min(len(subject), len(words)) >= cls._PERCEPTION_QUOTE_RELEVANCE:
+                kept.append(quote)
+        return kept[:2]
+
+    # How much measured frustration a broken promise has to cost, summed across
+    # everyone who hit it, before it is reported as more than a nuisance. Grounded
+    # in the run's own affect rather than assigned from a table: what makes a
+    # promise that is not kept serious is how much of a visitor's patience it
+    # spends, and that is a number these runs already produce.
+    _COSTLY_FRUSTRATION = 0.25
+    _NOTICEABLE_FRUSTRATION = 0.10
+    # The actions where "it promised something" is a sentence about the product.
+    _PROMISING_ACTIONS = frozenset({"CLICK", "FILL", "SELECT", "SUBMIT", "TYPE"})
+
+    # A vision finding claiming the page renders itself more than once.
+    _CLAIMS_DUPLICATION = re.compile(
+        r"\brepeat(?:s|ed|ing)?\b|\bduplicat(?:e|ed|ion)\b|\btwice\b|\bthree times\b|\bmultiple copies\b",
+        re.I)
+    # A vision finding claiming the page stopped the visitor doing the thing.
+    _CLAIMS_BLOCKING = re.compile(
+        r"\bprevent(?:s|ing|ed)?\b|\bblocks?\b|\bblocking\b|\bcannot (?:see|find|read)\b"
+        r"|\bunable to\b|\bhide(?:s|n)? the actual\b", re.I)
+    # A finding claiming something is simply not there.
+    _CLAIMS_ABSENCE = re.compile(
+        r"\bmissing\b|\bnot (?:present|shown|displayed|visible|listed)\b|\bno (?:price|prices|"
+        r"pricing|cost|amount)\b|\bwithout (?:any )?(?:price|pricing|cost)\b|\bdoes not (?:show|"
+        r"display|state|list)\b|\bnever (?:shows|displays)\b|\babsent\b|\bfails? to (?:show|"
+        r"display)\b", re.I)
+    # What this finding says is missing has to be the thing the run can prove it
+    # saw. Money is that thing: a price is unambiguous to spot in free text, and
+    # both live false findings were about one.
+    _CLAIMS_ABSENT_MONEY = re.compile(
+        r"\bpric(?:e|es|ing)\b|\bcosts?\b|\bamounts?\b|\bfigures?\b|\brates?\b"
+        r"|[£$€]\s*\d", re.I)
+    # A sum of money as it appears on a page: a currency mark against a number.
+    _A_PRICE = re.compile(r"[£$€]\s?\d[\d,.]*", re.U)
+
+    @classmethod
+    def _contradicted_by_the_run(cls, finding: dict[str, Any],
+                                 journeys: list[dict[str, Any]]) -> str:
+        """What this run measured that this finding says did not happen.
+
+        The vision model reads screenshots and is a confident reader. A live report
+        led with "Repeated page layout rendering bug", severity critical -- "the
+        entire header and hero section repeats three times vertically ... looks
+        highly broken" -- and second with "Pricing cards are cut off ... preventing
+        users from seeing the actual price", severity high. The capture was
+        correct, every section rendered, and the same run's verdict reads "The page
+        does state the pricing clearly. £200 per user per year for teams (or £100
+        per user per year for individuals)".
+
+        Two of its claims are checkable against what the run itself recorded, and
+        where they disagree the measurement wins -- not because a vision model is
+        worthless, but because a confident, specific, wrong claim at critical
+        severity is the most damaging thing this report can carry.
+        """
+        text = f"{finding.get('title', '')} {finding.get('summary', '')}"
+        # Nothing repeats if the element walk saw each thing once. Every element on
+        # screen is listed by selector on every capture; a hero rendered three
+        # times would be three entries.
+        if cls._CLAIMS_DUPLICATION.search(text):
+            captures = [event for journey in journeys
+                        for event in journey.get("timeline") or []
+                        if event.get("type") == "persona.perception"]
+            seen = [(event.get("data") or {}).get("legible") or [] for event in captures]
+            if seen and all(len(items) == len(set(items)) for items in seen if items):
+                return ("the element walk recorded every element exactly once on all "
+                        f"{len(captures)} capture(s) of this run, so nothing on the page was "
+                        "rendered more than once")
+        # Nothing is missing that this person read off the page. The persona
+        # commits to what it can see before every action, and the verdict quotes
+        # what it found; either is the run's own testimony that the thing was
+        # there. Cycle 14 shipped "Missing pricing details on pricing cards" at
+        # critical and "Promised more than it did: Monthly" at high, in a run
+        # whose verdict reads "it lists two options -- £200 per user per year
+        # ... and £100 per user per year". A report that contradicts itself in
+        # two directions is worth less than one that says nothing.
+        if cls._CLAIMS_ABSENCE.search(text) and cls._CLAIMS_ABSENT_MONEY.search(text):
+            quoted = cls._prices_the_run_read(journeys)
+            if quoted:
+                shown = ", ".join(sorted(quoted)[:3])
+                return ("this run read a price off the page with the persona's own eyes "
+                        f"({shown}), so the page does state a cost")
+        # Nothing was blocked if the run finished.
+        if cls._CLAIMS_BLOCKING.search(text):
+            finished = [journey for journey in journeys
+                        if any(item.get("id") == "tasks-completed" and item.get("result") == "met"
+                               for item in (journey.get("verdict") or {}).get("criteria", []))]
+            if finished:
+                said = str((finished[0].get("verdict") or {}).get("summary") or "").strip()
+                return ("the run completed the tasks it came to do"
+                        + (f' -- "{said[:180]}"' if said else ""))
+        return ""
+
+    @classmethod
+    def _prices_the_run_read(cls, journeys: list[dict[str, Any]]) -> set[str]:
+        """Every sum of money this run recorded as visible to the persona.
+
+        Drawn only from what the run says the persona could see -- the `visible`
+        line it commits to before each action, and the verdict it reached -- never
+        from the page source or the accessibility tree. The claim being tested is
+        "a visitor cannot see a price", so the rebuttal has to come from a visitor
+        seeing one.
+        """
+        said: set[str] = set()
+        for journey in journeys:
+            for event in journey.get("timeline") or []:
+                if event.get("type") != "persona.expectation":
+                    continue
+                said.update(cls._A_PRICE.findall(str((event.get("data") or {}).get("visible") or "")))
+            said.update(cls._A_PRICE.findall(
+                str((journey.get("verdict") or {}).get("summary") or "")))
+        return said
+
+    @staticmethod
+    def _what_the_page_actually_cost(journeys: list[dict[str, Any]]) -> dict[str, float] | None:
+        """The worst this page made anyone feel, measured rather than guessed.
+
+        The behaviour controller records frustration and confusion after every
+        step of every run. The peak across all of them is the most the page cost
+        anybody who visited it -- and no single finding can have cost more than
+        that, because that is the whole of it.
+
+        None when no run recorded any affect: there is then nothing to cap
+        against, and a ceiling nobody measured is not a ceiling.
+        """
+        peaks = [(state.get("frustration"), state.get("confusion"))
+                 for journey in journeys
+                 for event in journey.get("timeline") or []
+                 if event.get("type") == "persona.affect"
+                 for state in [(event.get("data") or {}).get("state") or {}]]
+        numbers = [(f, c) for f, c in peaks
+                   if isinstance(f, (int, float)) and isinstance(c, (int, float))]
+        if not numbers:
+            return None
+        return {"frustration": max(f for f, _ in numbers), "confusion": max(c for _, c in numbers)}
+
+    @classmethod
+    def _cap_claimed_impact(cls, findings: list[dict[str, Any]],
+                            journeys: list[dict[str, Any]]) -> list[str]:
+        """Hold the vision model's guessed distress to what the run measured.
+
+        The reviewer estimates frustration, confusion and trust erosion from a
+        single screenshot, and those numbers reach the report as a finding's
+        stated impact. Measured against the runs that produced them they are not
+        close: a run whose peak frustration was 0.29, and which passed, carried
+        three findings claiming 0.90, 0.90 and 0.60. A run that peaked at 0.20
+        carried a finding claiming 0.90 -- and that finding was the one the
+        element walk disproved.
+
+        Capped rather than replaced. The model's relative ordering among findings
+        may well carry signal, and a finding about something the persona never
+        reached has no measured counterpart of its own. What it may not do is
+        claim the page cost someone more than the page was ever measured to cost
+        anyone.
+        """
+        ceiling = cls._what_the_page_actually_cost(journeys)
+        notes = []
+        if not ceiling:
+            cls._state_impact(findings)
+            return notes
+        for finding in findings:
+            claimed = finding.get("claimedImpact") or {}
+            if not claimed:
+                continue
+            over = {name: (claimed[name], ceiling[name]) for name in ("frustration", "confusion")
+                    if isinstance(claimed.get(name), (int, float)) and claimed[name] > ceiling[name]}
+            if not over:
+                continue
+            for name, (_, limit) in over.items():
+                claimed[name] = limit
+            worst = max(over.items(), key=lambda item: item[1][0] - item[1][1])
+            notes.append(
+                f"{finding.get('title')!r} estimated {worst[0]} at {worst[1][0]:.2f} from a single "
+                f"screenshot; the runs measured at most {worst[1][1]:.2f} across every step, so the "
+                f"estimate is reported at the measured ceiling.")
+        cls._state_impact(findings)
+        return notes
+
+    @staticmethod
+    def _state_impact(findings: list[dict[str, Any]]) -> None:
+        """Write each finding's evidence line from its numbers, after any capping.
+
+        Rendered here rather than at synthesis so the sentence cannot disagree
+        with the figures it describes -- which it would have, the moment a capped
+        number sat behind prose written before the cap.
+        """
+        for finding in findings:
+            impact = finding.get("claimedImpact")
+            if not impact:
+                continue
+            finding["evidence"] = (
+                f"synthesized from {finding.get('observations', 1)} observation(s) across "
+                f"{finding.get('affectedPersonas', 1)} persona(s); estimated impact: "
+                f"frustration {impact['frustration']:.2f}, confusion {impact['confusion']:.2f}, "
+                f"trust erosion {impact['trust']:.2f}")
+
+    @classmethod
+    def _temper_contradicted_findings(cls, findings: list[dict[str, Any]],
+                                      journeys: list[dict[str, Any]]) -> list[str]:
+        """Cap a contradicted finding's severity and say so, in place.
+
+        Kept rather than dropped: the visual observation behind it may be worth a
+        look, and deleting a signal because one of its claims overreached is its own
+        kind of dishonesty. What it may not do is lead the report.
+        """
+        notes = []
+        for finding in findings:
+            if finding.get("source") != "eyeson-vision-synthesis":
+                continue
+            against = cls._contradicted_by_the_run(finding, journeys)
+            if not against:
+                continue
+            was = finding.get("severity")
+            if was in ("critical", "high"):
+                finding["severity"] = "medium"
+            finding["summary"] = (f"{finding.get('summary', '').rstrip()} Reported by the vision "
+                                  f"critique and not supported by this run: {against}.")
+            finding["contradictedByRun"] = against
+            notes.append(f"{finding.get('title')!r} was reported as {was} by the vision critique "
+                         f"and is carried at {finding['severity']} instead, because {against}.")
+        return notes
+
+    @classmethod
+    def _pain_points_from_expectations(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Things the page looked like it would do and then did not.
+
+        The persona director commits to an expectation before every action, and
+        then compares it against what arrived. A reflection that comes back
+        `matched: "no"` is a first-hand, falsifiable observation of a control that
+        promised something and did not deliver it -- the most common real usability
+        defect there is, and one no check against the DOM can find, because the
+        DOM has no opinion about what a link looked like it would do.
+
+        Nothing read them. Three consecutive live runs against the same page each
+        recorded that clicking "How it works" did not navigate anywhere and that
+        the "Annual - save 17%" toggle showed no price, one of them abandoning the
+        journey over it -- and all three reports said nothing about either. One
+        said "No pain points detected" over a run that ended at 0.49 frustration
+        and 0.52 confusion.
+
+        Only a clear miss counts. `matched: "partly"` is the persona hedging, and
+        a report built on hedges is a report that finds something everywhere.
+        """
+        groups: dict[str, dict[str, Any]] = {}
+        for journey in journeys:
+            run_id = journey.get("runId")
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            profile = journey.get("simulationProfile") or {}
+            persona_name = ((profile.get("persona") or {}).get("name")
+                            or profile.get("name") or persona_id or "Synthetic user")
+            pending: dict[str, Any] | None = None
+            expectation = ""
+            measured_name = ""
+            unmet: dict[str, Any] | None = None
+            previous = 0.0
+            for event in journey.get("timeline") or []:
+                kind, data = event.get("type"), event.get("data") or {}
+                if kind == "persona.expectation":
+                    pending, expectation = data.get("action") or {}, str(data.get("expectation") or "")
+                    measured_name = str(data.get("targetName") or "").strip()
+                    unmet = None
+                elif kind == "persona.reflection" and pending is not None:
+                    # A promise is made by a control. A READ that returns something
+                    # other than expected is about what the persona could take in,
+                    # which is the perception findings' subject and measured there
+                    # properly; a SCROLL that does not reveal what was hoped for is
+                    # a guess about a page, not a promise it made. Reporting those
+                    # here would file "the paragraph at 321,417 promised more than
+                    # it did", which is not a sentence about the product.
+                    if (str(data.get("matched") or "").lower() == "no"
+                            and str(pending.get("type") or "").upper() in cls._PROMISING_ACTIONS):
+                        unmet = {"action": pending, "expectation": expectation,
+                                 "name": measured_name,
+                                 "gap": str(data.get("gap") or "").strip()}
+                    pending = None
+                elif kind == "persona.affect":
+                    # The affect event that follows a reflection is what that
+                    # reflection cost. Read here rather than assumed, because a
+                    # miss a persona shrugs off and a miss that ends the journey
+                    # are not the same finding.
+                    frustration = float((data.get("state") or {}).get("frustration") or 0.0)
+                    if unmet is not None:
+                        label = cls._promise_label(unmet["expectation"], unmet["action"],
+                                                   unmet.get("name"))
+                        group = groups.setdefault(label, {
+                            "label": label, "hits": 0, "cost": 0.0, "personas": [], "names": [],
+                            "runs": [], "gaps": [], "expectations": [], "actions": []})
+                        group["hits"] += 1
+                        group["cost"] += max(0.0, frustration - previous)
+                        if persona_id and persona_id not in group["personas"]:
+                            group["personas"].append(persona_id)
+                            group["names"].append(persona_name)
+                        if run_id and run_id not in group["runs"]:
+                            group["runs"].append(run_id)
+                        if unmet["gap"]:
+                            # Who said it travels with it. Pairing two parallel
+                            # lists by position put one persona's sentence under
+                            # another's name as soon as they contributed unequal
+                            # numbers of them.
+                            group["gaps"].append({"quote": unmet["gap"], "personaId": persona_id,
+                                                  "personaName": persona_name})
+                        if unmet["expectation"]:
+                            group["expectations"].append(unmet["expectation"])
+                        group["actions"].append(unmet["action"])
+                        unmet = None
+                    previous = frustration
+        merged = cls._merge_promise_labels(groups)
+        return [cls._broken_promise_finding(group) for group in
+                sorted(merged, key=lambda item: -item["cost"])]
+
+    @staticmethod
+    def _merge_promise_labels(groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fold labels that name the same control into one finding.
+
+        One persona quotes "Annual - save 17%" and the next writes "the Annual
+        button", and the page has one toggle. Left split, the report says a
+        control was hit once when it was hit twice, and prices each half at half
+        the patience it actually cost -- the exact thing severity is read from.
+
+        Containment on whole words, keeping the longer name: the specific label is
+        the one a reader can find on the page. Not fuzzy similarity -- "Annual" and
+        "Monthly" are close by most string measures and are two different controls.
+        """
+        remaining = sorted(groups.values(), key=lambda item: -len(item["label"]))
+        kept: list[dict[str, Any]] = []
+        for group in remaining:
+            words = group["label"].lower().split()
+            host = next((item for item in kept
+                         if words and item["label"].lower().split()[:len(words)] == words), None)
+            if host is None:
+                kept.append(group)
+                continue
+            host["hits"] += group["hits"]
+            host["cost"] += group["cost"]
+            for field in ("gaps", "expectations", "actions"):
+                host[field].extend(group[field])
+            for persona, name in zip(group["personas"], group["names"]):
+                if persona not in host["personas"]:
+                    host["personas"].append(persona)
+                    host["names"].append(name)
+            for run in group["runs"]:
+                if run not in host["runs"]:
+                    host["runs"].append(run)
+        return kept
+
+    @staticmethod
+    def _promise_label(expectation: str, action: dict[str, Any], measured: str = "") -> str:
+        """What the persona thought it was interacting with, named the way it named
+        it.
+
+        A ref groups nothing and means nothing: the same control is e6 in one run
+        and e17 in another, and no reader knows what either is. Worse, a ref that
+        leaks through splits one control into two findings -- a live replay
+        produced both "Annual - save 17%" (high) and "e17" (low) for the same
+        toggle, because one run happened to quote the label and the other wrote
+        "the Annual button" without quotes.
+
+        So: what the element walk read off the control first -- it is the one name
+        here that was measured rather than parsed out of a sentence, and it is the
+        same string on every run, which is what makes it group. Then the quoted
+        label, then the phrase the sentence names as the thing being clicked, and
+        the ref only when nothing else said anything useful at all.
+
+        Reading it out of prose is what put "Promised more than it did: e6" in a
+        report headline: the persona wrote "The Pricing page will load and display
+        the company's pricing details", which names no control, so every pattern
+        here missed and the ref fell through. The walk knew it was the Pricing
+        link the whole time.
+        """
+        if (measured or "").strip():
+            return measured.strip()
+        quoted = _QUOTED_LABEL.search(expectation or "")
+        if quoted:
+            return quoted.group(1).strip()
+        named = _NAMED_CONTROL.search(expectation or "")
+        if named:
+            return named.group(1).strip()
+        target = str((action or {}).get("target") or (action or {}).get("content") or "").strip()
+        return target or str((action or {}).get("type") or "the page").lower()
+
+    @classmethod
+    def _broken_promise_finding(cls, group: dict[str, Any]) -> dict[str, Any]:
+        """One promise the page did not keep, priced by what it cost."""
+        label, hits, cost = group["label"], group["hits"], group["cost"]
+        personas = group["personas"]
+        # Severity from the measured cost and from how many different people hit
+        # it, not from which bucket the finding came out of. Several people losing
+        # patience over one control is the page; one person losing a little is a
+        # nuisance worth recording and not worth leading with.
+        if len(personas) > 1 or cost >= cls._COSTLY_FRUSTRATION:
+            severity = "high"
+        elif hits > 1 or cost >= cls._NOTICEABLE_FRUSTRATION:
+            severity = "medium"
+        else:
+            severity = "low"
+        expected = group["expectations"][0] if group["expectations"] else ""
+        happened = group["gaps"][-1]["quote"] if group["gaps"] else ""
+        again = (f" {len(personas)} different personas expected the same thing of it."
+                 if len(personas) > 1 else
+                 f" They tried it {hits} times." if hits > 1 else "")
+        return {
+            "severity": severity, "category": "expectation",
+            "title": f"Promised more than it did: {label}",
+            # Both quotes carry the persona's own full stop; adding another reads
+            # as a typo.
+            "summary": (f"Before touching it they said what they expected: "
+                        f"\"{expected.rstrip(' .')}.\" What arrived was not that -- "
+                        f"\"{happened.rstrip(' .')}.\"{again} It cost "
+                        f"{cost:.2f} of this visitor's patience on a 0-1 scale, measured across the "
+                        f"run rather than assumed."),
+            "recommendation": (f"Either make {label} do what it reads as doing, or stop it reading "
+                               f"that way. This is not a wording problem in the copy around it: the "
+                               f"visitor said out loud what they expected before they touched it, "
+                               f"and the control itself is what set that expectation."),
+            "evidence": (f"{hits} unmet expectation(s) across {len(group['runs']) or 1} run(s) and "
+                         f"{len(personas) or 1} persona(s), costing {cost:.2f} frustration"),
+            "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
+            "elementName": label, "observation": happened,
+            "personaEvidence": group["gaps"][:2],
+            "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+            "source": "persona.expectation",
+            "runId": (group["runs"] or [None])[0], "personaId": (personas or [None])[0],
+        }
+
+    @classmethod
+    def _pain_points_from_perception(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Findings from what the personas' eyes actually resolved on the page.
+
+        Two classes exist nowhere else in the report, because no check against the
+        DOM can produce either. A run records them on every step as
+        `persona.perception` and nothing read them, so the pipeline measured two
+        whole classes of defect and then said nothing about them.
+
+          notPerceived   In the accessibility tree, and nothing legible where it
+                         lives once this person's optics are applied to the
+                         capture. Present but not perceivable.
+
+          missedWhatTheyCameFor
+                         Legible, on screen, and never looked at -- the answer to
+                         "why did they not click the thing that was right there".
+
+        What decides whether either is reported, and how, is not the persona.
+        Filing every unreadable element as a high-severity accessibility defect
+        would mean a run that happened to include one very short-sighted profile
+        turned a compliant page into a failing one, and a reader would rightly
+        stop believing the report. So three things are separated:
+
+          * The **rendered contrast ratio**, measured on the page as drawn. This is
+            a fact about the site, true for every visitor, and it is what makes a
+            finding an accessibility defect -- cited against the WCAG threshold
+            that applies, whatever the run's personas happened to be.
+          * **Consistency** across personas. The same element missed by several
+            different profiles is about the page; missed by one is about that one.
+          * **How unusual the profile is.** An element that clears WCAG and was
+            missed only by a profile in the bottom few percent of corrected vision
+            is reported as what it is -- something that profile could not use -- and
+            kept out of the numbered problems, because the page is objectively fine
+            and one rare simulated visitor is not grounds to say otherwise.
+
+        Grouped by element across every run, not per step and not per persona: the
+        same low-contrast caption is unreadable on every step of every visit, and
+        forty identical findings would bury the rest of the report.
+        """
+        groups: dict[tuple, dict[str, Any]] = {}
+        # Every element that resolved on any capture of any run. A heading is not
+        # drawn black on one step and invisible on the next: when the same element
+        # reads legible once and blank once, the blank capture caught it mid-render,
+        # and the one that found text is the one to believe. A live report published
+        # "Fails WCAG AA contrast: 'Individual' -- 1.05:1, high" against a
+        # pricing-card heading that is plainly dark, from a capture taken while the
+        # card was still fading in.
+        ever_legible = {selector
+                        for journey in journeys
+                        for event in journey.get("timeline") or []
+                        if event.get("type") == "persona.perception"
+                        for selector in ((event.get("data") or {}).get("legible") or [])}
+        for journey in journeys:
+            run_id = journey.get("runId")
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            reasoning = cls._persona_reasoning(journey)
+            for event in journey.get("timeline") or []:
+                if event.get("type") != "persona.perception":
+                    continue
+                data = event.get("data") or {}
+                eyes = data.get("eyes") or {}
+                scan = data.get("scan") or {}
+                seen_image = data.get("seenImage")
+                for kind, items in (("notPerceived", data.get("notPerceived") or []),
+                                    ("missed", data.get("missedWhatTheyCameFor") or [])):
+                    for item in items:
+                        if kind == "notPerceived" and item.get("selector") in ever_legible:
+                            continue
+                        key = (kind, item.get("selector"))
+                        group = groups.setdefault(key, {
+                            "kind": kind, "item": item, "steps": 0, "personas": [], "eyes": {},
+                            "scan": scan, "runIds": [], "reasoning": [], "seenImage": None,
+                            "contrast": item.get("contrast") or {},
+                        })
+                        group["steps"] += 1
+                        group["item"] = item
+                        if persona_id and persona_id not in group["personas"]:
+                            group["personas"].append(persona_id)
+                            group["eyes"][persona_id] = eyes
+                            group["reasoning"].extend(reasoning)
+                        if run_id and run_id not in group["runIds"]:
+                            group["runIds"].append(run_id)
+                        group["seenImage"] = group["seenImage"] or seen_image
+                        group["contrast"] = group["contrast"] or item.get("contrast") or {}
+
+        findings: list[dict[str, Any]] = []
+        for group in groups.values():
+            finding = (cls._unreadable_finding(group) if group["kind"] == "notPerceived"
+                       else cls._never_looked_at_finding(group))
+            if not finding:
+                continue
+            # Which of the run's gaps belongs under this finding can only be
+            # decided once the finding exists and has a subject. Done here rather
+            # than in either builder, so one rule covers both and neither can drift.
+            finding["personaEvidence"] = cls._relevant_quotes(finding)
+            findings.append(finding)
+        return cls._fold_undrawn(findings)
+
+    # How many separate "declared but not drawn" elements a report will name before
+    # it says the thing they have in common instead.
+    _UNDRAWN_WORTH_NAMING = 3
+
+    @classmethod
+    def _fold_undrawn(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """A page still settling is one observation, not one per element.
+
+        A live run produced twelve "Declared but not drawn" entries -- the entire
+        navigation bar, one at a time -- from a single capture taken mid-render.
+        Each was individually correct and together they were noise that buried the
+        three findings a reader needed. Twelve elements blank on one capture is a
+        fact about the capture; twelve facts about twelve elements is what it looks
+        like when nobody says so.
+
+        A couple of them stay as they are: two or three genuinely undrawn elements
+        are worth naming individually, and that is the case this finding was
+        written for.
+        """
+        undrawn = [item for item in findings if item.get("source") == "perception.notDrawn"]
+        if len(undrawn) <= cls._UNDRAWN_WORTH_NAMING:
+            return findings
+        rest = [item for item in findings if item.get("source") != "perception.notDrawn"]
+        names = [str(item.get("elementName") or "").strip() for item in undrawn]
+        shown = ", ".join(f'"{name}"' for name in names[:4] if name)
+        lead = max(undrawn, key=lambda item: len(item.get("personaEvidence") or []))
+        return rest + [{**lead,
+            "title": f"{len(undrawn)} elements were declared and not drawn",
+            "summary": (f"The page's accessibility tree placed {len(undrawn)} elements on screen "
+                        f"and nothing was painted at any of them -- among others {shown}. That many "
+                        f"at once is a statement about the capture rather than about the elements: "
+                        f"almost certainly a page still animating in when it was photographed. It is "
+                        f"reported as one observation because it is one event."),
+            "recommendation": ("Nothing here needs fixing if the page animates its content in. If it "
+                               "does not, the page is announcing a screenful of text to assistive "
+                               "technology that a sighted visitor never sees."),
+            "evidence": f"{len(undrawn)} regions the tree says hold something, all with no ink",
+            "elementName": "", "elementBox": None,
+            "affectedPersonaIds": sorted({persona for item in undrawn
+                                          for persona in (item.get("affectedPersonaIds") or [])}),
+        }]
+
+    @staticmethod
+    def _element_phrase(item: dict[str, Any]) -> str:
+        name = (item.get("name") or "").strip()
+        if name:
+            return f'"{name[:70]}"'
+        box = item.get("box") or {}
+        return f"the {item.get('role') or 'element'} at {int(box.get('x', 0))},{int(box.get('y', 0))}"
+
+    @classmethod
+    def _unreadable_finding(cls, group: dict[str, Any]) -> dict[str, Any] | None:
+        """An element nobody could read, classified by what actually justifies it."""
+        item, contrast = group["item"], group["contrast"] or {}
+        what = cls._element_phrase(item)
+        personas = group["personas"]
+        ratio, required = contrast.get("ratio"), contrast.get("required")
+        fails_wcag = contrast.get("passes") is False
+        rare_only = (len(personas) <= 1
+                     and all(cls._profile_is_a_small_minority(eyes)
+                             for eyes in group["eyes"].values() or [{}]))
+
+        where = (f" Seen by {len(personas)} of the personas that visited."
+                 if len(personas) > 1 else "")
+        measured = (f" Its rendered contrast is {ratio}:1 against a WCAG AA minimum of "
+                    f"{required}:1, measured on the page as drawn"
+                    f" ({contrast.get('measured')})." if ratio else "")
+
+        if item.get("nothingDrawn"):
+            # The DOM says there is text here and the capture has no ink in it at
+            # all. That is the two sources disagreeing about what exists, and it is
+            # a different claim from "this text is hard to read" -- reporting it as
+            # a measured contrast ratio states a number about pixels that are not
+            # there. A live run filed "Fails WCAG AA contrast: 'Sourcing' --
+            # 1.01:1" against a 486x21 region that was blank page below a chat
+            # bubble, part of the site's animated mock-up conversation that had not
+            # painted yet; the same element was reported 200px higher one step
+            # later, which is what an animation looks like from here.
+            #
+            # Worth saying, because text a page declares and never draws is a real
+            # thing to check -- and worth saying quietly, because the likeliest
+            # explanation is a capture taken mid-animation rather than a defect.
+            return {
+                "severity": "info", "category": "profile-specific",
+                "title": f"Declared but not drawn: {what}",
+                "summary": (f"The page's accessibility tree places {what} at this position and nothing "
+                            f"was painted there -- no ink at all, not faint ink. The likeliest "
+                            f"explanation is a capture taken while the element was still animating "
+                            f"in; the alternative is text the page declares and never renders. "
+                            f"No contrast claim is made either way, because there are no pixels to "
+                            f"measure.{where}"),
+                "recommendation": ("Check this element renders on a settled page. If it is part of an "
+                                   "animation, nothing is wrong; if it is not, the page is announcing "
+                                   "text to assistive technology that a sighted visitor never sees."),
+                "evidence": (f"no ink in a {int((item.get('box') or {}).get('width', 0))}x"
+                             f"{int((item.get('box') or {}).get('height', 0))} region the tree says "
+                             f"holds text, on {group['steps']} step(s)"),
+                "evidenceScreenshot": group["seenImage"],
+                "evidenceIsAsTheySawIt": bool(group["seenImage"]),
+                "elementBox": item.get("box"), "elementName": item.get("name") or "",
+                "contrastRatio": None, "wcagRequired": None, "wcagPasses": None,
+                "observation": item.get("reason") or "",
+                "personaEvidence": group["reasoning"],
+                "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+                "source": "perception.notDrawn",
+                "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+            }
+
+        if fails_wcag:
+            # A fact about the site rather than about whoever happened to look, so
+            # it stands on its own however rare the profile that surfaced it.
+            severity, category = "high", "accessibility"
+            title = f"Fails WCAG AA contrast: {what}"
+            summary = (f"{what} does not meet the contrast the guidelines require.{measured}"
+                       f" A persona could not read it at all after their own eyesight was applied "
+                       f"to the capture: {item.get('reason') or 'nothing stands out from its background'}."
+                       f"{where}")
+            # The arithmetic first, when the measurement supports it: a reader can
+            # act on "the darker side has to reach 0.1833" and cannot act on "raise
+            # the contrast", which only repeats the minimum the summary just gave.
+            # The warning about CSS stays either way -- it is the part a developer
+            # is most likely to get wrong, and it is true of every one of these.
+            recommendation = " ".join(filter(None, [
+                contrast_fix(contrast) or f"Raise the contrast to at least {required}:1.",
+                "This is measured on what the browser actually drew, so checking the declared CSS "
+                "colours is not enough -- an overlay, a gradient or an image behind the text will "
+                "not show up there.",
+            ]))
+        elif len(personas) > 1:
+            # The page clears the guideline and several different people still could
+            # not read it, which is worth saying and is not a compliance claim.
+            severity, category = "medium", "legibility"
+            title = f"Hard to read for several personas: {what}"
+            summary = (f"{what} clears the contrast guidelines.{measured} And "
+                       f"{len(personas)} different personas still could not resolve it: "
+                       f"{item.get('reason') or 'nothing stands out from its background'}. "
+                       "Consistent across profiles, so it is about the element rather than about "
+                       "one visitor.")
+            recommendation = ("Meeting the minimum is not the same as being easy to read. Increase the "
+                              "size or the weight, or give it more contrast than the guideline floor.")
+        elif rare_only:
+            # The honest version of a finding that cannot carry more weight than
+            # this: kept out of the numbered problems, and still said.
+            eyes = next(iter(group["eyes"].values()), {})
+            severity, category = "info", "profile-specific"
+            title = f"Unreadable for one low-vision profile only: {what}"
+            summary = (f"{what} meets the contrast guidelines.{measured} One persona "
+                       f"could not read it -- acuity {eyes.get('acuity')}, contrast sensitivity "
+                       f"{eyes.get('contrastSensitivity')}, a profile in the bottom few percent of "
+                       "corrected vision. No other persona had trouble with it. This is reported as "
+                       "what it is rather than as a defect: the page is compliant here, and one rare "
+                       "simulated visitor is not evidence that it is not.")
+            recommendation = ("No change is required for compliance. If this audience matters to you, "
+                              "the element would need to go well beyond the minimum.")
+        else:
+            severity, category = "low", "legibility"
+            title = f"One persona could not read: {what}"
+            summary = (f"{what} meets the contrast guidelines.{measured} One persona "
+                       f"still could not resolve it: {item.get('reason') or 'it does not stand out'}. "
+                       "Only one, so treat it as a hint rather than a finding.")
+            recommendation = "Worth a look if it is important; not yet evidence of a problem."
+
+        return {
+            "severity": severity, "category": category, "title": title, "summary": summary,
+            "recommendation": recommendation,
+            "evidence": (f"contrast {ratio}:1 (needs {required}:1); internal "
+                         f"{item.get('internalContrast')}, edge {item.get('edgeContrast')}, "
+                         f"seen on {group['steps']} step(s) by {len(personas) or 1} persona(s)"),
+            # The page as they saw it, not a clean capture: a clean one beside
+            # "they could not read this" invites the reader to disagree, correctly.
+            "evidenceScreenshot": group["seenImage"],
+            "evidenceIsAsTheySawIt": bool(group["seenImage"]),
+            "elementBox": item.get("box"),
+            "contrastRatio": ratio, "wcagRequired": required, "wcagPasses": contrast.get("passes"),
+            "observation": item.get("reason") or "",
+            "personaEvidence": group["reasoning"],
+            "elementName": item.get("name") or "",
+            "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+            "source": "perception.notPerceived",
+            "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+        }
+
+    @classmethod
+    def _never_looked_at_finding(cls, group: dict[str, Any]) -> dict[str, Any]:
+        """The thing they came for, readable, on screen, and never looked at."""
+        item, scan = group["item"], group["scan"] or {}
+        what = cls._element_phrase(item)
+        personas = group["personas"]
+        together = (f" {len(personas)} different personas missed it, so it is the page rather than "
+                    "one visitor." if len(personas) > 1 else "")
+        return {
+            # Several people coming for a thing and not seeing it is worse than one.
+            "severity": "high" if len(personas) > 1 else "medium",
+            "category": "findability",
+            "title": f"On screen and never looked at: {what}",
+            "summary": (f"{what} is what the persona came for, it was legible, and it was in the "
+                        f"viewport -- and they never looked at it. They scan "
+                        f"{scan.get('pattern') or 'the page'} with a budget of "
+                        f"{scan.get('fixationBudget')} fixations: "
+                        + "; ".join(scan.get("why") or []) + f".{together}"),
+            "recommendation": ("Put it where this scan pattern actually goes, or make it compete: this "
+                               "is a prominence problem, not a wording one. The element is present and "
+                               "readable, so adding copy about it elsewhere will not help."),
+            "evidence": (f"goal match {item.get('goalAffinity')}, never fixated across "
+                         f"{group['steps']} step(s) and {len(personas) or 1} persona(s)"),
+            "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
+            "elementBox": item.get("box"), "observation": "",
+            "personaEvidence": group["reasoning"],
+            "elementName": item.get("name") or "",
+            "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+            "source": "perception.missed",
+            "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+        }
+
+    @staticmethod
+    def _pain_points_from_journeys(journeys: list[dict[str, Any]], job_id: str = "") -> list[dict[str, Any]]:
         """Derive report findings from JourneyTest's own AgentVerdict for each real run
         (blockers, uxFindings, suggestedImprovements, and failed/blocked pass criteria) --
         this is the browser-runtime's authoritative, evidence-grounded verdict (spec.md
@@ -543,7 +1889,7 @@ class JobExecutor:
                         "title": item.get("title") or f"{bucket} finding",
                         "summary": item.get("description") or "",
                         "recommendation": item.get("recommendation"),
-                        "evidence": _evidence_reference_summary(item.get("evidence")),
+                        "evidence": _evidence_reference_summary(item.get("evidence"), job_id),
                         # The screenshot JourneyTest itself cited for this finding --
                         # the honest image to show beside it on a slide.
                         "evidenceScreenshot": (item.get("evidence") or {}).get("screenshot"),
@@ -575,7 +1921,15 @@ class JobExecutor:
                     "title": _CRITERION_TITLES.get((criterion_id, result))
                              or f"Criterion {result}: {criterion_id}",
                     "summary": criterion.get("explanation") or "",
-                    "evidence": _evidence_reference_summary(criterion.get("evidence")),
+                    # A critical finding with no fix at all is a finding a reader
+                    # cannot act on. The run's own record says where to look: the
+                    # thing they kept trying that never answered.
+                    "recommendation": (
+                        stopped_them
+                        if (stopped_them := JobExecutor._what_stopped_them(journey)) else
+                        "Follow this run's timeline back from the last action that did what the "
+                        "persona expected; the steps after it are where the journey came apart."),
+                    "evidence": _evidence_reference_summary(criterion.get("evidence"), job_id),
                     "evidenceScreenshot": (criterion.get("evidence") or {}).get("screenshot"),
                     "observation": (criterion.get("evidence") or {}).get("observation"),
                     "criterionId": criterion_id, "criterionResult": result,
@@ -691,10 +2045,19 @@ class JobExecutor:
                 image_bytes = Path(path).read_bytes()
             except OSError:
                 continue
-            crop = cls._screenshot_data_uri(image_bytes)
+            # Crop to the element when the finding knows where it is. A finding
+            # about one unreadable caption, illustrated with the whole page, makes
+            # the reader hunt for what it is talking about -- and on a capture
+            # degraded to that persona's eyesight, hunting is exactly what they
+            # cannot do.
+            box = finding.get("elementBox")
+            crop = cls._crop_element_data_uri(image_bytes, box) if box else None
+            is_region = bool(crop)
+            if not crop:
+                crop = cls._screenshot_data_uri(image_bytes)
             if crop:
                 finding["screenshotCrop"] = crop
-                finding["screenshotIsRegion"] = False
+                finding["screenshotIsRegion"] = is_region
                 finding["screenshotRef"] = path
 
     @staticmethod
@@ -831,7 +2194,183 @@ class JobExecutor:
         return []
 
     @staticmethod
-    def _crop_element_data_uri(image_bytes: bytes, box: dict[str, Any] | None) -> str | None:
+    def _vision_image_budget() -> int:
+        """Encoded image bytes the vision request may carry.
+
+        The observed rejection was HTTP 413 "request entity too large", which is
+        what a reverse proxy in front of the model router answers when the body
+        passes its cap -- nginx defaults that cap to 1 MB. Budgeting the image
+        well under it leaves room for the prompt and the element list in the
+        same body.
+        """
+        return int(os.getenv("EYESON_VISION_MAX_IMAGE_BYTES", "450000"))
+
+    @staticmethod
+    def _repeated_band_height(image, min_repeats: int = 3) -> int | None:
+        """The height of the band a full-page capture repeated, if it did.
+
+        A full-page screenshot is stitched from viewport-sized captures, and on a
+        page whose layout is pinned to the viewport -- a fixed hero, a scroll-
+        locked section -- every capture comes back showing the same thing. The
+        stitcher pastes them anyway, so the "page" is one band repeated down a
+        very tall image.
+
+        This is not a hypothetical. A live run against a real customer site
+        produced a 1280x8620 capture holding the same header-and-hero band about
+        fourteen times, and the vision model did exactly what it should with the
+        evidence it was given: it reported a CRITICAL "infinite repeating page
+        content ... makes the site look completely broken" defect. The site is
+        fine. The capture was not, and the finding went into a customer-facing
+        report as the single thing to fix first.
+
+        What identifies the artifact is not that some band recurs -- plenty of
+        real pages repeat a card or a row -- but that the image resembles itself
+        more at a distance of a whole band than at a distance of one row. On that
+        real capture the mean difference across the band period was 2.7 per
+        channel value against 14.9 row-to-row: the page has more variation
+        between adjacent lines than between what should be different sections of
+        it. A page with genuinely varied content cannot do that.
+
+        Returns the band height in the image's own pixels, or None.
+        """
+        from PIL import Image, ImageChops, ImageStat
+
+        # Only stitched captures: a viewport screenshot is nothing like this tall.
+        if image.height < image.width * 3:
+            return None
+        # A small greyscale copy is enough to tell bands apart and keeps the
+        # comparison to a handful of whole-image operations.
+        probe_height = 640
+        probe = image.convert("L").resize((32, probe_height), Image.LANCZOS)
+
+        def difference(offset: int) -> float:
+            """Mean absolute difference between the image and itself, shifted."""
+            above = probe.crop((0, 0, 32, probe_height - offset))
+            below = probe.crop((0, offset, 32, probe_height))
+            return ImageStat.Stat(ImageChops.difference(above, below)).mean[0]
+
+        adjacent = difference(1)
+        if adjacent <= 0:
+            return None     # a blank capture repeats nothing
+        scores = {period: difference(period) for period in range(8, probe_height // min_repeats + 1)}
+        coarse = min(scores, key=scores.get)
+        # More self-similar a band apart than a row apart, and near-identical in
+        # absolute terms -- the signature of a stitch, not of repetitive design.
+        if scores[coarse] > adjacent / 2 or scores[coarse] > 6:
+            return None
+
+        # The coarse pass says the image repeats, but not always at the band's own
+        # height: a band repeats at two and three times its height too, and
+        # squeezing the page into 640 rows puts the true period at a fractional
+        # number of them, where a harmonic that lands nearer a whole row scores
+        # better. So the height is settled at the image's own resolution, over the
+        # only candidates it can be -- whole divisions of what the coarse pass
+        # found -- and the smallest that still matches wins.
+        tall = image.convert("L").resize((32, image.height), Image.LANCZOS)
+
+        def band_difference(height: int) -> float:
+            """How much the top band differs from the band directly below it."""
+            above = tall.crop((0, 0, 32, height))
+            below = tall.crop((0, height, 32, height * 2))
+            return ImageStat.Stat(ImageChops.difference(above, below)).mean[0]
+
+        coarse_height = max(1, int(round(coarse * image.height / probe_height)))
+        candidates = []
+        for division in range(1, 13):
+            height = int(round(coarse_height / division))
+            if height < 8 or height * min_repeats > image.height:
+                continue
+            candidates.append((height, band_difference(height)))
+        if not candidates:
+            return None
+        closest = min(score for _, score in candidates)
+        tolerance = max(closest * 1.5, closest + 0.5)
+        return min(height for height, score in candidates if score <= tolerance)
+
+    @classmethod
+    def _trim_repeated_capture(cls, image_bytes: bytes) -> tuple[bytes, int | None]:
+        """One band of a capture that repeated itself, or the capture unchanged.
+
+        The first band is a faithful screenshot of what the browser showed; the
+        rest is the stitcher repeating it. Keeping the first band and dropping
+        the repeats is what stops a capture artifact from being reported as a
+        defect in the page.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return image_bytes, None
+        try:
+            with Image.open(BytesIO(image_bytes)) as opened:
+                image = opened.convert("RGB")
+                band = cls._repeated_band_height(image)
+                if not band or band >= image.height:
+                    return image_bytes, None
+                buffer = BytesIO()
+                image.crop((0, 0, image.width, band)).save(buffer, format="PNG", optimize=True)
+                return buffer.getvalue(), image.height
+        except (OSError, ValueError):
+            return image_bytes, None
+
+    @classmethod
+    def _vision_image_payload(cls, image_bytes: bytes) -> tuple[str, str]:
+        """Shrink a screenshot until the vision endpoint will accept it.
+
+        JourneyTest writes full-page captures -- one nova-test page was 2.4 MB
+        and 12000px tall (see _screenshot_data_uri) -- and base64 adds a third on
+        top of that. Sent unmodified the router answered 413, and because the
+        worker retried a request that could never succeed, the run surfaced a
+        generic "failed after 3 attempts" 502 with the real cause buried.
+
+        Scales the whole page down rather than cropping it: the prompt lists
+        every detected element and tells the model not to invent anything it
+        cannot see, so a crop would hide elements it is being asked about.
+
+        Returns (base64, mime). Falls back to the original bytes when Pillow is
+        missing so such an environment degrades to today's behavior instead of
+        losing the critique.
+        """
+        try:
+            from PIL import Image
+        except ImportError:
+            return base64.b64encode(image_bytes).decode("ascii"), "image/png"
+
+        budget = cls._vision_image_budget()
+        if len(image_bytes) <= budget:
+            return base64.b64encode(image_bytes).decode("ascii"), "image/png"
+
+        try:
+            with Image.open(BytesIO(image_bytes)) as opened:
+                image = opened.convert("RGB")
+                # Vision models resample to a few hundred pixels per tile, so
+                # width beyond a normal desktop viewport buys nothing.
+                max_width = int(os.getenv("EYESON_VISION_MAX_IMAGE_WIDTH", "1400"))
+                if image.width > max_width:
+                    ratio = max_width / float(image.width)
+                    image = image.resize((max_width, max(1, int(image.height * ratio))), Image.LANCZOS)
+
+                best = None
+                for quality in (82, 70, 58, 45):
+                    buffer = BytesIO()
+                    image.save(buffer, format="JPEG", quality=quality, optimize=True, progressive=True)
+                    best = buffer.getvalue()
+                    if len(best) <= budget:
+                        return base64.b64encode(best).decode("ascii"), "image/jpeg"
+
+                # Still over budget: a very tall page needs fewer pixels, not
+                # just coarser ones. Halve until it fits or gets too small to read.
+                while len(best) > budget and image.width > 320 and image.height > 320:
+                    image = image.resize((max(320, image.width // 2), max(320, image.height // 2)), Image.LANCZOS)
+                    buffer = BytesIO()
+                    image.save(buffer, format="JPEG", quality=70, optimize=True, progressive=True)
+                    best = buffer.getvalue()
+                return base64.b64encode(best).decode("ascii"), "image/jpeg"
+        except (OSError, ValueError):
+            return base64.b64encode(image_bytes).decode("ascii"), "image/png"
+
+    @staticmethod
+    def _crop_element_data_uri(image_bytes: bytes, box: dict[str, Any] | None,
+                               max_edge: int = 1200) -> str | None:
         """Crop the specific region a vision finding refers to out of the full
         screenshot, so the UI can show exactly what the finding is about instead
         of just a wall of text. Returns None (caller shows no image) rather than
@@ -851,6 +2390,16 @@ class JobExecutor:
                 if right <= left or bottom <= top:
                     return None
                 cropped = image.crop((left, top, right, bottom))
+                # A finding can point at a large region (a hero, a whole nav
+                # column), and an uncapped crop is emitted at natural size --
+                # which is how a slide ended up with an image taller than the
+                # screen. Small crops, where sharp text matters, are untouched.
+                longest = max(cropped.width, cropped.height)
+                if longest > max_edge:
+                    ratio = max_edge / float(longest)
+                    cropped = cropped.resize(
+                        (max(1, int(cropped.width * ratio)), max(1, int(cropped.height * ratio))),
+                        Image.LANCZOS)
                 buffer = BytesIO()
                 cropped.save(buffer, format="PNG")
                 return f"data:image/png;base64,{base64.b64encode(buffer.getvalue()).decode('ascii')}"
@@ -894,7 +2443,65 @@ class JobExecutor:
         except (OSError, ValueError):
             return None
 
-    _SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+    # "info" sits below "low" on purpose. It is what a finding is downgraded to
+    # when the page is objectively compliant and only one unusual profile had
+    # trouble -- said out loud, and never counted or ranked among the problems.
+    _SEVERITY_RANK = {"info": -1, "low": 0, "medium": 1, "high": 2, "critical": 3}
+
+    # Severities that are not usability issues and must not be counted as such.
+    _NOT_A_PROBLEM = frozenset({"info"})
+
+    @classmethod
+    def _prepare_run_session(cls, job, data, personas):
+        """Everything a run needs in order to be somebody.
+
+        Returns the session file to browse with, and any accounts issued for this
+        run. Both are optional: a run with neither browses the logged-out product
+        as an anonymous visitor, which is still the common case.
+
+        A failure here is not allowed to take the run down with it. A run that
+        browses signed out is a worse run; a run that does not happen is no run
+        at all, and the reason is recorded either way.
+        """
+        from .credentials import CredentialError, CredentialStore, KIND_SELF_ISSUED, issue_identity
+
+        workspace_id = job.get("workspace_id") or "local"
+        session_state_path, issued = None, {}
+        credential_id = str(data.get("credentialId") or "").strip()
+        wants_signup = bool(data.get("issueAccounts") or data.get("signUp"))
+        if not credential_id and not wants_signup:
+            return None, issued
+
+        store = CredentialStore()
+        if credential_id:
+            try:
+                session_state_path = store.write_state_file(
+                    credential_id, Path(cls._run_session_dir(job)), workspace_id=workspace_id)
+            except CredentialError as error:
+                data.setdefault("warnings", []).append(f"Signed-out run: {error}")
+
+        if wants_signup:
+            for persona in personas:
+                persona_id = persona.get("id") or "persona"
+                identity = issue_identity(persona_id, data.get("url") or "")
+                issued[persona_id] = identity
+                try:
+                    # Written down before the run, not after: an account invented
+                    # mid-run and never recorded is one nobody can get back into.
+                    store.put(workspace_id=workspace_id, label=f"{persona_id} @ {data.get('url') or 'target'}",
+                              kind=KIND_SELF_ISSUED, origin=data.get("url") or "",
+                              username=identity["email"], secret=identity["password"])
+                except CredentialError as error:
+                    data.setdefault("warnings", []).append(
+                        f"Account issued but not stored, so it cannot be reused: {error}")
+        return session_state_path, issued
+
+    @staticmethod
+    def _run_session_dir(job) -> str:
+        """A run-scoped directory for the session file, under the artifact tree."""
+        root = Path(os.getenv("ARTIFACT_ROOT", "data/artifacts")) / "sessions" / str(job["job_id"])
+        root.mkdir(parents=True, exist_ok=True)
+        return str(root)
 
     @staticmethod
     def _vision_timeout() -> float:
@@ -929,7 +2536,8 @@ class JobExecutor:
     @classmethod
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
                                      personas: list[dict[str, Any]], url: str | None
-                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]], str | None]:
+                                     ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]],
+                                                str | None, list[str]]:
         """Critique a bounded, evenly-spaced sample of each run's real screenshots
         with a real vision model (services/eyeson-worker's /v1/journey-evidence-
         analyses), referenced against journeytest-core's own semantic element
@@ -948,6 +2556,7 @@ class JobExecutor:
         cohort_runs: list[dict[str, Any]] = []
         screenshot_bytes: dict[str, bytes] = {}
         strengths: list[dict[str, Any]] = []
+        repeated_captures: list[str] = []
         attempted, last_error = False, None
         for journey, persona in zip(journeys, personas):
             artifacts = journey.get("artifacts") or {}
@@ -968,10 +2577,16 @@ class JobExecutor:
                     except OSError as error:
                         last_error = str(error)
                         continue
+                    # A capture that repeated itself is trimmed to the one band
+                    # that is real, before either the model or the report sees it.
+                    image_bytes, repeated_from = cls._trim_repeated_capture(image_bytes)
+                    if repeated_from:
+                        repeated_captures.append(screenshot_path)
                     screenshot_bytes[screenshot_path] = image_bytes
                     elements = cls._elements_for_screenshot(screenshot_path, snapshots)
+                    image_b64, image_mime = cls._vision_image_payload(image_bytes)
                     payload = json.dumps({
-                        "imageBase64": base64.b64encode(image_bytes).decode("ascii"),
+                        "imageBase64": image_b64, "imageMimeType": image_mime,
                         "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
                         "runId": journey.get("runId"), "userId": persona.get("id"),
                         "stepId": f"vision-{step_index + 1}", "screenshotRef": screenshot_path,
@@ -994,9 +2609,10 @@ class JobExecutor:
                 "simulationProfile": {"behavior": persona.get("behavior", {})}, "painPoints": pain_points,
             })
         if not attempted:
-            return [], {}, [], None
+            return [], {}, [], None, []
         return (cohort_runs, screenshot_bytes, strengths,
-                last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None)
+                last_error if not any(run["painPoints"] for run in cohort_runs) and last_error else None,
+                repeated_captures)
 
     @classmethod
     def _text_tokens(cls, text: str) -> set[str]:
@@ -1089,6 +2705,16 @@ class JobExecutor:
         pair scores 0.159. 0.18 sits in that gap.
         """
         def same_issue(left: dict[str, Any], right: dict[str, Any], left_index: int, right_index: int) -> bool:
+            # Two findings that name two different elements are two findings,
+            # whatever their titles have in common. Every measured finding titles
+            # itself the same way -- "Fails WCAG AA contrast: X", "Declared but not
+            # drawn: X" -- so the boilerplate alone clears the title threshold and a
+            # live run's nineteen perception findings collapsed into three, losing
+            # "£200" and "Let's talk" into "Individual". They are different elements
+            # with different fixes, and a page with ten pale labels has ten of them.
+            here, there = left.get("elementName"), right.get("elementName")
+            if here and there and here != there:
+                return False
             if cls._jaccard(cls._title_tokens(left.get("title", "")),
                             cls._title_tokens(right.get("title", ""))) >= 0.33:
                 return True
@@ -1204,16 +2830,29 @@ class JobExecutor:
         three it came from, and nothing else in the report may present them as
         equivalent.
         """
-        thoughts: list[dict[str, Any]] = [
-            {"kind": "reasoning", "source": "model.reasoning", "text": str(item.get("text") or "").strip(),
-             "elapsedMs": item.get("elapsedMs"), "model": item.get("model")}
-            for item in (journey.get("reasoning") or [])
-            if str(item.get("text") or "").strip()
-        ]
+        # A persona run has a better account of itself than the model's completion
+        # tokens: the director records what the person expected before acting and
+        # what they made of what arrived. Those are sentences about the page in the
+        # person's voice. The completion tokens are the model talking to itself
+        # about machinery -- "We'll click 'How it works' link (ref=e3)", "we need
+        # screenshot evidence", first person plural, about refs. A live report
+        # published exactly that as Friedrich Wolf's evidence for its only finding,
+        # including the model arguing with itself ("However, the snapshot does not
+        # show any price numbers. So we can say..."). So where a persona spoke, the
+        # persona is quoted, and the machinery becomes the fallback it always was
+        # for the agent director.
+        persona_said = cls._persona_voice(journey)
+        thoughts: list[dict[str, Any]] = list(persona_said)
+        if not persona_said:
+            thoughts.extend(
+                {"kind": "reasoning", "source": "model.reasoning", "text": str(item.get("text") or "").strip(),
+                 "elapsedMs": item.get("elapsedMs"), "model": item.get("model")}
+                for item in (journey.get("reasoning") or [])
+                if str(item.get("text") or "").strip())
         for event in journey.get("timeline") or []:
             event_type, data = event.get("type", ""), event.get("data") or {}
             elapsed, task_id = event.get("elapsedMs"), event.get("taskId")
-            if event_type == "agent.message.end":
+            if event_type == "agent.message.end" and not persona_said:
                 text = str(data.get("text") or "").strip()
                 if text:
                     thoughts.append({"kind": "reasoning", "source": "timeline", "text": text,
@@ -1240,6 +2879,47 @@ class JobExecutor:
         actions = [item for item in thoughts if item["kind"] == "action"]
         kept = reasoning + actions[: limit - len(reasoning)]
         return sorted(kept, key=lambda item: item.get("elapsedMs") or 0)
+
+    @staticmethod
+    def _persona_voice(journey: dict[str, Any]) -> list[dict[str, Any]]:
+        """What the person said about the page, from the persona director's own
+        thought record.
+
+        Three of its events are the person speaking about what is in front of
+        them, and they are what a report should quote:
+
+        - ``persona.expectation`` -- what they expected the thing they are about to
+          click to do. It is the sentence that makes the next step falsifiable.
+        - ``persona.reflection`` -- what actually arrived, and the gap. When the gap
+          is non-empty it is the single most useful sentence in the run: a
+          first-person statement of a page not doing what it looked like it would.
+        - ``persona.affect`` -- how that left them, in words derived from the
+          reflection rather than declared by the model.
+
+        Everything else the director records is measurement (perception counts,
+        adherence scores, affect numbers) and belongs in the report as numbers, not
+        as a quote. ``persona.perception``'s narrative is deliberately excluded:
+        "looked at 4 of 31 things" is an observation about the person, not the
+        person's own words.
+        """
+        said: list[dict[str, Any]] = []
+        for event in journey.get("timeline") or []:
+            event_type, data = event.get("type", ""), event.get("data") or {}
+            elapsed = event.get("elapsedMs")
+            if event_type == "persona.reflection":
+                # The gap first: "the page loaded, but the numbers I came for are
+                # not on it" is the finding. `observed` alone is only a description.
+                text = str(data.get("gap") or data.get("observed") or "").strip()
+            elif event_type == "persona.expectation":
+                text = str(data.get("expectation") or "").strip()
+            elif event_type == "persona.affect":
+                text = str(data.get("feeling") or "").strip()
+            else:
+                continue
+            if text:
+                said.append({"kind": "reasoning", "source": event_type, "text": text,
+                             "elapsedMs": elapsed, "taskId": event.get("taskId")})
+        return said
 
     @staticmethod
     def _verdict_thoughts(journey: dict[str, Any]) -> list[dict[str, Any]]:
@@ -1331,9 +3011,11 @@ class JobExecutor:
                 # UX-heuristics references are identical across them -- take it from
                 # the representative rather than losing it at this synthesis step.
                 "grounding": representative.get("grounding"),
-                "evidence": f"synthesized from {len(member_points)} observation(s) across {affected} persona(s); "
-                            f"estimated impact: frustration {impact['frustration']:.2f}, "
-                            f"confusion {impact['confusion']:.2f}, trust erosion {-impact['trust']:.2f}",
+                # Kept as numbers as well as prose, because a number a reader is
+                # shown is a number something should have been able to check.
+                "claimedImpact": {"frustration": impact["frustration"],
+                                  "confusion": impact["confusion"], "trust": -impact["trust"]},
+                "observations": len(member_points),
                 "affectedPersonas": affected, "affectedPersonaIds": list(root_cause["affectedUsers"]),
                 "susceptibleTraits": susceptible_traits, "source": "eyeson-vision-synthesis",
                 # Real element semantics (selector/role/text/box) from the snapshot the
@@ -1497,7 +3179,8 @@ class JobExecutor:
     def _presentation(report: dict[str, Any]) -> str:
         def render_finding(item: dict[str, Any]) -> str:
             image = (f'<img src="{escape(item["screenshotCrop"], quote=True)}" alt="Screenshot region for this finding" '
-                     'style="max-width:min(100%,420px);border-radius:.5rem;border:1px solid #334155;margin-top:.5rem">'
+                     'style="max-width:min(100%,420px);max-height:52vh;object-fit:contain;object-position:top;'
+                     'border-radius:.5rem;border:1px solid #334155;margin-top:.5rem">'
                      if item.get("screenshotCrop") else "")
             recommendation = (f'<p style="opacity:.85"><strong>Recommendation:</strong> {escape(item["recommendation"])}</p>'
                               if item.get("recommendation") else "")
@@ -1644,7 +3327,10 @@ class JobExecutor:
                 f'<tr><td>{position}</td><td>{escape(str(entry.get("title") or ""))}</td>'
                 f'<td><span class="sev sev-{escape(str(entry.get("severity") or "medium"))}">'
                 f'{escape(str(entry.get("severity") or "")).upper()}</span></td>'
-                f'<td>{escape(str(entry.get("affectedPersonas") or "&mdash;"))}</td></tr>'
+                # The dash is markup, so it goes outside escape(): passing it
+                # through turned an em dash into a literal "&mdash;" in the
+                # rendered table.
+                f'<td>{escape(str(entry["affectedPersonas"])) if entry.get("affectedPersonas") else "&mdash;"}</td></tr>'
                 for position, entry in enumerate(priorities, start=1))
             slides.append(
                 '<section class="slide"><h2>What to fix first</h2>'
@@ -1693,7 +3379,7 @@ body{{margin:0;font:20px/1.55 "Helvetica Neue",Helvetica,Arial,system-ui,sans-se
 .evidence{{display:flex;flex-direction:column;gap:.7rem;min-width:0}}
 .shots{{display:grid;grid-template-columns:1fr;gap:.7rem}}
 .shot figcaption{{font-size:.68rem;letter-spacing:.16em;text-transform:uppercase;color:#5b6b7c;margin-bottom:.28rem;font-weight:700}}
-.shot img{{width:100%;border-radius:.35rem;border:1px solid #d6dde5;display:block;background:#fff}}
+.shot img{{width:100%;height:auto;max-height:42vh;object-fit:contain;object-position:top;border-radius:.35rem;border:1px solid #d6dde5;display:block;background:#fff}}
 .shot iframe.redesign{{width:100%;height:14rem;border-radius:.35rem;border:1px solid #d6dde5;background:#fff;display:block}}
 figure{{margin:0}}
 blockquote{{margin:0;padding:.55rem .85rem;border-left:3px solid #12303f;background:#f4f6f8;border-radius:0 .3rem .3rem 0;font-size:.88rem;color:#39485a}}
@@ -1701,6 +3387,32 @@ blockquote cite{{display:block;color:#7c8896;font-size:.72rem;font-style:normal;
 details.code{{margin-top:.2rem;font-size:.78rem}}
 details.code summary{{cursor:pointer;color:#5b6b7c;letter-spacing:.14em;text-transform:uppercase;font-size:.66rem;font-weight:700}}
 details.code pre{{max-height:11rem;overflow:auto;background:#12303f;color:#e6edf3;border-radius:.35rem;padding:.65rem;margin:.35rem 0 0;font-size:.72rem;line-height:1.45}}
+/* Last in the stylesheet on purpose. These override single-class rules like
+   .shot img, so an equally specific rule appearing later would win and the
+   whole block would do nothing -- which is exactly what happened when it sat
+   at the top: the measured overflow did not move by a pixel.
+
+   A slide scrolls rather than clips, which sounds safe and is not: content past
+   the fold is simply absent when somebody presents this, and nothing says so.
+   Measured on a deck of long findings with a screenshot each, every finding
+   slide lost 49px at 1024x600 -- the size of an older projector and of a
+   half-height window. Type and padding come down only on a short viewport, so a
+   normal laptop keeps the size the deck was designed at. */
+@media (max-height: 720px) {{
+  body{{font-size:17.5px;line-height:1.45}}
+  .slide{{padding:3.5vh 5vw;gap:.5rem}}
+  .shot img{{max-height:36vh}}
+}}
+@media (max-height: 620px) {{
+  body{{font-size:16px;line-height:1.4}}
+  .slide{{padding:1.4vh 4.5vw;gap:.35rem}}
+  /* The screenshot gives up the space, not the words. Shrinking the type far
+     enough to fit a 42vh image on a 600px-tall screen would take it below
+     legibility from the back of a room, which is what a deck is for. */
+  .shot img{{max-height:24vh}}
+  details.code pre{{max-height:7rem}}
+  blockquote{{padding:.4rem .7rem;font-size:.84rem}}
+}}
 table.impact{{border-collapse:collapse;font-size:.92rem;max-width:62rem;color:#39485a}}
 table.impact th{{text-align:left;padding:.4rem .8rem;border-bottom:2px solid #12303f;font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:#12303f}}
 table.impact td{{text-align:left;padding:.45rem .8rem;border-bottom:1px solid #e3e8ee}}

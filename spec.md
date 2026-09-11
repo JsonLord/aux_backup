@@ -2971,3 +2971,556 @@ If engineering starts immediately, build in this order:
 14. Empirical calibration and alternative retesting.
 
 This order delivers a useful application early while preserving the architecture needed for the full research vision.
+
+---
+
+## 53. Where the ten judged qualities stand
+
+This section is a working record rather than a design: what a run is judged on,
+what has been built against each, what the measurements were, and what remains.
+It exists because the ten qualities were agreed in review, carried in
+conversation, and lost — twice. `docs/product-scorecard.md` holds the same list
+with more implementation detail; this is the version for planning the next stage.
+
+Two rules the rest of this section depends on:
+
+**A measurement, not an assertion.** Every claim below names the number that
+supports it and where it came from. A rating without one is an opinion, and the
+history of this work is that the opinions were wrong roughly half the time — the
+model that "correctly" reported a heading unreadable did so having never looked at
+its size; the deck that "fitted the screen" lost 49px on a projector; the dialog
+whose close button was wired correctly could not be closed.
+
+**Whose fact is it.** The persona is the instrument, never the standard. Whether
+somebody with 0.35 acuity can read something is a fact about them. Whether the
+element clears 4.5:1 is a fact about the site. Only the second can make a report
+say "defect", and separating them is what keeps the report believable.
+
+### 53.1 Scores, and what each is measured by
+
+| # | Quality | State | The measurement behind it |
+|---|---------|-------|---------------------------|
+| 1 | Tasks fit the site | **9/10** | Both inventions a live run produced (`'Productivity for AEC'`, `'Solutions'`) are caught and regenerated against; "look for a way to contact a human" is not flagged, because that is the behaviour asked for |
+| 2 | Thoughts are a person's | **9/10** | Live run: expectation committed before acting, `matched: "no"`, a gap naming what was absent. Feelings derived, never reported by the model |
+| 3 | Tool calling correct | **9/10** | Vocabulary generated from the tools that implement it; a test asserts the offered set and the implemented set are equal, so they cannot drift |
+| 4 | Persona resembles itself | **8/10** | Off-persona action scored 1/10 with a correct reason, corrected action 10/10. Memory bank: mean adherence 5.7 → 6.6 over two visits, reaching `GIVE_UP` at 10/10 |
+| 5 | Physical traits real | **9/10** | Identical `#888` (3.54:1): at acuity 0.35 the 44px heading reads, the 16px body copy does not; at 0.75/0.7 both read. Agrees with WCAG independently |
+| 6 | Report specific, with fixes | **8/10** | Two finding classes no DOM check can produce, gated on rendered contrast, cross-persona consistency, and profile rarity |
+| 7 | Artifacts render | **7/10** | Findings crop to the element (484×42 out of a 900×500 page) and eyesight findings cite the page as those eyes delivered it |
+| 8 | Deck fits the screen | **9/10** | Six presentation sizes, zero overflow, re-measured in Chromium by a test. Was 49px cut off per finding slide at 1024×600 |
+| 9 | Watchable and takeover-able | **8/10** | Live viewport stream, real pointer in the page, takeover path, stored sessions |
+| 10 | Runs unattended | **7/10** | Evidence salvaged on a bad ending; a truncated completion salvaged (measured: `finish_reason: length` at 29 completion tokens against a budget of 800) |
+
+Suites: **171 node, 295 python** passing. Two python failures are a persona
+fixture absent from this sandbox, unrelated to any of the above.
+
+### 53.2 What closes each remaining gap
+
+Ordered by value per unit of work, not by parameter number. Each is tracked as a
+task, and the numbering below is the order to take them in rather than the task
+ids: 1 is #32, 2 is #33, 3 is #34, 4 is #35, 5 is #24, 6 is #36, 7 is #22.
+
+The tasks carry the detail this section deliberately does not: the file and line
+of what exists today, what is missing, which existing code is the pattern to
+follow, which tests already cover the area and which assertions will have to move
+rather than be deleted, and the measurement that decides when each is done. Read
+the task before starting the work; this section is for choosing what to start.
+
+**1. Run the GEPA compile against a real corpus** — closes the last of #4.
+`services/persona_service/actor_program.py` is built and unproven: the judge is
+the metric, the memory bank's episodes are the trainset, and nothing has been
+compiled yet. Needs a corpus of runs (say 20 visits across 5 personas), then a
+before/after on the gate's regeneration rate, which is the honest success measure
+and is already counted in `gate.stats`.
+
+**2. Verify every artifact reference resolves** — closes #7. There is no
+end-to-end check that a finished report's screenshot, video and snapshot
+references all point at files that exist. A run that silently drops one produces a
+slide with a missing image and says nothing. Cheap: walk a finished report, assert
+every path resolves, count and report the coverage.
+
+**3. Judge severity instead of assigning it** — closes the rest of #6.
+Severities come from a rule table. A finding that blocks a purchase and one that
+mildly annoys a reader can both come out "high". The evidence to judge on is
+already there: which task it blocked, the affect trace at that step, how many
+personas hit it.
+
+**4. Write recommendations for the page, not from a template** — also #6. The two
+perception classes carry templated fixes. They are correct and they are generic;
+the redesign generator already proves a model can be grounded in the run's
+semantic snapshot, and the same grounding applies here.
+
+**5. Report the provider failure upstream** — closes #10. `alias-code` failing is
+recorded and never surfaced (task #24). A run that degrades should say so in the
+report, not only in a log.
+
+**6. Constrain task generation rather than checking it** — the last of #1. The
+check catches inventions after the fact and regenerates. Passing the outline as a
+constrained vocabulary would prevent them.
+
+**7. Forward real pointer movement** — the last of #9 (task #22, deferred). The
+cursor teleports between clicks, which reads as less human than not moving it.
+
+### 53.3 Two things that are deliberately not on that list
+
+**The screen parser stays optional.** `services/perception_service/detector.py`
+finds what the DOM never declared — text baked into a hero image, a canvas-drawn
+control. It needs torch and weights, and the perceivability half of the model
+carries most of the value on numpy and PIL alone. `/healthz` says whether it is
+there; nothing depends on it.
+
+**Redesigns stay grounded in the DOM, not in pixels.** `screenshot-to-code` was
+considered and is the wrong tool for the main path: we have the real selectors,
+roles, accessible names and geometry, and round-tripping a region through pixels
+destroys exactly the information an accessibility finding is about — a fragment
+generated from an image cannot preserve an `aria-label` it never saw. Its
+technique earns a place in one spot only: the `undeclared` detections above, where
+pixels genuinely are all there is, and where the finding ("this exists only as
+pixels, so a screen reader cannot reach it") and the fix ("here it is as real
+markup") line up exactly.
+
+### 53.4 Measurement traps worth not repeating
+
+Every one of these produced a confidently wrong result that looked right in the
+code. They are recorded because the same shapes keep recurring.
+
+- **CSS placed where it cannot win.** Twice. The deck's short-viewport rules sat
+  above an equally specific `.shot img` rule and the measured overflow did not
+  move by a pixel. The credentials dialog's `display: block !important` overrode
+  the class Gradio hides with, so every close path ran correctly and the dialog
+  stayed on screen.
+- **A ring that includes what it surrounds.** Three times: edge contrast in
+  `legibility`, the WCAG surround for a solid control, and the internal
+  measurement importing blurred white across an element's own boundary — which
+  made a mid-grey button report *more* contrast at 0.4 acuity than at full sight.
+- **A fixed threshold on a degraded signal.** A twelve-grey-level "ink" test meant
+  that once the optics compressed a page, every stroke sat within twelve levels of
+  its background and the region read as blank.
+- **A uniform transform for a frequency-dependent effect.** Contrast loss as a
+  volume knob crushed a headline as hard as fine print, which is wrong about the
+  one thing that matters most.
+- **A test fooled by its own explanation.** Twice: comments containing the exact
+  string the assertion searched for, so the test passed while the bug was
+  reintroduced. Strip comments before asserting on source.
+- **A fixture that cannot show what it claims.** Solid bars standing in for text
+  have no internal structure; `#e9e9e9` on `#f5f5f5` is 1.11:1, unreadable to
+  everybody, and cannot demonstrate a difference between two people.
+- **A guard that is always true.** `offsetParent` is null for a `position: fixed`
+  element whether or not it is visible, so Escape and click-outside returned early
+  every time.
+
+---
+
+## 54. What this session built
+
+The record behind section 53's scores. Grouped by what it achieved rather than by
+commit order, with the measurement each produced, because a claim without one is
+what this section exists to stop.
+
+**Shape of the change:** 42 commits, 71 files, +12,531 / −130. Node test files 7 →
+19, python contract test files 12 → 21. Suites at the end: **171 node, 295
+python** passing, with two pre-existing failures from a persona fixture absent in
+this sandbox.
+
+### 54.1 The persona became a simulation rather than a prompt
+
+`behavior.js` (frustration, anger, confusion, trust, fatigue, and an eight-way
+coping sampler) and `physical.js` (optics, pointer scatter, working memory,
+reading speed) were both complete and both unreachable — dead below an early
+`return` in `index.js`. A journey ran as a competent agent and the persona was
+decoration.
+
+`personaDirector.js` and `personaActor.js` make the cognitive cycle the control
+flow: what is visible, what is expected, one action, what was observed, whether it
+matched, the gap. The expectation is committed to **before** acting, which is what
+makes a step falsifiable — a vague expectation cannot turn out wrong. Feelings are
+derived from what the page did, never reported by the model.
+
+Coping became control flow too: when the model samples `abandon`, the run ends and
+the verdict says the persona gave up, because a synthetic user who would have left
+and did not is a script.
+
+- Live: expectation → `matched: "no"` → a gap naming what was absent; frustration
+  0.20 → 0.63 over three actions before walking away.
+- Frustration had been stuck at 0.00 for a whole live run because `perform()`
+  asserted `changed = true`. Change is now observed through a snapshot digest. An
+  affect model that cannot be disappointed models nothing.
+- Abandonment had been a dice roll — 1.4% a turn for a contented persona, and it
+  ended a run at frustration 0.15. `wouldReallyLeave()` gates it on the persona's
+  own tolerance.
+
+### 54.2 Perception was inverted: pixels first, then the tree
+
+`services/perception_service/` degrades the capture with the persona's optics
+*before* anything reads the page, so what does not survive is never detected,
+never reaches the actor, and cannot be acted on. That is what makes an ability
+mechanical rather than described.
+
+- Real Chromium render: sharp eyes resolve all six elements; 0.7/0.6 still
+  resolves all six; 0.35/0.25 loses exactly the `#999` body copy and the `#aaa`
+  fine print and keeps the heading, the call to action and the link.
+- Size became a first-class term. Identical `#888` (3.54:1): at acuity 0.35 the
+  44px heading reads and the 16px body copy does not. Agrees independently with
+  WCAG's 3:1 / 4.5:1 split.
+- The scan pattern comes from the compiled persona (spotted, F, layer-cake,
+  commitment, Z) with a fixation budget, so an impatient visitor genuinely never
+  reaches the pricing rather than being told they are impatient.
+- The hunt got something to hunt for: with the task text carried through, a
+  price-hunter's first fixation is the price rather than the sixth paragraph of
+  feature copy.
+
+### 54.3 The persona is now held to itself, and learns
+
+TinyTroupe's arrangement, three tiers:
+
+- **Within a step** — the action is scored against the persona and, below 7/10,
+  the criticism goes back and another is asked for. Live: `READ the entire
+  philosophy section twice` at `patience 0.20` scored **1/10**; the corrected
+  action, walking away, **10/10**.
+- **Across steps** — recurring criticism is consolidated into standing lessons in
+  the persona's own voice, reaching the prompt through the faculty like any tool's
+  constraints. Live: mean adherence **5.7 → 6.6**, reaching `GIVE_UP` at 10/10.
+- **Offline** — the judgements are a GEPA trainset. Built, unrun (task #32).
+
+Tools declare their own actions, so the vocabulary the persona is given is
+generated from what implements it; a test asserts the two sets are equal.
+
+### 54.4 The report says things nothing else can
+
+Two finding classes no DOM check can produce now reach the report, grouped per
+element across every run and step, cropped to the element, and carrying the
+persona's own words.
+
+The gate that keeps them believable: **the persona is the instrument, never the
+standard.** Rendered contrast decides whether something is an accessibility
+defect; consistency across personas decides whether it is about the page; profile
+rarity decides whether it is a defect at all. A compliant element missed only by a
+profile in the bottom few percent of corrected vision becomes an `info`
+observation, ranked below `low` and excluded from the issue count.
+
+An eyesight finding shows the page **as those eyes delivered it** — a clean
+screenshot beside "they could not read this" invites the reader to disagree, and
+they would be right.
+
+### 54.5 A run can be watched, driven, and signed in
+
+Live viewport stream over agent-browser's WebSocket, a real pointer drawn into the
+page, a takeover path, and stored per-workspace browser credentials so a run tests
+the signed-in product rather than the logged-out one.
+
+### 54.6 The pattern that produced most of the value
+
+Measure, find the model wrong, fix, re-measure. It fired often enough to be the
+method rather than an anecdote — roughly a dozen times, and in most of them the
+code looked correct and the result was luck:
+
+| What looked right | What measuring showed |
+|---|---|
+| A heading correctly reported unreadable | Size was nowhere in the model; it agreed by accident |
+| A deck that fitted the screen | 49px cut off per finding slide at 1024×600 |
+| A credentials dialog with a working close button | Could not be closed by any route |
+| A memory bank that made the persona better | Made it worse: 6.0 → 4.3 |
+| A stitched screenshot showing a broken site | Our own capture repeating its hero band ~14× |
+| A blur that helped legibility | It was bleeding white inward and manufacturing contrast |
+| A judge that was unavailable | It answered correctly and the reply was truncated at 29 tokens |
+
+Section 53.4 lists the seven trap shapes these fall into.
+
+---
+
+## 55. The deploy–run–judge loop, and what five cycles found
+
+Five rounds of: deploy to the Space, fire one live run against
+`https://taoshq.com/` with a bundled persona, read every artifact the run
+produced, and fix what the run showed. Each entry below is a defect the code did
+not reveal and a live run did.
+
+### 55.1 The one that mattered most
+
+**The persona director had shipped unreachable.** Director selection in
+`services/journey-worker/node/src/journeytest.js` read
+`JOURNEY_DIRECTOR === "persona"` against an environment variable that no
+deployment script set, no test asserted, and no document mentioned. Every live
+run built the competent-agent director instead.
+
+Nothing failed. Runs completed, reports carried real findings, the job succeeded.
+The only trace anywhere was one field in the journey log: `director: "pi-sdk"`.
+The persona's eyes, its expectation before acting, the adherence gate and the
+memory bank had never executed on a single live run.
+
+The fix is a named, exported `directorKind()` seam, defaulting to `persona`, with
+`JOURNEY_DIRECTOR=pi` as the explicit opt-out — and a test that asserts *the
+default* rather than the mechanism, because the mechanism was always correct and
+the default was the defect. `spaces/aux-live/start-live.sh` now states the
+setting: a setting nothing states is a setting nobody can check.
+
+The general lesson is worth more than the fix. **A flag whose default has never
+been exercised is not a flag, it is dead code with a plausible name.** Anything
+gated behind one wants either a test on the default or a deployment that names it
+— ideally both.
+
+### 55.2 What each cycle produced
+
+| Cycle | The report said | What was true | What it cost to find |
+|---|---|---|---|
+| 1 | `Fails WCAG AA contrast: "Talent Augmentation OS"`, 1:1, high | The site's own navigation bar, for a persona at 0.95 acuity, on links the same run clicked twice | The reveal keeper scrolled the page between the boxes being read and the pixels being captured |
+| 2 | `Fails WCAG AA contrast: "Sourcing"`, 1.01:1, high | 486×21 of blank page below a chat bubble — an animated mock-up line that had not painted | A crop with no ink is the DOM and the pixels disagreeing, not a ratio |
+| 2 | `The journey was blocked`, critical, `FIX: None` | The run knew exactly why | Nothing read the run's own record of what it kept trying |
+| 3 | `No pain points detected` | The run ended at 0.49 frustration and 0.52 confusion, having found two real defects | Nothing turned an unmet expectation into a finding |
+| 4 | `Fails WCAG AA contrast: "/ user / year"`, 1:1, high | A box at `y = -10`, half above the viewport; the crop clamped to `y = 0` and measured the top of the page | Cropping clamps silently |
+
+By cycle 5 the same page yields the two defects three independent runs had all
+observed and none had reported: `"How it works"` does not navigate, and the
+`"Annual · save 17%"` toggle reveals no price.
+
+### 55.3 The measurement rules these produced
+
+Five rules, each bought with a wrong finding in a live report:
+
+1. **Never measure a page that is moving.** Every box is in viewport coordinates.
+   Hold the page still (`holdRevealKeeper`/`releaseRevealKeeper`, a counter so
+   overlapping holds cannot end each other's), read `scrollY` back after the
+   capture, and fall back to the accessibility tree when it moved.
+2. **No ink is not low contrast.** A region the DOM says holds text and the
+   capture says holds nothing is the two sources disagreeing about what exists.
+   It is reported as *"Declared but not drawn"* at info severity with no ratio
+   claimed, because there are no pixels to measure.
+3. **A clamped crop is not the element.** A box overhanging any edge is measured
+   on whatever sits inside the edge. It stays a scan candidate — a person can
+   partly see it — and can never carry a claim about the page.
+4. **1.00:1 is not a measurement.** A real control against a real background is
+   never that. It means the crop and its surroundings are one colour, which is a
+   failure to find the element.
+5. **Find the ink before taking its percentile.** A fixed low percentile assumes
+   text fills a fair share of its box, and headings do not: 44px near-black on
+   near-white across a two-line box measured 1.06:1 and failing, because glyph
+   strokes cover under a tenth of that area. Checked against the WCAG definition
+   on controlled input — `#333333`, `#767676`, `#949494`, `#cccccc` on white
+   return 12.63, 4.54, 3.03 and 1.61 to the hundredth.
+
+Rules 2–4 are all the same underlying mistake: **reporting a number computed from
+pixels that are not the thing.** The arithmetic was never wrong in any of them.
+
+### 55.4 What a report is allowed to say
+
+The finding classes now have a defensible ordering, and it is worth stating
+because it is what keeps the report believable:
+
+- A **broken promise** is first-hand and falsifiable. The persona said what it
+  expected before it acted; the page did something else. No check against the DOM
+  can find this, because the DOM has no opinion about what a link looked like it
+  would do. Severity is the frustration it actually cost, summed over everyone who
+  hit it, read from the run's own affect rather than assigned from a table.
+- A **WCAG failure** is a fact about the site, measured on the page as drawn, true
+  for every visitor — and only reportable when the pixels measured were the
+  element's.
+- **What one unusual pair of eyes could not read** is a fact about that person and
+  is reported as such, never as a defect.
+- **An instrument that stopped answering** is reported, because the findings a run
+  could not make are unknown rather than absent.
+
+Two rules cut across all of them. A finding must name the thing the way a person
+would — `e17` groups nothing across runs and means nothing to a reader, so the
+label is the one the persona used. And a citation must resolve: evidence a reader
+cannot open from the name given for it reads as corroborated and is worse than no
+citation.
+
+### 55.5 Cycles 6 to 10: what was left once the numbers were right
+
+The first five cycles were about measurements computed on the wrong pixels. The
+last five were about everything downstream of a correct measurement.
+
+| Cycle | The report said | What was true |
+|---|---|---|
+| 6 | 16 captures, `notPerceived: 0` on every one | The perception path is clean. Nothing left to fix there |
+| 7 | `Massive empty vertical sections ... a major rendering bug`, critical | Our own capture: 7,921 of 8,620 rows blank, taken before the scroll-reveals ran |
+| 8 | The whole navigation bar undrawn, plus two contrast failures | 62% of that capture did not resolve, and the guard's own split let it through |
+| 9 | `The entire header and hero section repeats three times vertically`, critical | The capture is correct and complete; the walk saw every element exactly once |
+| 10 | Three findings, all supportable | — |
+
+Three lessons, each larger than the fix it came from.
+
+**A capture is evidence and needs the same discipline as a number.** `full: true`
+stitches a picture as tall as the document, and everything below the fold on a
+site that reveals on scroll is still un-revealed the moment a document loads. The
+first capture of a run is taken straight after `open()`. The reveal keeper does
+exactly this job every 1500ms, which is no help in the first second of a document
+and none at all to a run that finishes in three actions. Awaiting the
+scroll-through before each full-page capture took the blank share from 92% to
+50% -- and the remaining 50% is the site's own whitespace, confirmed by looking
+at the picture rather than at its statistics.
+
+**A defence that usually works is not a defence.** Splitting the trust guard in
+two -- blank regions against drawn-but-illegible -- was the right change and it
+quietly removed the question that had been there before it. 14 of 29 is 0.483 and
+4 of 15 is 0.267: both under the bar, while 18 of 29 did not resolve. The
+cross-capture rule masked the gap for a whole cycle by dropping 14 of the 18 for
+unrelated reasons, which is exactly how a hole stays open. How a capture's
+failures divide says which sentence to print; it does not change whether most of
+the capture resolved.
+
+**The vision model is a confident reader, and some of what it says is
+checkable.** Every guard up to here protects a number from being computed on the
+wrong pixels. None of them can catch a model reading a *correct* capture and
+being wrong about it -- which is what produced "repeats three times vertically"
+as a critical finding over a page that renders once, and "preventing users from
+seeing the actual price" in the same report whose verdict quotes the price. Two
+of its claims can be tested against the run itself: duplication against the
+element walk, blocking against whether the run finished. Where they disagree the
+measurement wins, the finding is capped at medium with a sentence saying what
+disproves it, and limitations names it. Kept rather than deleted -- the visual
+observation may still be worth a look, and deleting a signal because one of its
+claims overreached is its own kind of dishonesty. What it may not do is lead the
+report.
+
+### 55.6 Where cycle 10 landed
+
+```
+verdict: passed        tasks-completed: met     tasks-blocked: not-met
+perception: 7 captures, notPerceived 0 on every one
+memory: 7 episodes, persisted
+adherence: judged 11, passedFirst 3, regenerated 4, keptDespiteFailing 1
+```
+
+Three findings, each supportable, each with an image: the pricing toggle that
+promises a price and shows none (found by the persona, across nine of ten runs),
+low-contrast navigation and body text (corroborated by our own pixel measurement
+at 3.13:1 and 4.03:1 against a 4.5:1 minimum), and an abstract value proposition.
+No unresolvable citation, no contradicted claim, no finding from a capture the
+run could not stand behind.
+
+The gap that remains is the actor, not the pipeline around it: adherence scores
+of 3, 4 and 5 in a single run mean the persona proposed several actions that did
+not sound like itself, and the gate caught them rather than the actor not making
+them. That is what task #32 -- compiling the actor with GEPA against a real
+corpus -- exists to close, and it is now the largest single thing between this
+and a persona that behaves like the person on every step.
+
+### 55.6b Cycles 14 to 17: one defect, found four times
+
+Cycle 14 shipped the prompt GEPA found, and the persona started naming controls
+by their labels instead of their refs. That made the transcript readable, and
+what it read was the actor deciding from one view of the page and judging itself
+against another.
+
+| | 14 | 15 | 16 | 17 |
+|---|---|---|---|---|
+| verdict | passed | passed | **failed** | passed |
+| steps | 10 | 11 | 13 | 4 |
+| perception coverage | 10/10 | 7/11 | 9/13 | 4/4 |
+| adherence passed first | 54% | 57% | 73% | 100% |
+| refs in persona prose | 1 | 0 | 0 | 0 |
+| cross-view reflections | -- | -- | 4 | 0 |
+| final frustration | 1.00 | 0.76 | 1.00 | **0.09** |
+| findings | 4 | 1 | 3 | 1 |
+
+Each cycle fixed what the previous one measured, and each fix was incomplete in a
+way only the next run could show:
+
+- **14 → 15.** Reflect against the walk taken right after the action, not the
+  accessibility tree. Contradictions went to zero and the report went from four
+  findings to one -- but a walk that catches the page still moving falls back, and
+  carrying that fallback forward cost the *next* step its look as well.
+- **15 → 16.** Carry only a walk that produced something; label each reflection
+  with the view either side came from. Coverage recovered and adherence rose --
+  and the labels showed the defect alive at every step where the walk had fallen
+  back. Two of those produced false failures and the run walked away from a page
+  it had finished twice.
+- **16 → 17.** Enforce the rule instead of recording it: reflect only when both
+  sides are the same kind of looking, and retry a spoiled walk once. Zero
+  cross-view comparisons, full coverage, and a run that finished in 141s at 0.09
+  frustration where cycle 14 took 446s at 1.00.
+
+The 1.00 frustration in cycles 14 and 16 was not the page. It was the
+measurement, and the persona felt it exactly as if it had been.
+
+### 55.6c Cycles 20 to 25: what the instrumentation was worth
+
+Five cycles produced no product measurement at all. Four different subsystems
+failed in four consecutive runs -- actor calls, the vision critique, the browser
+daemon, persona compilation -- and each looked like its own bug. They were one
+fault: the model endpoint was intermittently unroutable from the Space, which
+`/api/readiness` could not say because `liveExecutionReady` was
+`bool(os.getenv("OPENAI_API_KEY"))`. Every other dependency there did a real
+round trip. The one nothing can run without was a truthiness test on an
+environment variable, so the signal reported "ready" through all of it.
+
+Three diagnostics, each cheap, each added instead of a guess:
+
+- **Which fallback path.** `look()` had five ways to return the tree and returned
+  the same silent object for all of them. On first contact the answer was "the
+  perception service returned nothing" -- not "the page moved under the walk",
+  which was the hypothesis being worked from, and which would have been fixed
+  with a longer settle that changed nothing.
+- **Which transport failure.** undici reports DNS, refusal, pool exhaustion and
+  restart identically as `TypeError: fetch failed`, with the cause one level
+  down on `error.cause`, which was being discarded.
+- **Whether the provider answers.** One HTTP call then named what five cycles
+  had not: `[Errno 101] Network is unreachable`.
+
+The pattern is worth stating plainly, because it recurred three times in five
+cycles: **the bug was never hard to fix once the record said which one it was.**
+It was hard to find because the record said nothing. Instrumentation that
+distinguishes causes is not overhead on the way to a fix; on this evidence it is
+most of the fix.
+
+### 55.7 Trap shapes, for §53.4
+
+- **A flag whose default was never exercised.** §55.1. The mechanism was correct
+  and had simply never run.
+- **A guard whose threshold is in the wrong space.** An absolute luminance epsilon
+  for "these are the same colour" swallowed every dark-on-dark control: `#232326`
+  on `#19191e` differ by 0.006 and stand at 1.10:1. Luminance is not linear in
+  what the eye does with it; the test belongs on the ratio.
+- **One thing counted as two.** `"Annual · save 17%"` and `"Annual"` are one
+  toggle. Split, the report says a control was hit once when it was hit twice and
+  prices each half at half the patience it cost — which is exactly what severity
+  is read from.
+- **A model with no way to say "nothing is wrong".** The coping table had no
+  `continue`, so a calm persona whose expectation had just been met had a 60.3%
+  chance of retrying the action that worked. Every option in a distribution being
+  a response to trouble means trouble is the only thing it can express.
+- **A guard replaced by two narrower guards.** Splitting "too much of this capture
+  failed" into "too much was blank" and "too much was illegible" left nothing
+  asking the original question, and a capture that failed both ways moderately
+  passed both tests.
+- **Evidence with no guard on it at all.** Eight checks protected the numbers and
+  none protected the pictures, so a capture taken before the page had rendered
+  became a critical finding about the site.
+- **A confident reader of correct evidence.** A vision model handed a good capture
+  can still describe something that is not there, with more certainty than any
+  measurement would. Whatever part of its claim is checkable should be checked.
+- **A question asked of one view and answered from another.** Cycle 14. The actor
+  chose its action from perception -- what this person's eyes delivered -- and was
+  then asked whether its expectation had come true while holding the accessibility
+  tree. Both views were sound. Comparing across them was not: three times the run
+  denied, verbatim, a price paragraph perception had just listed, frustration
+  reached 1.00, and the top finding in the report was about a fault the page does
+  not have. A comparison is only a comparison if both sides are the same kind of
+  looking. The fix cost nothing -- the second view was already being computed one
+  turn later, and only the order was wrong.
+- **A guard that documented the case it did not cover.** `_contradicted_by_the_run`
+  opens by quoting two live false findings, a duplication claim and a pricing
+  claim, and then implements a check for duplication, a check for blocking, and
+  nothing for pricing. The prose was the design and the code was two thirds of it;
+  nothing compares them, so the gap sat there for four cycles reading like
+  completeness. A docstring that names a case is a test that has not been written.
+- **A rule stated at one of the places that needs it.** The commonest shape in
+  this whole record: a fix written where the problem was first seen, at one of
+  several sites that needed it. Four instances in one stretch of cycles.
+  - The instruction never to mention refs went into the acting prompt. Reflection
+    writes prose a reader sees too, and had been handed the ref in its own prompt
+    -- `What you did: CLICK e18` -- and told not to say it.
+  - Then the *report* built its own titles by pattern-matching persona prose, and
+    published "Promised more than it did: e6" when the persona happened to write
+    "The Pricing page will load" instead of naming a control.
+  - A new event was guarded against firing in tree-only runs at the pre-action
+    site and not the post-action one; the existing order test caught it.
+  - The post-action look retried a spoiled walk once. The pre-action look did
+    not, so cycle 24 lost the walk on the scroll that revealed the prices and
+    the run concluded the page does not state a cost -- about a page three
+    earlier runs had read "£200 / user / year" off.
+
+  The tell is always the same: the fix names the site rather than the rule. "The
+  reflect prompt must not print refs" is a site. "Prose a reader sees never
+  contains refs" is a rule, and a rule can be checked everywhere at once.
