@@ -3434,6 +3434,36 @@ way only the next run could show:
 The 1.00 frustration in cycles 14 and 16 was not the page. It was the
 measurement, and the persona felt it exactly as if it had been.
 
+### 55.6c Cycles 20 to 25: what the instrumentation was worth
+
+Five cycles produced no product measurement at all. Four different subsystems
+failed in four consecutive runs -- actor calls, the vision critique, the browser
+daemon, persona compilation -- and each looked like its own bug. They were one
+fault: the model endpoint was intermittently unroutable from the Space, which
+`/api/readiness` could not say because `liveExecutionReady` was
+`bool(os.getenv("OPENAI_API_KEY"))`. Every other dependency there did a real
+round trip. The one nothing can run without was a truthiness test on an
+environment variable, so the signal reported "ready" through all of it.
+
+Three diagnostics, each cheap, each added instead of a guess:
+
+- **Which fallback path.** `look()` had five ways to return the tree and returned
+  the same silent object for all of them. On first contact the answer was "the
+  perception service returned nothing" -- not "the page moved under the walk",
+  which was the hypothesis being worked from, and which would have been fixed
+  with a longer settle that changed nothing.
+- **Which transport failure.** undici reports DNS, refusal, pool exhaustion and
+  restart identically as `TypeError: fetch failed`, with the cause one level
+  down on `error.cause`, which was being discarded.
+- **Whether the provider answers.** One HTTP call then named what five cycles
+  had not: `[Errno 101] Network is unreachable`.
+
+The pattern is worth stating plainly, because it recurred three times in five
+cycles: **the bug was never hard to fix once the record said which one it was.**
+It was hard to find because the record said nothing. Instrumentation that
+distinguishes causes is not overhead on the way to a fix; on this evidence it is
+most of the fix.
+
 ### 55.7 Trap shapes, for §53.4
 
 - **A flag whose default was never exercised.** §55.1. The mechanism was correct
@@ -3475,10 +3505,22 @@ measurement, and the persona felt it exactly as if it had been.
   nothing for pricing. The prose was the design and the code was two thirds of it;
   nothing compares them, so the gap sat there for four cycles reading like
   completeness. A docstring that names a case is a test that has not been written.
-- **A rule stated at one of the places that needs it.** The instruction never to
-  mention refs went into the acting prompt, because that is where refs were being
-  leaked when it was written. Reflection writes prose a reader sees too, and it
-  had been handed the ref in its own prompt -- `What you did: CLICK e18` -- and
-  told not to say it. When a rule exists because prose reaches a reader, it
-  belongs at every place prose is written, not at the one where it was first
-  noticed.
+- **A rule stated at one of the places that needs it.** The commonest shape in
+  this whole record: a fix written where the problem was first seen, at one of
+  several sites that needed it. Four instances in one stretch of cycles.
+  - The instruction never to mention refs went into the acting prompt. Reflection
+    writes prose a reader sees too, and had been handed the ref in its own prompt
+    -- `What you did: CLICK e18` -- and told not to say it.
+  - Then the *report* built its own titles by pattern-matching persona prose, and
+    published "Promised more than it did: e6" when the persona happened to write
+    "The Pricing page will load" instead of naming a control.
+  - A new event was guarded against firing in tree-only runs at the pre-action
+    site and not the post-action one; the existing order test caught it.
+  - The post-action look retried a spoiled walk once. The pre-action look did
+    not, so cycle 24 lost the walk on the scroll that revealed the prices and
+    the run concluded the page does not state a cost -- about a page three
+    earlier runs had read "£200 / user / year" off.
+
+  The tell is always the same: the fix names the site rather than the rule. "The
+  reflect prompt must not print refs" is a site. "Prose a reader sees never
+  contains refs" is a rule, and a rule can be checked everywhere at once.
