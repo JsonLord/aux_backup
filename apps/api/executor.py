@@ -1375,7 +1375,49 @@ class JobExecutor:
             # than in either builder, so one rule covers both and neither can drift.
             finding["personaEvidence"] = cls._relevant_quotes(finding)
             findings.append(finding)
-        return findings
+        return cls._fold_undrawn(findings)
+
+    # How many separate "declared but not drawn" elements a report will name before
+    # it says the thing they have in common instead.
+    _UNDRAWN_WORTH_NAMING = 3
+
+    @classmethod
+    def _fold_undrawn(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """A page still settling is one observation, not one per element.
+
+        A live run produced twelve "Declared but not drawn" entries -- the entire
+        navigation bar, one at a time -- from a single capture taken mid-render.
+        Each was individually correct and together they were noise that buried the
+        three findings a reader needed. Twelve elements blank on one capture is a
+        fact about the capture; twelve facts about twelve elements is what it looks
+        like when nobody says so.
+
+        A couple of them stay as they are: two or three genuinely undrawn elements
+        are worth naming individually, and that is the case this finding was
+        written for.
+        """
+        undrawn = [item for item in findings if item.get("source") == "perception.notDrawn"]
+        if len(undrawn) <= cls._UNDRAWN_WORTH_NAMING:
+            return findings
+        rest = [item for item in findings if item.get("source") != "perception.notDrawn"]
+        names = [str(item.get("elementName") or "").strip() for item in undrawn]
+        shown = ", ".join(f'"{name}"' for name in names[:4] if name)
+        lead = max(undrawn, key=lambda item: len(item.get("personaEvidence") or []))
+        return rest + [{**lead,
+            "title": f"{len(undrawn)} elements were declared and not drawn",
+            "summary": (f"The page's accessibility tree placed {len(undrawn)} elements on screen "
+                        f"and nothing was painted at any of them -- among others {shown}. That many "
+                        f"at once is a statement about the capture rather than about the elements: "
+                        f"almost certainly a page still animating in when it was photographed. It is "
+                        f"reported as one observation because it is one event."),
+            "recommendation": ("Nothing here needs fixing if the page animates its content in. If it "
+                               "does not, the page is announcing a screenful of text to assistive "
+                               "technology that a sighted visitor never sees."),
+            "evidence": f"{len(undrawn)} regions the tree says hold something, all with no ink",
+            "elementName": "", "elementBox": None,
+            "affectedPersonaIds": sorted({persona for item in undrawn
+                                          for persona in (item.get("affectedPersonaIds") or [])}),
+        }]
 
     @staticmethod
     def _element_phrase(item: dict[str, Any]) -> str:
@@ -2392,6 +2434,16 @@ class JobExecutor:
         pair scores 0.159. 0.18 sits in that gap.
         """
         def same_issue(left: dict[str, Any], right: dict[str, Any], left_index: int, right_index: int) -> bool:
+            # Two findings that name two different elements are two findings,
+            # whatever their titles have in common. Every measured finding titles
+            # itself the same way -- "Fails WCAG AA contrast: X", "Declared but not
+            # drawn: X" -- so the boilerplate alone clears the title threshold and a
+            # live run's nineteen perception findings collapsed into three, losing
+            # "£200" and "Let's talk" into "Individual". They are different elements
+            # with different fixes, and a page with ten pale labels has ten of them.
+            here, there = left.get("elementName"), right.get("elementName")
+            if here and there and here != there:
+                return False
             if cls._jaccard(cls._title_tokens(left.get("title", "")),
                             cls._title_tokens(right.get("title", ""))) >= 0.33:
                 return True

@@ -2587,3 +2587,60 @@ def test_an_element_that_resolved_on_another_capture_is_not_called_unreadable():
         {"runId": "run_2", "profileId": "persona_2", "timeline": [step([], ["e19"])]},
     ])
     assert across == []
+
+
+def test_findings_about_different_elements_are_not_merged_into_one():
+    """Every measured finding titles itself the same way -- "Fails WCAG AA
+    contrast: X" -- so the boilerplate alone clears the title-similarity threshold.
+    A live run's nineteen perception findings collapsed into three, losing "£200"
+    and "Let's talk" into "Individual". Three different elements, three different
+    fixes, and a page with ten pale labels has ten of them."""
+    findings = [
+        {"title": 'Fails WCAG AA contrast: "Individual"', "elementName": "Individual",
+         "summary": "It is too pale.", "severity": "high"},
+        {"title": 'Fails WCAG AA contrast: "£200"', "elementName": "£200",
+         "summary": "It is too pale.", "severity": "high"},
+        {"title": 'Fails WCAG AA contrast: "Let\'s talk"', "elementName": "Let's talk",
+         "summary": "It is too pale.", "severity": "high"},
+    ]
+
+    assert len(JobExecutor._merge_similar_findings(findings)) == 3
+
+    # Findings that name no element still merge on wording, which is what that
+    # machinery was built for: a live run published "Generic link text", "Ambiguous
+    # link text" and "Non-descriptive link text" as three numbered issues.
+    worded = [
+        {"title": "Generic link text", "summary": "Links say 'Learn more' everywhere."},
+        {"title": "Ambiguous link text", "summary": "Links say 'Learn more' everywhere."},
+    ]
+    assert len(JobExecutor._merge_similar_findings(worded)) == 1
+
+
+def test_a_screenful_of_undrawn_elements_is_one_observation():
+    """A live run produced twelve "Declared but not drawn" entries -- the entire
+    navigation bar, one at a time -- from a single capture taken mid-render. Each
+    was individually correct, and together they buried the three findings a reader
+    needed. Twelve elements blank on one capture is a fact about the capture."""
+    def undrawn(name):
+        return {"source": "perception.notDrawn", "severity": "info",
+                "category": "profile-specific", "title": f'Declared but not drawn: "{name}"',
+                "summary": "Nothing was painted there.", "elementName": name,
+                "affectedPersonaIds": ["persona_1"], "personaEvidence": []}
+
+    many = JobExecutor._fold_undrawn([undrawn(name) for name in
+                                      ["Home", "Install", "Research", "Pricing", "Sign in"]]
+                                     + [{"source": "perception.notPerceived", "title": "Too pale",
+                                         "severity": "high"}])
+
+    titles = [item["title"] for item in many]
+    assert "5 elements were declared and not drawn" in titles
+    assert not any(title.startswith("Declared but not drawn") for title in titles)
+    assert "Too pale" in titles, "the fold must not touch anything else"
+    folded = next(item for item in many if item["title"].endswith("declared and not drawn"))
+    assert '"Home"' in folded["summary"] and "one event" in folded["summary"]
+
+    # Two or three are worth naming individually -- that is the case the finding
+    # was written for.
+    few = JobExecutor._fold_undrawn([undrawn("Home"), undrawn("Install")])
+    assert [item["title"] for item in few] == [
+        'Declared but not drawn: "Home"', 'Declared but not drawn: "Install"']
