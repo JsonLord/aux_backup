@@ -25,6 +25,16 @@ export JOURNEY_MODEL="${OPENAI_MODEL:-${JOURNEY_MODEL:-auto}}"
 # the accessibility tree. Unset, the worker keeps the tree-based observation it
 # has always used, so this turns perception on rather than being load-bearing.
 export PERCEPTION_SERVICE_URL="${PERCEPTION_SERVICE_URL:-http://127.0.0.1:8092}"
+
+# Who drives the browser. The persona director browses as the person the run is
+# supposed to be -- through their eyes, stating an expectation before each action,
+# held to sounding like them -- and it is the worker's default, so this line
+# changes nothing. It is here because its absence is what broke: selection used to
+# be `JOURNEY_DIRECTOR === "persona"` against a variable no deployment script set,
+# no test asserted and no document mentioned, so every live run silently browsed
+# as the competent agent instead and the whole persona path never executed. Set it
+# to "pi" to get that agent back deliberately.
+export JOURNEY_DIRECTOR="${JOURNEY_DIRECTOR:-persona}"
 export OPENAI_API_KEY="${OPENAI_API_KEY:-${BLABLADOR_API_KEY:-}}"
 # Deliberately not defaulted to OPENAI_API_KEY any more. The two endpoints are
 # now genuinely different services, and sending the primary router's token to
