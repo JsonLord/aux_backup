@@ -2267,3 +2267,105 @@ def test_a_background_no_text_colour_can_survive_is_said_as_such():
 
     assert "black text would still fall short" in fix
     assert "background is what has to change" in fix
+
+
+def test_pixels_that_were_never_drawn_are_not_a_contrast_ratio():
+    """A live report filed "Fails WCAG AA contrast: 'Sourcing' -- 1.01:1" against a
+    486x21 region that was blank page below a chat bubble: an element of the site's
+    animated mock-up conversation that had not painted yet. The same element was
+    reported 200px higher one step later, which is what an animation looks like
+    from here.
+
+    The DOM saying there is text and the capture having no ink at all is the two
+    sources disagreeing about what exists. Reporting it as a measured ratio states
+    a number about pixels that are not there."""
+    blank = {"selector": "span@316,533", "role": "span", "name": "Sourcing",
+             "box": {"x": 316, "y": 533, "width": 486, "height": 21},
+             "reason": "the region and everything around it are the same flat colour",
+             "internalContrast": 0.0078, "edgeContrast": 0.0099, "ink": 0.0,
+             "nothingDrawn": True,
+             "contrast": {"ratio": 1.01, "required": 4.5, "passes": False,
+                          "measured": "text against its own background"}}
+
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[blank], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "Fails WCAG AA contrast" not in finding["title"]
+    assert finding["title"] == 'Declared but not drawn: "Sourcing"'
+    # No ratio is claimed, because there are no pixels to measure.
+    assert finding["contrastRatio"] is None and finding["wcagPasses"] is None
+    assert "1.01" not in finding["summary"]
+    # And it is said quietly: mid-animation is the likelier explanation than a defect.
+    assert finding["severity"] == "info"
+    assert "still animating" in finding["summary"]
+    # Still worth saying: text a page declares and never draws is real.
+    assert "never sees" in finding["recommendation"]
+
+
+def test_faint_but_real_ink_is_still_a_contrast_finding():
+    """The guard must not swallow the thing it sits next to. Text that is genuinely
+    drawn and genuinely too pale is exactly what the WCAG finding is for."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    assert "Fails WCAG AA contrast" in findings[0]["title"]
+    assert findings[0]["contrastRatio"] == 2.85
+
+
+def test_a_blocked_journey_says_where_the_patience_went():
+    """A live report's most serious finding was "The journey was blocked before
+    completion", severity critical, recommendation None. A critical finding with no
+    fix is one a reader cannot act on -- and the run knew exactly what had happened:
+    the persona clicked the same pricing toggle three separate times expecting a
+    price, was told each time that nothing appeared, and left."""
+    journey = {
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            {"type": "persona.expectation", "data": {
+                "expectation": "Clicking the 'Annual · save 17%' button will reveal the price.",
+                "action": {"type": "CLICK", "target": "e17"}}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "Click did not reveal any annual price information."}},
+            {"type": "persona.expectation", "data": {
+                "expectation": "Scrolling will show the plan details.",
+                "action": {"type": "SCROLL", "content": "down"}}},
+            {"type": "persona.reflection", "data": {"matched": "yes", "gap": ""}},
+            {"type": "persona.expectation", "data": {
+                "expectation": "Clicking the 'Annual · save 17%' button will reveal the price.",
+                "action": {"type": "CLICK", "target": "e17"}}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "The expected price information or modal did not appear."}},
+        ],
+    }
+
+    said = JobExecutor._what_stopped_them(journey)
+
+    # Named the way a person would, not by the ref the agent used: nobody reading a
+    # report knows what e17 is, and the persona said what it was.
+    assert '"Annual · save 17%"' in said
+    assert "e17" not in said
+    assert "3 times" not in said and "2 times" in said
+    assert "The expected price information or modal did not appear" in said
+    # The quote's own full stop is not doubled.
+    assert 'appear".' in said and 'appear.".' not in said
+    # An action that worked is not the cause.
+    assert "scroll" not in said.lower()
+
+
+def test_a_journey_that_did_not_repeat_itself_gets_no_invented_cause():
+    """There is no honest single cause to name when nothing was tried twice, and a
+    guess is worse than the silence it replaces."""
+    journey = {"runId": "run_1", "timeline": [
+        {"type": "persona.expectation", "data": {"expectation": "A price.",
+                                                 "action": {"type": "CLICK", "target": "e1"}}},
+        {"type": "persona.reflection", "data": {"matched": "no", "gap": "No price."}},
+        {"type": "persona.expectation", "data": {"expectation": "A plan.",
+                                                 "action": {"type": "CLICK", "target": "e2"}}},
+        {"type": "persona.reflection", "data": {"matched": "no", "gap": "No plan."}},
+    ]}
+
+    assert JobExecutor._what_stopped_them(journey) == ""
+    assert JobExecutor._what_stopped_them({"timeline": []}) == ""

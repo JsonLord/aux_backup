@@ -266,6 +266,9 @@ def _evidence_reference_summary(evidence: dict[str, Any] | None, job_id: str = "
 
 # What a citation in a report looks like: the name an evidence artifact is listed
 # under (JobExecutor._download_name).
+# A label a persona quoted while saying what it expected -- the human name for a
+# control the action record only has a ref for.
+_QUOTED_LABEL = re.compile(r"['\u2018\u201c\"]([^'\u2019\u201d\"]{2,60})['\u2019\u201d\"]")
 _CITED_CAPTURE = re.compile(r"\bbrowser-(?:screenshot|snapshot|ui-change|video)-[\w.-]+", re.I)
 
 
@@ -974,6 +977,58 @@ class JobExecutor:
                 break
         return quotes
 
+    @staticmethod
+    def _what_stopped_them(journey: dict[str, Any]) -> str:
+        """The thing the run kept doing that never worked, in the run's own terms.
+
+        A failed or blocked criterion arrived with no recommendation at all -- a
+        critical finding reading "FIX: None". The run knows exactly what happened
+        and nothing read it: a live persona clicked the same pricing toggle three
+        separate times expecting a price to appear, was told "Clicking the button
+        did not reveal any annual price information" each time, went from calm to
+        fed up over twelve actions, and left.
+
+        Returns the action that was tried repeatedly without its expectation being
+        met, with the last thing the persona said about it. Empty when the run did
+        not repeat itself -- there is no honest single cause to name then, and a
+        guess would be worse than the silence it replaces.
+        """
+        attempts: dict[str, list[str]] = {}
+        named: dict[str, str] = {}
+        pending: dict[str, Any] | None = None
+        expected = ""
+        for event in journey.get("timeline") or []:
+            kind, data = event.get("type"), event.get("data") or {}
+            if kind == "persona.expectation":
+                pending = data.get("action") or {}
+                expected = str(data.get("expectation") or "")
+            elif kind == "persona.reflection" and pending is not None:
+                if str(data.get("matched") or "").lower() != "yes":
+                    target = str(pending.get("target") or pending.get("content") or "").strip()
+                    key = f"{pending.get('type', 'action')} {target}".strip()
+                    attempts.setdefault(key, []).append(str(data.get("gap") or "").strip())
+                    # "CLICK e17" is the ref the agent used; nobody reading a report
+                    # knows what e17 is. The persona named the thing in its own
+                    # expectation -- "Clicking the 'Annual - save 17%' button will
+                    # reveal..." -- so prefer that label and keep the ref beside it.
+                    label = _QUOTED_LABEL.search(expected)
+                    if label and key not in named:
+                        named[key] = label.group(1).strip()
+                pending = None
+        if not attempts:
+            return ""
+        action, gaps = max(attempts.items(), key=lambda item: len(item[1]))
+        if len(gaps) < 2:
+            return ""
+        # The persona's sentences end in a full stop of their own; a quote closed
+        # with one and then followed by another reads as a typo.
+        said = next((gap for gap in reversed(gaps) if gap), "").rstrip(" .")
+        verb, _, ref = action.partition(" ")
+        what = f'the "{named[action]}" control' if action in named else (
+            f"{ref}" if ref else "the same thing")
+        return (f"They tried to {verb.lower()} {what} {len(gaps)} times and it never did what they "
+                f"expected" + (f': "{said}"' if said else "") + ".")
+
     # How much of the shorter of {what this finding is about} and {what the persona
     # said} the two must share before the quote is published as evidence for the
     # finding.
@@ -1126,6 +1181,46 @@ class JobExecutor:
         measured = (f" Its rendered contrast is {ratio}:1 against a WCAG AA minimum of "
                     f"{required}:1, measured on the page as drawn"
                     f" ({contrast.get('measured')})." if ratio else "")
+
+        if item.get("nothingDrawn"):
+            # The DOM says there is text here and the capture has no ink in it at
+            # all. That is the two sources disagreeing about what exists, and it is
+            # a different claim from "this text is hard to read" -- reporting it as
+            # a measured contrast ratio states a number about pixels that are not
+            # there. A live run filed "Fails WCAG AA contrast: 'Sourcing' --
+            # 1.01:1" against a 486x21 region that was blank page below a chat
+            # bubble, part of the site's animated mock-up conversation that had not
+            # painted yet; the same element was reported 200px higher one step
+            # later, which is what an animation looks like from here.
+            #
+            # Worth saying, because text a page declares and never draws is a real
+            # thing to check -- and worth saying quietly, because the likeliest
+            # explanation is a capture taken mid-animation rather than a defect.
+            return {
+                "severity": "info", "category": "profile-specific",
+                "title": f"Declared but not drawn: {what}",
+                "summary": (f"The page's accessibility tree places {what} at this position and nothing "
+                            f"was painted there -- no ink at all, not faint ink. The likeliest "
+                            f"explanation is a capture taken while the element was still animating "
+                            f"in; the alternative is text the page declares and never renders. "
+                            f"No contrast claim is made either way, because there are no pixels to "
+                            f"measure.{where}"),
+                "recommendation": ("Check this element renders on a settled page. If it is part of an "
+                                   "animation, nothing is wrong; if it is not, the page is announcing "
+                                   "text to assistive technology that a sighted visitor never sees."),
+                "evidence": (f"no ink in a {int((item.get('box') or {}).get('width', 0))}x"
+                             f"{int((item.get('box') or {}).get('height', 0))} region the tree says "
+                             f"holds text, on {group['steps']} step(s)"),
+                "evidenceScreenshot": group["seenImage"],
+                "evidenceIsAsTheySawIt": bool(group["seenImage"]),
+                "elementBox": item.get("box"), "elementName": item.get("name") or "",
+                "contrastRatio": None, "wcagRequired": None, "wcagPasses": None,
+                "observation": item.get("reason") or "",
+                "personaEvidence": group["reasoning"],
+                "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+                "source": "perception.notDrawn",
+                "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+            }
 
         if fails_wcag:
             # A fact about the site rather than about whoever happened to look, so
@@ -1292,6 +1387,14 @@ class JobExecutor:
                     "title": _CRITERION_TITLES.get((criterion_id, result))
                              or f"Criterion {result}: {criterion_id}",
                     "summary": criterion.get("explanation") or "",
+                    # A critical finding with no fix at all is a finding a reader
+                    # cannot act on. The run's own record says where to look: the
+                    # thing they kept trying that never answered.
+                    "recommendation": (
+                        f"{stopped_them} Start there -- that is where this visitor's patience went."
+                        if (stopped_them := JobExecutor._what_stopped_them(journey)) else
+                        "Follow this run's timeline back from the last action that did what the "
+                        "persona expected; the steps after it are where the journey came apart."),
                     "evidence": _evidence_reference_summary(criterion.get("evidence"), job_id),
                     "evidenceScreenshot": (criterion.get("evidence") or {}).get("screenshot"),
                     "observation": (criterion.get("evidence") or {}).get("observation"),

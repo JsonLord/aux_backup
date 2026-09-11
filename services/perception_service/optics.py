@@ -315,6 +315,15 @@ def legibility(image: Image.Image, box: dict, margin: int = 12, *,
     reads_as_text = bool(font_px) or role in TEXT_ROLES
     visible = has_text if reads_as_text else (has_text or has_shape)
 
+    # The DOM says there is text here and the capture has no ink in it at all --
+    # not faint ink, none. That is the two sources disagreeing about what exists,
+    # which is a different claim from "this text is hard to read" and must not be
+    # reported as a measured contrast ratio. A live run filed "Fails WCAG AA
+    # contrast: 'Sourcing' -- 1.01:1" against a 486x21 region that was blank page
+    # below a chat bubble: an element of the site's animated mock-up conversation
+    # that had not painted yet. The same element was reported 200px higher on the
+    # next step, which is what an animation looks like from here.
+    nothing_drawn = False
     if visible:
         reason = ""
     elif reads_as_text and has_shape:
@@ -328,6 +337,7 @@ def legibility(image: Image.Image, box: dict, margin: int = 12, *,
                   f"(they need about {sizing['limitPx']}px), so no amount of contrast helps")
     elif internal < 0.02 and edge < 0.02:
         reason = "the region and everything around it are the same flat colour"
+        nothing_drawn = True
     elif internal < required and not has_shape:
         reason = ("too little contrast to make anything out"
                   + (f" at {int(font_px)}px, which for this person needs more than larger text would"
@@ -340,7 +350,10 @@ def legibility(image: Image.Image, box: dict, margin: int = 12, *,
             "resolvableSizePx": sizing["limitPx"], "sizeComfort": sizing["comfort"],
             # Whether they could tell something was there, which is a different
             # question from whether they could read it.
-            "presentButUnreadable": bool(reads_as_text and has_shape and not has_text)}
+            "presentButUnreadable": bool(reads_as_text and has_shape and not has_text),
+            # Whether anything was drawn in this region at all. See above: a blank
+            # crop is the DOM and the capture disagreeing, not a contrast failure.
+            "nothingDrawn": bool(nothing_drawn and ink <= 0.0005)}
 
 
 # WCAG 2.2 relative-luminance coefficients and the sRGB transfer function. These
