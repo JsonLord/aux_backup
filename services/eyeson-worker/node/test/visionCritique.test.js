@@ -410,3 +410,52 @@ test("naming the elements a finding is about is the default, not the exception",
   assert.match(system, /genuinely about the whole page/);
   assert.match(system, /not that pointing at the elements would have taken a moment longer/);
 });
+
+test("a cited selector that is not on the page is not a citation", () => {
+  // Asking the reviewer to name the elements took citations from zero of sixteen
+  // to eight of ten -- and every selector in that first batch was invented.
+  // Against a Tailwind site whose element list is agent-browser refs ("e6",
+  // "span@316,533") it produced Bootstrap: a.btn.btn-primary.btn-lg.mr-3,
+  // h1.display-4.font-weight-bold.mb-3, div.col-md-6.text-center > p. Plausible
+  // CSS for some other website.
+  //
+  // An invented citation is worse than none: it reads as corroboration, and a
+  // reader has to go and look to find out it is not.
+  const body = JSON.stringify({
+    issues: [
+      { title: "Low contrast", description: "Pale text.", category: "accessibility",
+        severity: "high",
+        elements: [{ elementSelector: "e6", role: "cause" },
+                   { elementSelector: "a.btn.btn-primary.btn-lg.mr-3", role: "cause" },
+                   // The same selector arrived three times in one live finding,
+                   // which says nothing three times.
+                   { elementSelector: "e6", role: "cause" }] },
+      { title: "All invented", description: "Nothing real cited.", category: "usability",
+        severity: "high",
+        elements: [{ elementSelector: "h1.display-4.font-weight-bold.mb-3", role: "cause" }] },
+    ],
+    strengths: [{ title: "Clear hierarchy", description: "Good.",
+                  elements: [{ elementSelector: "div.col-md-6", role: "cause" },
+                             { elementSelector: "e1", role: "cause" }] }],
+  });
+
+  const parsed = parseCritique(body, { elements: [{ selector: "e6" }, { selector: "e1" }] });
+
+  assert.deepEqual(parsed.issues[0].elements.map((item) => item.elementSelector), ["e6"]);
+  // A finding whose every citation was invented is left citing nothing, which is
+  // what "unanchored" already means elsewhere in the report.
+  assert.deepEqual(parsed.issues[1].elements, []);
+  // Strengths are held to it too: praise pointing at nothing is praise for nothing.
+  assert.deepEqual(parsed.strengths[0].elements.map((item) => item.elementSelector), ["e1"]);
+});
+
+test("with no element list there is no basis to reject a citation", () => {
+  // Nothing to check against is not the same as a citation that failed a check,
+  // and stripping every citation on that basis would be the guard causing the
+  // harm it exists to prevent.
+  const body = JSON.stringify({ issues: [{ title: "T", description: "D", category: "usability",
+    severity: "low", elements: [{ elementSelector: "whatever", role: "cause" }] }], strengths: [] });
+
+  assert.deepEqual(parseCritique(body).issues[0].elements.map((item) => item.elementSelector),
+    ["whatever"]);
+});

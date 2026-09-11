@@ -245,7 +245,7 @@ function salvageTruncatedCritique(text) {
   return { issues, strengths };
 }
 
-function parseCritique(content, { truncated = false } = {}) {
+function parseCritique(content, { truncated = false, elements = [] } = {}) {
   let stripped = content.trim();
   if (stripped.startsWith("```")) {
     stripped = stripped.replace(/^```[a-zA-Z]*\n?/, "").replace(/\n?```\s*$/, "").trim();
@@ -267,7 +267,7 @@ function parseCritique(content, { truncated = false } = {}) {
     if (recovered === null) {
       const salvaged = salvageTruncatedCritique(stripped);
       if (salvaged) {
-        return { issues: normalizeIssues(salvaged.issues), strengths: normalizeStrengths(salvaged.strengths),
+        return { issues: normalizeIssues(salvaged.issues, elements), strengths: normalizeStrengths(salvaged.strengths, elements),
           truncated: true };
       }
       // Say which failure this is. "did not return JSON" for a completion that
@@ -279,21 +279,21 @@ function parseCritique(content, { truncated = false } = {}) {
     }
     parsed = recovered;
   }
-  if (Array.isArray(parsed)) return { issues: normalizeIssues(parsed), strengths: [] };
+  if (Array.isArray(parsed)) return { issues: normalizeIssues(parsed, elements), strengths: [] };
   if (!parsed || typeof parsed !== "object") throw new Error("vision critique did not return a JSON object or array");
-  return { issues: normalizeIssues(parsed.issues), strengths: normalizeStrengths(parsed.strengths) };
+  return { issues: normalizeIssues(parsed.issues, elements), strengths: normalizeStrengths(parsed.strengths, elements) };
 }
 
-function normalizeStrengths(value) {
+function normalizeStrengths(value, elements) {
   if (!Array.isArray(value)) return [];
   return value.filter((item) => item && typeof item === "object" && item.title && item.description)
     .map((item) => ({
       title: String(item.title), description: String(item.description),
-      elements: Array.isArray(item.elements) ? item.elements
+      elements: citedOnThePage(Array.isArray(item.elements) ? item.elements
         .filter((element) => element && typeof element.elementSelector === "string")
         .map((element) => ({ elementSelector: element.elementSelector,
           role: ELEMENT_ROLES.includes(element.role) ? element.role : "cause" }))
-        : [],
+        : [], elements),
     }));
 }
 
@@ -301,18 +301,54 @@ function parseFindings(content) {
   return parseCritique(content).issues;
 }
 
-function normalizeIssues(value) {
+/**
+ * Keep only the cited selectors that are really on the page.
+ *
+ * Asking the reviewer to name the elements a finding is about took citations from
+ * zero of sixteen to eight of ten -- and every selector in that first batch was
+ * invented. Against a Tailwind site whose element list is agent-browser refs
+ * ("e6", "span@316,533") it produced Bootstrap: `a.btn.btn-primary.btn-lg.mr-3`,
+ * `h1.display-4.font-weight-bold.mb-3`, `div.col-md-6.text-center > p`. Plausible
+ * CSS for some other website.
+ *
+ * An invented citation is worse than none, because it reads as corroboration and
+ * a reader has to go and look to find out it is not. The prompt already says
+ * "exact selector string from the numbered list"; this is the part that does not
+ * depend on the model having listened.
+ *
+ * Duplicates go too: the same selector arrived three times in one finding's array,
+ * which says nothing three times.
+ */
+function citedOnThePage(cited, elements) {
+  const real = new Set((elements || []).map((element) => element.selector).filter(Boolean));
+  // Nothing to check against is not the same as a citation that failed a check.
+  // A caller that did not pass the page's elements -- a test of the parser, a
+  // legacy path -- has given no basis to judge, and stripping every citation on
+  // that basis would be the guard causing the harm it exists to prevent.
+  if (!real.size) return cited || [];
+  const kept = [];
+  const seen = new Set();
+  for (const element of cited || []) {
+    const selector = element.elementSelector;
+    if (!real.has(selector) || seen.has(selector)) continue;
+    seen.add(selector);
+    kept.push(element);
+  }
+  return kept;
+}
+
+function normalizeIssues(value, elements) {
   const parsed = Array.isArray(value) ? value : [];
   return parsed.filter((item) => item && typeof item === "object" && item.title && item.description)
     .map((item) => ({
       category: FINDING_CATEGORIES.includes(item.category) ? item.category : "usability",
       severity: ["low", "medium", "high", "critical"].includes(item.severity) ? item.severity : "medium",
       title: String(item.title), description: String(item.description),
-      elements: Array.isArray(item.elements) ? item.elements
+      elements: citedOnThePage(Array.isArray(item.elements) ? item.elements
         .filter((element) => element && typeof element.elementSelector === "string")
         .map((element) => ({ elementSelector: element.elementSelector,
           role: ELEMENT_ROLES.includes(element.role) ? element.role : "cause" }))
-        : [],
+        : [], elements),
       estimatedImpact: { frustration: clamp01(item.estimatedImpact?.frustration),
         confusion: clamp01(item.estimatedImpact?.confusion), trust: clamp01(item.estimatedImpact?.trust) },
       alternatives: Array.isArray(item.alternatives) ? item.alternatives
@@ -410,7 +446,7 @@ async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], u
   const { content, truncated } = await completeVision({ systemPrompt: system, userText: user, imageBase64,
     model, apiKey, baseUrl, mimeType: imageMimeType || "image/png",
     maxAttempts: options.maxAttempts, retryWaitMs: options.retryWaitMs, timeoutMs: options.timeoutMs });
-  const { issues, strengths } = parseCritique(content, { truncated });
+  const { issues, strengths } = parseCritique(content, { truncated, elements });
   const byId = new Map(elements.map((element) => [element.selector, element]));
   const resolve = (refs) => refs.map((ref) => {
     const matched = byId.get(ref.elementSelector);
