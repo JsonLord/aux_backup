@@ -3431,6 +3431,12 @@ and a persona that behaves like the person on every step.
   not have. A comparison is only a comparison if both sides are the same kind of
   looking. The fix cost nothing -- the second view was already being computed one
   turn later, and only the order was wrong.
+- **A guard that documented the case it did not cover.** `_contradicted_by_the_run`
+  opens by quoting two live false findings, a duplication claim and a pricing
+  claim, and then implements a check for duplication, a check for blocking, and
+  nothing for pricing. The prose was the design and the code was two thirds of it;
+  nothing compares them, so the gap sat there for four cycles reading like
+  completeness. A docstring that names a case is a test that has not been written.
 - **A rule stated at one of the places that needs it.** The instruction never to
   mention refs went into the acting prompt, because that is where refs were being
   leaked when it was written. Reflection writes prose a reader sees too, and it
