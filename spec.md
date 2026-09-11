@@ -3396,6 +3396,44 @@ them. That is what task #32 -- compiling the actor with GEPA against a real
 corpus -- exists to close, and it is now the largest single thing between this
 and a persona that behaves like the person on every step.
 
+### 55.6b Cycles 14 to 17: one defect, found four times
+
+Cycle 14 shipped the prompt GEPA found, and the persona started naming controls
+by their labels instead of their refs. That made the transcript readable, and
+what it read was the actor deciding from one view of the page and judging itself
+against another.
+
+| | 14 | 15 | 16 | 17 |
+|---|---|---|---|---|
+| verdict | passed | passed | **failed** | passed |
+| steps | 10 | 11 | 13 | 4 |
+| perception coverage | 10/10 | 7/11 | 9/13 | 4/4 |
+| adherence passed first | 54% | 57% | 73% | 100% |
+| refs in persona prose | 1 | 0 | 0 | 0 |
+| cross-view reflections | -- | -- | 4 | 0 |
+| final frustration | 1.00 | 0.76 | 1.00 | **0.09** |
+| findings | 4 | 1 | 3 | 1 |
+
+Each cycle fixed what the previous one measured, and each fix was incomplete in a
+way only the next run could show:
+
+- **14 → 15.** Reflect against the walk taken right after the action, not the
+  accessibility tree. Contradictions went to zero and the report went from four
+  findings to one -- but a walk that catches the page still moving falls back, and
+  carrying that fallback forward cost the *next* step its look as well.
+- **15 → 16.** Carry only a walk that produced something; label each reflection
+  with the view either side came from. Coverage recovered and adherence rose --
+  and the labels showed the defect alive at every step where the walk had fallen
+  back. Two of those produced false failures and the run walked away from a page
+  it had finished twice.
+- **16 → 17.** Enforce the rule instead of recording it: reflect only when both
+  sides are the same kind of looking, and retry a spoiled walk once. Zero
+  cross-view comparisons, full coverage, and a run that finished in 141s at 0.09
+  frustration where cycle 14 took 446s at 1.00.
+
+The 1.00 frustration in cycles 14 and 16 was not the page. It was the
+measurement, and the persona felt it exactly as if it had been.
+
 ### 55.7 Trap shapes, for §53.4
 
 - **A flag whose default was never exercised.** §55.1. The mechanism was correct
