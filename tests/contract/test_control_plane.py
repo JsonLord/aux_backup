@@ -2746,3 +2746,57 @@ def test_a_blocking_claim_stands_when_the_run_did_not_finish():
                 "title": "Fails WCAG AA contrast", "summary": "It repeats and prevents reading."}
     JobExecutor._temper_contradicted_findings([measured], [_finished_run([["e1"]])])
     assert measured["severity"] == "high"
+
+
+def test_a_finding_cannot_claim_more_distress_than_the_page_ever_caused():
+    """The vision reviewer estimates frustration, confusion and trust erosion from
+    a single screenshot, and those numbers reach the report as the finding's stated
+    impact. Measured against the runs that produced them they are not close: a run
+    whose peak frustration was 0.29, and which passed, carried three findings
+    claiming 0.90, 0.90 and 0.60. A run that peaked at 0.20 carried a finding
+    claiming 0.90 -- and that was the finding the element walk disproved."""
+    run = {"runId": "run_1", "timeline": [
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.19, "confusion": 0.17}}},
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.29, "confusion": 0.31}}},
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.22, "confusion": 0.20}}},
+    ]}
+    findings = [
+        {"title": "Repeated page layout rendering bug", "observations": 1, "affectedPersonas": 1,
+         "claimedImpact": {"frustration": 0.90, "confusion": 0.90, "trust": 0.95}},
+        {"title": "Vague value proposition", "observations": 1, "affectedPersonas": 1,
+         "claimedImpact": {"frustration": 0.10, "confusion": 0.20, "trust": 0.10}},
+    ]
+
+    assert JobExecutor._what_the_page_actually_cost([run]) == {"frustration": 0.29, "confusion": 0.31}
+    notes = JobExecutor._cap_claimed_impact(findings, [run])
+
+    # Held to what the page was measured to cost anyone, across every step.
+    assert findings[0]["claimedImpact"]["frustration"] == 0.29
+    assert findings[0]["claimedImpact"]["confusion"] == 0.31
+    # Capped, not replaced: a claim inside the ceiling is the model's to make.
+    assert findings[1]["claimedImpact"] == {"frustration": 0.10, "confusion": 0.20, "trust": 0.10}
+    # The prose is written from the numbers after the cap, so it cannot disagree.
+    assert "frustration 0.29" in findings[0]["evidence"]
+    assert "0.90" not in findings[0]["evidence"]
+    assert "frustration 0.10" in findings[1]["evidence"]
+    # And the report says it did this.
+    assert len(notes) == 1
+    assert "estimated frustration at 0.90" in notes[0]
+    assert "measured at most 0.29" in notes[0]
+
+
+def test_with_no_measured_affect_there_is_no_ceiling_to_impose():
+    """A ceiling nobody measured is not a ceiling. An agent-director run records no
+    affect at all, and capping its findings against zero would report every one of
+    them as costing nothing."""
+    findings = [{"title": "Low contrast", "observations": 2, "affectedPersonas": 1,
+                 "claimedImpact": {"frustration": 0.80, "confusion": 0.60, "trust": 0.40}}]
+
+    notes = JobExecutor._cap_claimed_impact(findings, [{"runId": "run_1", "timeline": []}])
+
+    assert notes == []
+    assert findings[0]["claimedImpact"]["frustration"] == 0.80
+    # The evidence line is still written, so every finding states its impact the
+    # same way whether or not there was anything to cap it against.
+    assert "frustration 0.80" in findings[0]["evidence"]
+    assert "2 observation(s) across 1 persona(s)" in findings[0]["evidence"]

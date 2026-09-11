@@ -539,7 +539,8 @@ class JobExecutor:
             # it says are checkable against what this run recorded. Where they
             # disagree the measurement wins, and the report says so rather than
             # quietly rewriting a severity.
-            tempered = self._temper_contradicted_findings(vision_findings, journeys)
+            tempered = (self._temper_contradicted_findings(vision_findings, journeys)
+                        + self._cap_claimed_impact(vision_findings, journeys))
             findings.extend(vision_findings)
             preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys)
                                               + self._praise_as_strengths(vision_praise))
@@ -1156,6 +1157,89 @@ class JobExecutor:
                 return ("the run completed the tasks it came to do"
                         + (f' -- "{said[:180]}"' if said else ""))
         return ""
+
+    @staticmethod
+    def _what_the_page_actually_cost(journeys: list[dict[str, Any]]) -> dict[str, float] | None:
+        """The worst this page made anyone feel, measured rather than guessed.
+
+        The behaviour controller records frustration and confusion after every
+        step of every run. The peak across all of them is the most the page cost
+        anybody who visited it -- and no single finding can have cost more than
+        that, because that is the whole of it.
+
+        None when no run recorded any affect: there is then nothing to cap
+        against, and a ceiling nobody measured is not a ceiling.
+        """
+        peaks = [(state.get("frustration"), state.get("confusion"))
+                 for journey in journeys
+                 for event in journey.get("timeline") or []
+                 if event.get("type") == "persona.affect"
+                 for state in [(event.get("data") or {}).get("state") or {}]]
+        numbers = [(f, c) for f, c in peaks
+                   if isinstance(f, (int, float)) and isinstance(c, (int, float))]
+        if not numbers:
+            return None
+        return {"frustration": max(f for f, _ in numbers), "confusion": max(c for _, c in numbers)}
+
+    @classmethod
+    def _cap_claimed_impact(cls, findings: list[dict[str, Any]],
+                            journeys: list[dict[str, Any]]) -> list[str]:
+        """Hold the vision model's guessed distress to what the run measured.
+
+        The reviewer estimates frustration, confusion and trust erosion from a
+        single screenshot, and those numbers reach the report as a finding's
+        stated impact. Measured against the runs that produced them they are not
+        close: a run whose peak frustration was 0.29, and which passed, carried
+        three findings claiming 0.90, 0.90 and 0.60. A run that peaked at 0.20
+        carried a finding claiming 0.90 -- and that finding was the one the
+        element walk disproved.
+
+        Capped rather than replaced. The model's relative ordering among findings
+        may well carry signal, and a finding about something the persona never
+        reached has no measured counterpart of its own. What it may not do is
+        claim the page cost someone more than the page was ever measured to cost
+        anyone.
+        """
+        ceiling = cls._what_the_page_actually_cost(journeys)
+        notes = []
+        if not ceiling:
+            cls._state_impact(findings)
+            return notes
+        for finding in findings:
+            claimed = finding.get("claimedImpact") or {}
+            if not claimed:
+                continue
+            over = {name: (claimed[name], ceiling[name]) for name in ("frustration", "confusion")
+                    if isinstance(claimed.get(name), (int, float)) and claimed[name] > ceiling[name]}
+            if not over:
+                continue
+            for name, (_, limit) in over.items():
+                claimed[name] = limit
+            worst = max(over.items(), key=lambda item: item[1][0] - item[1][1])
+            notes.append(
+                f"{finding.get('title')!r} estimated {worst[0]} at {worst[1][0]:.2f} from a single "
+                f"screenshot; the runs measured at most {worst[1][1]:.2f} across every step, so the "
+                f"estimate is reported at the measured ceiling.")
+        cls._state_impact(findings)
+        return notes
+
+    @staticmethod
+    def _state_impact(findings: list[dict[str, Any]]) -> None:
+        """Write each finding's evidence line from its numbers, after any capping.
+
+        Rendered here rather than at synthesis so the sentence cannot disagree
+        with the figures it describes -- which it would have, the moment a capped
+        number sat behind prose written before the cap.
+        """
+        for finding in findings:
+            impact = finding.get("claimedImpact")
+            if not impact:
+                continue
+            finding["evidence"] = (
+                f"synthesized from {finding.get('observations', 1)} observation(s) across "
+                f"{finding.get('affectedPersonas', 1)} persona(s); estimated impact: "
+                f"frustration {impact['frustration']:.2f}, confusion {impact['confusion']:.2f}, "
+                f"trust erosion {impact['trust']:.2f}")
 
     @classmethod
     def _temper_contradicted_findings(cls, findings: list[dict[str, Any]],
@@ -2832,9 +2916,11 @@ class JobExecutor:
                 # UX-heuristics references are identical across them -- take it from
                 # the representative rather than losing it at this synthesis step.
                 "grounding": representative.get("grounding"),
-                "evidence": f"synthesized from {len(member_points)} observation(s) across {affected} persona(s); "
-                            f"estimated impact: frustration {impact['frustration']:.2f}, "
-                            f"confusion {impact['confusion']:.2f}, trust erosion {-impact['trust']:.2f}",
+                # Kept as numbers as well as prose, because a number a reader is
+                # shown is a number something should have been able to check.
+                "claimedImpact": {"frustration": impact["frustration"],
+                                  "confusion": impact["confusion"], "trust": -impact["trust"]},
+                "observations": len(member_points),
                 "affectedPersonas": affected, "affectedPersonaIds": list(root_cause["affectedUsers"]),
                 "susceptibleTraits": susceptible_traits, "source": "eyeson-vision-synthesis",
                 # Real element semantics (selector/role/text/box) from the snapshot the
