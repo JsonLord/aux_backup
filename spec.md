@@ -3325,7 +3325,78 @@ label is the one the persona used. And a citation must resolve: evidence a reade
 cannot open from the name given for it reads as corroborated and is worse than no
 citation.
 
-### 55.5 Four more trap shapes, for §53.4
+### 55.5 Cycles 6 to 10: what was left once the numbers were right
+
+The first five cycles were about measurements computed on the wrong pixels. The
+last five were about everything downstream of a correct measurement.
+
+| Cycle | The report said | What was true |
+|---|---|---|
+| 6 | 16 captures, `notPerceived: 0` on every one | The perception path is clean. Nothing left to fix there |
+| 7 | `Massive empty vertical sections ... a major rendering bug`, critical | Our own capture: 7,921 of 8,620 rows blank, taken before the scroll-reveals ran |
+| 8 | The whole navigation bar undrawn, plus two contrast failures | 62% of that capture did not resolve, and the guard's own split let it through |
+| 9 | `The entire header and hero section repeats three times vertically`, critical | The capture is correct and complete; the walk saw every element exactly once |
+| 10 | Three findings, all supportable | — |
+
+Three lessons, each larger than the fix it came from.
+
+**A capture is evidence and needs the same discipline as a number.** `full: true`
+stitches a picture as tall as the document, and everything below the fold on a
+site that reveals on scroll is still un-revealed the moment a document loads. The
+first capture of a run is taken straight after `open()`. The reveal keeper does
+exactly this job every 1500ms, which is no help in the first second of a document
+and none at all to a run that finishes in three actions. Awaiting the
+scroll-through before each full-page capture took the blank share from 92% to
+50% -- and the remaining 50% is the site's own whitespace, confirmed by looking
+at the picture rather than at its statistics.
+
+**A defence that usually works is not a defence.** Splitting the trust guard in
+two -- blank regions against drawn-but-illegible -- was the right change and it
+quietly removed the question that had been there before it. 14 of 29 is 0.483 and
+4 of 15 is 0.267: both under the bar, while 18 of 29 did not resolve. The
+cross-capture rule masked the gap for a whole cycle by dropping 14 of the 18 for
+unrelated reasons, which is exactly how a hole stays open. How a capture's
+failures divide says which sentence to print; it does not change whether most of
+the capture resolved.
+
+**The vision model is a confident reader, and some of what it says is
+checkable.** Every guard up to here protects a number from being computed on the
+wrong pixels. None of them can catch a model reading a *correct* capture and
+being wrong about it -- which is what produced "repeats three times vertically"
+as a critical finding over a page that renders once, and "preventing users from
+seeing the actual price" in the same report whose verdict quotes the price. Two
+of its claims can be tested against the run itself: duplication against the
+element walk, blocking against whether the run finished. Where they disagree the
+measurement wins, the finding is capped at medium with a sentence saying what
+disproves it, and limitations names it. Kept rather than deleted -- the visual
+observation may still be worth a look, and deleting a signal because one of its
+claims overreached is its own kind of dishonesty. What it may not do is lead the
+report.
+
+### 55.6 Where cycle 10 landed
+
+```
+verdict: passed        tasks-completed: met     tasks-blocked: not-met
+perception: 7 captures, notPerceived 0 on every one
+memory: 7 episodes, persisted
+adherence: judged 11, passedFirst 3, regenerated 4, keptDespiteFailing 1
+```
+
+Three findings, each supportable, each with an image: the pricing toggle that
+promises a price and shows none (found by the persona, across nine of ten runs),
+low-contrast navigation and body text (corroborated by our own pixel measurement
+at 3.13:1 and 4.03:1 against a 4.5:1 minimum), and an abstract value proposition.
+No unresolvable citation, no contradicted claim, no finding from a capture the
+run could not stand behind.
+
+The gap that remains is the actor, not the pipeline around it: adherence scores
+of 3, 4 and 5 in a single run mean the persona proposed several actions that did
+not sound like itself, and the gate caught them rather than the actor not making
+them. That is what task #32 -- compiling the actor with GEPA against a real
+corpus -- exists to close, and it is now the largest single thing between this
+and a persona that behaves like the person on every step.
+
+### 55.7 Four more trap shapes, for §53.4
 
 - **A flag whose default was never exercised.** §55.1. The mechanism was correct
   and had simply never run.
@@ -3341,3 +3412,13 @@ citation.
   `continue`, so a calm persona whose expectation had just been met had a 60.3%
   chance of retrying the action that worked. Every option in a distribution being
   a response to trouble means trouble is the only thing it can express.
+- **A guard replaced by two narrower guards.** Splitting "too much of this capture
+  failed" into "too much was blank" and "too much was illegible" left nothing
+  asking the original question, and a capture that failed both ways moderately
+  passed both tests.
+- **Evidence with no guard on it at all.** Eight checks protected the numbers and
+  none protected the pictures, so a capture taken before the page had rendered
+  became a critical finding about the site.
+- **A confident reader of correct evidence.** A vision model handed a good capture
+  can still describe something that is not there, with more certainty than any
+  measurement would. Whatever part of its claim is checkable should be checked.
