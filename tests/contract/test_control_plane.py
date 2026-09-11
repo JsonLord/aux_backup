@@ -309,7 +309,11 @@ def test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardco
 
     blocker = next(item for item in findings if item["title"] == "Checkout spinner never resolves")
     assert blocker["severity"] == "critical"
-    assert "screenshot: 003.png" in blocker["evidence"]
+    # Cited by the name the session lists the capture under, so the reader can
+    # find it -- not by the file name the run happened to write ("003.png"),
+    # which no artifact in the session is called.
+    assert JobExecutor._download_name("browser.screenshot", job["job_id"], "003") in blocker["evidence"]
+    assert "screenshot: 003.png" not in blocker["evidence"]
     assert blocker["recommendation"] == "Add a timeout and error state to the checkout request."
 
     ux_finding = next(item for item in findings if item["title"] == "Low-contrast price label")
@@ -1358,6 +1362,29 @@ def test_capture_references_read_as_names_not_container_paths():
     assert "screenshot: initial-view.png" in summary
     assert "snapshot: 005-snapshot.txt" in summary
     assert summary.startswith("Initial snapshot shows more than 15 buttons")
+
+
+def test_a_cited_capture_names_the_artifact_a_reader_can_download():
+    """A live report's only finding cited "snapshot: 003-snapshot.txt". The session
+    held that capture -- as "browser-snapshot-<job>-003-snapshot.json" -- and no
+    artifact was called what the report called it. Evidence a reader cannot resolve
+    from the citation is evidence the report did not really produce."""
+    from apps.api.executor import _evidence_reference_summary
+
+    summary = _evidence_reference_summary({
+        "screenshot": "/run/screenshots/003-click-e2-after.png",
+        "snapshot": "/run/snapshots/003-snapshot.txt",
+        "uiChangeTimeline": "/run/ui-changes/003-click-e2.json",
+    }, "job_abc")
+
+    for kind, stem in (("browser.screenshot", "003-click-e2-after"),
+                       ("browser.snapshot", "003-snapshot"),
+                       ("browser.ui-change", "003-click-e2")):
+        expected = JobExecutor._download_name(kind, "job_abc", stem)
+        assert expected in summary, f"{expected} is how the session lists it"
+    # The run-local name is not what the artifact is called, so it must not be
+    # what the report cites.
+    assert "003-snapshot.txt" not in summary
 
 
 def test_a_slide_never_heads_a_capture_reference_as_root_cause_analysis():

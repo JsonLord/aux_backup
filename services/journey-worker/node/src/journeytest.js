@@ -172,6 +172,27 @@ function resolveSessionState(input) {
   return resolved;
 }
 
+/**
+ * Which director drives a run. The persona director is the product: it looks at
+ * the page through this person's eyes, states an expectation before it acts, is
+ * held to sounding like them, and gives up the way a real visitor would. The Pi
+ * director browses as a competent agent instead, which is a different and
+ * occasionally useful thing -- so it is reachable, by name, and nothing else
+ * selects it.
+ *
+ * Named and exported because the selection used to be an `=== "persona"` test on
+ * an environment variable nothing set, in no test and no deployment script: the
+ * whole persona path was unreachable in production and a live run silently
+ * browsed as the competent agent. A default is only a default if something
+ * asserts it.
+ *
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {"persona" | "pi"}
+ */
+function directorKind(env = process.env) {
+  return String(env.JOURNEY_DIRECTOR || "persona").trim() === "pi" ? "pi" : "persona";
+}
+
 async function loadJourneyTest() {
   return import("@baguette-studios/journeytest-core");
 }
@@ -192,33 +213,47 @@ async function runWithJourneyTest(input) {
     : registry.browserDrivers.create("agent-browser", {});
   const baseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAI_COMPATIBLE_ENDPOINT;
   const knownModel = registry.directors.create.bind(registry.directors);
-  let director;
-  try {
-    director = knownModel("pi", { provider, modelId, getApiKey: () => apiKey });
-  } catch (error) {
-    if (!baseUrl || typeof core.PiSdkDirector !== "function") throw error;
-    // Pi's built-in catalog cannot know arbitrary OpenAI-compatible model IDs.
-    // Supply the documented model contract while retaining the pinned director.
-    director = new core.PiSdkDirector({
-      // pi-ai gates the `reasoning_effort` request parameter and the
-      // provider-specific thinking formats on this flag
-      // (dist/api/openai-completions.js). Off by default: the configured router
-      // already returns reasoning without being asked -- a live run recorded 12
-      // `thinking` blocks with this false -- and asking for reasoning_effort on a
-      // route that rejects the parameter would fail the whole journey.
-      // JOURNEY_MODEL_REASONING=1 turns it on for a router known to accept it.
-      model: { id: modelId, name: modelId, provider, api: "openai-completions", baseUrl,
-        reasoning: process.env.JOURNEY_MODEL_REASONING === "1",
-        input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-        contextWindow: 128000, maxTokens: 16384 },
-      getApiKey: () => apiKey,
-    });
-  }
+  // The competent-agent director, built only when a run actually asks for it.
+  // Constructing it unconditionally meant a persona run could still fail on a
+  // model id Pi's catalog does not know, for a director it was never going to use.
+  const piDirector = () => {
+    let director;
+    try {
+      director = knownModel("pi", { provider, modelId, getApiKey: () => apiKey });
+    } catch (error) {
+      if (!baseUrl || typeof core.PiSdkDirector !== "function") throw error;
+      // Pi's built-in catalog cannot know arbitrary OpenAI-compatible model IDs.
+      // Supply the documented model contract while retaining the pinned director.
+      director = new core.PiSdkDirector({
+        // pi-ai gates the `reasoning_effort` request parameter and the
+        // provider-specific thinking formats on this flag
+        // (dist/api/openai-completions.js). Off by default: the configured router
+        // already returns reasoning without being asked -- a live run recorded 12
+        // `thinking` blocks with this false -- and asking for reasoning_effort on a
+        // route that rejects the parameter would fail the whole journey.
+        // JOURNEY_MODEL_REASONING=1 turns it on for a router known to accept it.
+        model: { id: modelId, name: modelId, provider, api: "openai-completions", baseUrl,
+          reasoning: process.env.JOURNEY_MODEL_REASONING === "1",
+          input: ["text"], cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+          contextWindow: 128000, maxTokens: 16384 },
+        getApiKey: () => apiKey,
+      });
+    }
+    return director;
+  };
   // Who drives the browser. The Pi director browses as a competent agent; the
-  // persona director browses as the person the run is supposed to be, and its
-  // coping decisions can end the run the way a real visitor would. Off by
-  // default until it has as many live runs behind it as the one it replaces.
-  if (String(process.env.JOURNEY_DIRECTOR || "").trim() === "persona") {
+  // persona director browses as the person the run is supposed to be -- it looks
+  // at the page through this person's eyes, states an expectation before acting,
+  // is held to sounding like them, and its coping decisions can end the run the
+  // way a real visitor would. That is the product, so it is the default, and a
+  // run only falls back to the competent agent when asked for by name. The
+  // director is named on every run (`director` in the result) precisely because
+  // a finding from a persona run and one from an agent run are about different
+  // things.
+  let director;
+  if (directorKind() === "pi") {
+    director = piDirector();
+  } else {
     director = new PersonaDirector({
       profile: input.profile,
       model: { provider, name: modelId },
@@ -304,5 +339,5 @@ async function runWithJourneyTest(input) {
     reasoning: takeRunReasoning(captureId) };
 }
 
-module.exports = { CURSOR_OVERLAY_SCRIPT, installCursorOverlay, journeyContract, loadJourneyTest,
-  resolveSessionState, runWithJourneyTest, sessionNameFor, testerContract };
+module.exports = { CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
+  loadJourneyTest, resolveSessionState, runWithJourneyTest, sessionNameFor, testerContract };

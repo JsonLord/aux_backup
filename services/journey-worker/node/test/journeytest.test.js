@@ -5,8 +5,8 @@ const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
-const { CURSOR_OVERLAY_SCRIPT, installCursorOverlay, journeyContract, resolveSessionState,
-  testerContract } = require("../src/journeytest");
+const { CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
+  resolveSessionState, testerContract } = require("../src/journeytest");
 
 test("maps AUX run input to pinned JourneyTest contracts", () => {
   const profile = {
@@ -147,4 +147,43 @@ test("a run with no issued account is not told to register", () => {
 
   assert.equal(journey.objective, "Find pricing");
   assert.doesNotMatch(journey.objective, /register|password/i);
+});
+
+// The persona director is the product. It shipped unreachable: the selection was
+// `JOURNEY_DIRECTOR === "persona"` against a variable no deployment script set,
+// so every live run browsed as the competent agent and the persona's eyes,
+// expectations, adherence gate and memory bank never executed. Nothing failed --
+// the runs looked healthy, and the only trace was `director: "pi-sdk"` in the log.
+// These assert the default rather than the mechanism, because the mechanism was
+// always correct and the default was the defect.
+test("browses as the persona unless a run asks for the agent by name", () => {
+  assert.equal(directorKind({}), "persona");
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "" }), "persona");
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "   " }), "persona");
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "persona" }), "persona");
+});
+
+test("falls back to the competent agent only for the exact opt-out", () => {
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "pi" }), "pi");
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "  pi  " }), "pi");
+  // A typo must not silently cost a run its persona -- that is the failure this
+  // whole test exists for, and defaulting the unknown value the other way would
+  // reintroduce it under a new spelling.
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "pi-sdk" }), "persona");
+  assert.equal(directorKind({ JOURNEY_DIRECTOR: "agent" }), "persona");
+});
+
+// The guard above is only half the story: the persona director has to be the one
+// the worker actually constructs. Reading the source is the only way to check
+// that without a live journeytest-core, and comments are stripped first -- a
+// regression test that passes because its own explanation contains the string it
+// searches for has happened twice in this repo already.
+test("the worker constructs the persona director on the default path", () => {
+  const source = fs.readFileSync(path.join(__dirname, "..", "src", "journeytest.js"), "utf8")
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .replace(/^\s*\/\/.*$/gm, "");
+  const branch = source.match(/if \(directorKind\(\) === "pi"\) \{([\s\S]*?)\n  \} else \{([\s\S]*?)\n  \}/);
+  assert.ok(branch, "the director selection is no longer a directorKind() branch");
+  assert.match(branch[1], /piDirector\(\)/, "the opt-out branch must build the Pi director");
+  assert.match(branch[2], /new PersonaDirector\(/, "the default branch must build the persona director");
 });

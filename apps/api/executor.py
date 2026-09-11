@@ -140,31 +140,49 @@ def _is_run_diagnostic(finding: dict[str, Any]) -> bool:
     return any(pattern.search(text) for pattern in _RUN_DIAGNOSTIC_PATTERNS)
 
 
-def _capture_name(path: str | None) -> str:
+def _capture_name(path: str | None, kind: str = "", job_id: str = "") -> str:
     """The name a capture is known by, not where the container happened to write it.
 
     A live deck rendered "snapshot: /home/user/artifacts/journeys/2026-08-30T10-57-
     43-548Z-job_08147074e9f648a58d3c/snapshots/005-snapshot.txt" as its root-cause
     analysis. The absolute path says nothing to a reader and is meaningless once the
-    container is gone; the capture's own name ("005-snapshot.txt") is what the
-    evidence artifacts in the workspace are listed under."""
-    return Path(str(path)).name if path else ""
+    container is gone.
+
+    The capture's own file name is no better for finding the thing: the run writes
+    "003-snapshot.txt" and the workspace lists the same capture as
+    "browser-snapshot-<job>-003-snapshot.json" (JobExecutor._download_name). A live
+    report cited "snapshot: 003-snapshot.txt" for its only finding, and no artifact
+    in the session was called that -- the evidence existed and was unreachable by
+    the name given for it. With the kind and job known, cite the name the artifact
+    is actually listed under; otherwise fall back to the capture's own name, which
+    at least names the capture."""
+    if not path:
+        return ""
+    name = Path(str(path)).name
+    if not kind or not job_id:
+        return name
+    return JobExecutor._download_name(kind, job_id, Path(name).stem)
 
 
-def _evidence_reference_summary(evidence: dict[str, Any] | None) -> str:
+def _evidence_reference_summary(evidence: dict[str, Any] | None, job_id: str = "") -> str:
     """Render a JourneyTest EvidenceReference (screenshot/snapshot/observation/... path
-    or text) into a single human-readable string for the report's ``evidence`` field."""
+    or text) into a single human-readable string for the report's ``evidence`` field.
+
+    ``job_id`` is what lets a citation name the artifact a reader can actually
+    download rather than the file name the run happened to use. It is optional
+    because a finding is still worth reporting when it is not known."""
     if not evidence:
         return "No evidence reference recorded on this finding."
     parts = []
     if evidence.get("observation"):
         parts.append(evidence["observation"])
     if evidence.get("screenshot"):
-        parts.append(f"screenshot: {_capture_name(evidence['screenshot'])}")
+        parts.append(f"screenshot: {_capture_name(evidence['screenshot'], 'browser.screenshot', job_id)}")
     if evidence.get("snapshot"):
-        parts.append(f"snapshot: {_capture_name(evidence['snapshot'])}")
+        parts.append(f"snapshot: {_capture_name(evidence['snapshot'], 'browser.snapshot', job_id)}")
     if evidence.get("uiChangeTimeline"):
-        parts.append(f"UI change timeline: {_capture_name(evidence['uiChangeTimeline'])}")
+        parts.append("UI change timeline: "
+                     f"{_capture_name(evidence['uiChangeTimeline'], 'browser.ui-change', job_id)}")
     if evidence.get("url"):
         parts.append(f"url: {evidence['url']}")
     if evidence.get("videoTimeMs") is not None:
@@ -314,7 +332,7 @@ class JobExecutor:
                 if session_state_path:
                     shutil.rmtree(Path(session_state_path).parent, ignore_errors=True)
         if worker_url:
-            findings = self._pain_points_from_journeys(journeys)
+            findings = self._pain_points_from_journeys(journeys, job["job_id"])
             # What the persona's eyes made of the page. Two finding classes that
             # exist nowhere else, because no check against the DOM can produce
             # either -- see _pain_points_from_perception.
@@ -953,7 +971,7 @@ class JobExecutor:
         }
 
     @staticmethod
-    def _pain_points_from_journeys(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    def _pain_points_from_journeys(journeys: list[dict[str, Any]], job_id: str = "") -> list[dict[str, Any]]:
         """Derive report findings from JourneyTest's own AgentVerdict for each real run
         (blockers, uxFindings, suggestedImprovements, and failed/blocked pass criteria) --
         this is the browser-runtime's authoritative, evidence-grounded verdict (spec.md
@@ -979,7 +997,7 @@ class JobExecutor:
                         "title": item.get("title") or f"{bucket} finding",
                         "summary": item.get("description") or "",
                         "recommendation": item.get("recommendation"),
-                        "evidence": _evidence_reference_summary(item.get("evidence")),
+                        "evidence": _evidence_reference_summary(item.get("evidence"), job_id),
                         # The screenshot JourneyTest itself cited for this finding --
                         # the honest image to show beside it on a slide.
                         "evidenceScreenshot": (item.get("evidence") or {}).get("screenshot"),
@@ -1011,7 +1029,7 @@ class JobExecutor:
                     "title": _CRITERION_TITLES.get((criterion_id, result))
                              or f"Criterion {result}: {criterion_id}",
                     "summary": criterion.get("explanation") or "",
-                    "evidence": _evidence_reference_summary(criterion.get("evidence")),
+                    "evidence": _evidence_reference_summary(criterion.get("evidence"), job_id),
                     "evidenceScreenshot": (criterion.get("evidence") or {}).get("screenshot"),
                     "observation": (criterion.get("evidence") or {}).get("observation"),
                     "criterionId": criterion_id, "criterionResult": result,

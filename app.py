@@ -751,6 +751,104 @@ _QUIET_BROWSER_EVENT_TYPES = {"browser.snapshot", "browser.screenshot", "browser
                               "browser.network_har.start", "browser.network_har.stop"}
 
 
+def _persona_thought(event_type: str, data: dict, at: str) -> str | None:
+    """One line of the persona's own thinking, in the order a person thinks it.
+
+    The persona director records the thought pattern the product is built around:
+    what is visible, what they therefore expect, whether that sounded like them,
+    what actually arrived, and -- derived from the gap rather than declared -- how
+    they now feel. Every one of those is a `persona.*` event, and none of them was
+    rendered: the log tab matched `model.reasoning`, `agent.message.end`,
+    `browser.*` and `journey.*`, so a persona run showed its clicks and its
+    timings with the reasoning left as an empty attribution. Returns None for an
+    event this renderer has nothing to say about, so the caller can fall through.
+    """
+    if event_type == "persona.perception":
+        counts = data.get("counts") or {}
+        eyes = data.get("eyes") or {}
+        scan = data.get("scan") or {}
+        seen, total = counts.get("fixated"), counts.get("elements")
+        bits = []
+        if isinstance(seen, int) and isinstance(total, int):
+            bits.append(f"took in **{seen} of {total}** things on the page")
+        if scan.get("pattern"):
+            bits.append(f"scanning in a {scan['pattern']} pattern")
+        # Their eyes, as numbers, because a reader has to be able to tell an
+        # unreadable page from an unusual pair of eyes.
+        if eyes.get("acuity") is not None or eyes.get("contrastSensitivity") is not None:
+            bits.append(f"acuity {eyes.get('acuity', '?')}, contrast sensitivity "
+                        f"{eyes.get('contrastSensitivity', '?')}")
+        line = f"- 👁️ {'; '.join(bits) or 'looked at the page'}{at}"
+        # Present and illegible is a defect in the page. Legible and never
+        # reached is the answer to "why did they not click it". They are
+        # different claims and are never merged.
+        if data.get("notPerceived"):
+            line += ("\n    - **could not read:** "
+                     + ", ".join(str(item) for item in data["notPerceived"][:6]))
+        if data.get("missedWhatTheyCameFor"):
+            missed = ", ".join(str(item.get("name") or item.get("selector"))
+                               for item in data["missedWhatTheyCameFor"][:4])
+            line += f"\n    - **never got to what they came for:** {missed}"
+        return line
+    if event_type == "persona.expectation":
+        visible = str(data.get("visible") or "").strip()
+        expectation = str(data.get("expectation") or "").strip()
+        action = data.get("action") or {}
+        parts = []
+        if visible:
+            parts.append(f"> 👀 {visible}")
+        if expectation:
+            parts.append(f"> 🤔 {expectation}")
+        if action.get("type"):
+            target = action.get("target") or action.get("ref") or action.get("text") or ""
+            parts.append(f"> ➡️ **{action['type']}**{f' {target}' if target else ''}")
+        if not parts:
+            return None
+        return "\n>\n".join(parts) + f"\n>\n> — _what they see, expect, and do_{at}\n"
+    if event_type == "persona.adherence":
+        score, passed = data.get("score"), data.get("passed")
+        mark = "✅" if passed else "🔁"
+        flaw = str(data.get("flaw") or "").strip()
+        line = f"- {mark} sounded like them: **{score}/10**"
+        if not passed:
+            # A regenerated action is the gate working, so the reason it sent the
+            # first one back belongs in the log next to it.
+            line += f" — sent back: {flaw}" if flaw else " — sent back"
+        return line + at
+    if event_type == "persona.adherence_unavailable":
+        reason = str(data.get("reason") or "").strip()
+        return ("- ⚠️ _nothing checked whether these actions sound like this person_"
+                + (f" ({reason})" if reason else "") + at)
+    if event_type == "persona.reflection":
+        gap = str(data.get("gap") or "").strip()
+        observed = str(data.get("observed") or "").strip()
+        matched = data.get("matched")
+        head = "as expected" if matched else "not what they expected"
+        body = gap or observed
+        return (f"> 🔍 **{head}.** {body}\n>\n> — _comparing what arrived with what "
+                f"they expected_{at}\n") if body else f"- 🔍 {head}{at}"
+    if event_type == "persona.affect":
+        # The feeling is derived from the reflection and rendered in words. The
+        # numbers stay beside it: a reader has to be able to disagree with the
+        # wording without losing the measurement.
+        feeling = str(data.get("feeling") or "").strip()
+        state = data.get("state") or {}
+        coping = (data.get("coping") or {}).get("type")
+        numbers = ", ".join(
+            f"{label} {state[key]:.2f}" for key, label in
+            (("frustration", "frustration"), ("confusion", "confusion"), ("effort", "effort"))
+            if isinstance(state.get(key), (int, float)))
+        line = f"- 💗 _{feeling or 'no change in how they feel'}_"
+        if numbers:
+            line += f"  ({numbers})"
+        if coping and coping != "continue":
+            line += f" → **{coping.replace('_', ' ')}**"
+        return line + at
+    if event_type == "persona.nearly_left":
+        return f"- 🚪 _felt like giving up, but had no real reason to yet_{at}"
+    return None
+
+
 def generate_design_agent_brief(session_id, workspace_id, oauth_profile: gr.OAuthProfile | None, oauth_token: gr.OAuthToken | None):
     """Design-agent instructions built from this session's SYNTHESIZED findings
     (apps/api/executor.py's cross-persona root-cause aggregation), not
@@ -880,28 +978,52 @@ def format_persona_thought_log(content_json: str) -> str:
             # Say up front whether this run has the model's real thinking or
             # only its actions, rather than leaving a reader to infer it from
             # an absence.
+            # A persona run's thinking is not in `reasoning` at all: the director
+            # records it as persona.* events, in the order a person thinks. Saying
+            # "no model reasoning was captured" over a full thought timeline is
+            # the wrong thing to tell a reader, so count both.
+            persona_thoughts = [event for event in (run.get("timeline") or [])
+                                if str(event.get("type") or "").startswith("persona.")]
             if reasoning:
                 model_name = next((item.get("model") for item in reasoning if item.get("model")), None)
                 lines.append(f"🧠 **{len(reasoning)} model thought(s)** captured from the director's own "
                              f"reasoning tokens{f' ({model_name})' if model_name else ''}, shown below as "
                              "`💭 … — model reasoning`.\n")
-            else:
+            if persona_thoughts:
+                lines.append(f"🎭 **{len(persona_thoughts)} persona thought(s)** — what they saw, what they "
+                             "expected, whether it sounded like them, what arrived, and how that left them "
+                             f"feeling. Browsed as **{run.get('director') or 'persona'}**.\n")
+            elif not reasoning:
                 lines.append("🧠 _No model reasoning was captured for this run, so the thoughts below are "
                              "the agent's recorded text output and browser actions only._\n")
             # The model's real reasoning is captured from the completions
             # responses (services/journey-worker/node/src/reasoningCapture.js)
             # because journeytest-core drops `thinking` blocks before writing
-            # the timeline. Interleave it by elapsed time so the log reads as
-            # one journey rather than two parallel streams.
+            # the timeline.
+            #
+            # Where it goes depends on whether the run has a persona voice of its
+            # own. Raw completion tokens are the model talking to itself about
+            # machinery -- "We'll click 'How it works' link (ref=e3)", "we need
+            # screenshot evidence" -- in the first person plural, about refs and
+            # evidence rather than about a page. Interleaved with the persona's
+            # thinking under a heading that says "in the persona's own words",
+            # that reads as the person's thinking, and it is not: it is what the
+            # product exists to replace. So a persona run keeps it, labelled as
+            # the model's own working and folded away from the narrative, and an
+            # agent run -- which has no other thinking to show -- interleaves it
+            # as before.
+            model_thoughts = [{"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
+                               "data": {"text": item.get("text")}}
+                              for item in (run.get("reasoning") or [])
+                              if str(item.get("text") or "").strip()]
+            folded_reasoning = model_thoughts if persona_thoughts else []
             timeline = sorted(
-                list(run.get("timeline") or []) + [
-                    {"type": "model.reasoning", "elapsedMs": item.get("elapsedMs"),
-                     "data": {"text": item.get("text")}}
-                    for item in (run.get("reasoning") or [])
-                    if str(item.get("text") or "").strip()],
+                list(run.get("timeline") or []) + ([] if persona_thoughts else model_thoughts),
                 key=lambda event: event.get("elapsedMs") or 0)
             if timeline:
-                lines.append("**What happened, in the persona's own words:**\n")
+                lines.append("**What happened, in the persona's own words:**\n"
+                             if persona_thoughts else
+                             "**What happened, step by step:**\n")
                 for event in timeline:
                     event_type, event_data = event.get("type", ""), event.get("data") or {}
                     elapsed = event.get("elapsedMs")
@@ -924,6 +1046,9 @@ def format_persona_thought_log(content_json: str) -> str:
                         lines.append(f"> 💭 {thought}\n>\n> — _agent text output_{at}\n")
                     elif event_type == "agent.message.error" and event_data.get("errorMessage"):
                         lines.append(f"- ⚠️ **Model error:** {event_data['errorMessage']}{when}")
+                    elif event_type.startswith("persona.") and (
+                            thought_line := _persona_thought(event_type, event_data, at)):
+                        lines.append(thought_line)
                     elif event_type.startswith("browser.") and event_type not in _QUIET_BROWSER_EVENT_TYPES:
                         summary = event.get("summary") or event_type
                         lines.append(f"- 🖱️ {summary}{when}")
@@ -934,6 +1059,18 @@ def format_persona_thought_log(content_json: str) -> str:
                 if items:
                     lines.append(f"\n**{label}:**")
                     lines.extend(f"- **{item.get('title', 'Finding')}**: {item.get('description', '')}" for item in items)
+            if folded_reasoning:
+                # Kept, never deleted -- it is the evidence for how a decision was
+                # reached, and a reader auditing an odd action needs it. Folded and
+                # named for what it is, so it is not mistaken for the person.
+                lines.append(f"\n<details><summary>🔧 The model's own working "
+                             f"({len(folded_reasoning)} completions) — machinery behind the thoughts "
+                             "above, not the person's voice</summary>\n")
+                for item in folded_reasoning:
+                    elapsed = item.get("elapsedMs")
+                    at = f" · +{elapsed / 1000:.1f}s" if isinstance(elapsed, (int, float)) else ""
+                    lines.append(f"> 💭 {str(item['data']['text']).strip()}\n>\n> — _model reasoning_{at}\n")
+                lines.append("</details>\n")
             sections.append("\n".join(lines))
         return "\n\n---\n\n".join(sections) if sections else "_No runs recorded in this log._"
     if isinstance(data, dict) and ("behavior" in data or "abilities" in data):
