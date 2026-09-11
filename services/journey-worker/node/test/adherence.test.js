@@ -167,3 +167,29 @@ test("a success clears the count, so an occasional blip does not disable it", as
   for (let step = 0; step < 4; step += 1) await gate.settle(FRIEDRICH, LEAVING, async () => LEAVING);
   assert.equal(gate.enabled, true);
 });
+
+test("a rejected action is kept with the reason it was rejected", async () => {
+  // A rejected action and the sentence explaining why it did not sound like this
+  // person is the most informative training example the gate produces -- a
+  // labelled negative nobody had to write. Keeping only {score, flaw} threw the
+  // action away, leaving a corpus made entirely of actions that had already
+  // passed, which teaches an optimiser very little.
+  const answers = [
+    JSON.stringify({ score: 3, flaw: "Far too patient for them" }),
+    JSON.stringify({ score: 9, flaw: "" }),
+  ];
+  const gate = new AdherenceGate({ judge: async () => answers.shift() });
+  const first = { action: { type: "READ", target: "e1" }, expectation: "read it all" };
+  const second = { action: { type: "CLICK", target: "e7" }, expectation: "get to the price" };
+
+  const settled = await gate.settle({ persona: { name: "Friedrich" } }, first, async () => second);
+
+  assert.equal(settled.adherence.passed, true);
+  assert.equal(settled.decision.action.type, "CLICK");
+  // Both attempts are on the record, each with the action it was about.
+  assert.equal(settled.adherence.history.length, 2);
+  assert.deepEqual(settled.adherence.history[0].action, { type: "READ", target: "e1" });
+  assert.equal(settled.adherence.history[0].score, 3);
+  assert.equal(settled.adherence.history[0].flaw, "Far too patient for them");
+  assert.deepEqual(settled.adherence.history[1].action, { type: "CLICK", target: "e7" });
+});

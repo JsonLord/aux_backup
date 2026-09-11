@@ -197,7 +197,13 @@ class AdherenceGate {
       return { decision: current, adherence: { ...judged, attempts: 1, passed: true } };
     }
 
-    const history = [judged];
+    // The judgement travels with the action it judged. A rejected action and the
+    // sentence explaining why it did not sound like this person is the single
+    // most informative training example the gate produces -- it is a labelled
+    // negative nobody had to write -- and keeping only `{score, flaw}` threw the
+    // action away, leaving a corpus made entirely of actions that had already
+    // passed. An optimiser learns very little from those.
+    const history = [{ ...judged, action: current.action }];
     for (let attempt = 2; attempt <= this.maxAttempts; attempt += 1) {
       let next;
       try {
@@ -210,7 +216,7 @@ class AdherenceGate {
       current = next;
       judged = await this.score(profile, current);
       if (!judged) return { decision: current, adherence: null };
-      history.push(judged);
+      history.push({ ...judged, action: current.action });
       if (judged.score >= this.threshold) {
         return { decision: current,
           adherence: { ...judged, attempts: attempt, passed: true, history } };

@@ -1,7 +1,7 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
+const { captureSize, critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
   completeObjectsIn, visionMaxTokens, DEFAULT_VISION_MAX_TOKENS,
   VisionUnavailableError } = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
@@ -336,4 +336,57 @@ test("the completion budget has room for a full critique and can be overridden",
   process.env.EYESON_VISION_MAX_TOKENS = "not-a-number";
   assert.equal(visionMaxTokens(), DEFAULT_VISION_MAX_TOKENS);
   delete process.env.EYESON_VISION_MAX_TOKENS;
+});
+
+test("the prompt says what the element list is, and what the capture is", () => {
+  // The vision critique produced the two most serious findings in a live report
+  // and both were wrong: "the entire header and hero section repeats three times
+  // vertically ... looks highly broken" (critical) over a page that renders once,
+  // and "preventing users from seeing the actual price" (high) in the same report
+  // whose verdict quotes the price. An earlier run filed "Massive empty vertical
+  // sections ... a major rendering bug" over ordinary page whitespace in an
+  // 8620px stitched capture.
+  //
+  // It already received the element list and was already told not to invent
+  // elements. What it was never told is what the list *means*.
+  const complete = buildPrompt({
+    url: "https://example.test/", task: "find the price",
+    elements: [{ selector: "e1", role: "link", text: "Home", boundingBox: {} }],
+    capture: { width: 1280, height: 8620 },
+  });
+
+  assert.match(complete.user, /complete for this capture/);
+  assert.match(complete.user, /each exactly once/);
+  assert.match(complete.user, /1280x8620/);
+  assert.match(complete.user, /stitched full-page image/);
+  // The three claims the runs disproved, refused up front rather than caught after.
+  assert.match(complete.system, /Do not report empty space, tall gaps or a page's length as a\s+rendering bug/);
+  assert.match(complete.system, /a thing that is on the page twice is in the list twice/);
+  assert.match(complete.system, /never that it prevented, blocked or stopped anyone/);
+});
+
+test("a truncated element list is not described as an inventory", () => {
+  // "If something is not here, it is not on the page" is ground truth when the
+  // list is complete and a falsehood when it is the first sixty of ninety.
+  const many = Array.from({ length: 90 }, (_, index) => (
+    { selector: `e${index}`, role: "link", text: `Item ${index}`, boundingBox: {} }));
+  const sampled = buildPrompt({ url: "https://example.test/", task: "find it", elements: many });
+
+  assert.match(sampled.user, /first 60 of 90/);
+  assert.match(sampled.user, /sample rather than an inventory/);
+  assert.doesNotMatch(sampled.user, /complete for this capture/);
+});
+
+test("the capture's size is read from the capture", () => {
+  // A number travelling separately from the thing it describes is a number that
+  // can be wrong about it.
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from([0, 0, 0, 13]), Buffer.from("IHDR"),
+    (() => { const b = Buffer.alloc(8); b.writeUInt32BE(1280, 0); b.writeUInt32BE(577, 4); return b; })(),
+  ]);
+  assert.deepEqual(captureSize(png.toString("base64")), { width: 1280, height: 577 });
+  // Anything it cannot read says nothing rather than guessing.
+  assert.equal(captureSize("not an image"), null);
+  assert.equal(captureSize(""), null);
 });

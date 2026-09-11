@@ -71,14 +71,79 @@ const ELEMENT_ROLES = ["trigger", "cause", "feedback", "obstacle", "recovery"];
 const GROUNDING_CATEGORY_MAP = { accessibility: "validation_failure", navigation: "navigation_failure",
   usability: "ambiguous_feedback", visual_design: "ambiguous_feedback", copy: "ambiguous_feedback" };
 
-function buildPrompt({ url, task, personaSummary, elements }) {
-  const elementList = (elements || []).slice(0, 60).map((element, index) =>
+/**
+ * How big the capture is, read from the image itself.
+ *
+ * Derived here rather than passed in, because the worker always holds the image
+ * and a number travelling separately from the thing it describes is a number that
+ * can be wrong about it. Only the two headers that matter: PNG's IHDR, which is
+ * always at a fixed offset, and JPEG's SOF marker. Anything else returns null and
+ * the prompt simply says nothing about the size.
+ */
+function captureSize(base64) {
+  let bytes;
+  try {
+    bytes = Buffer.from(String(base64 || ""), "base64");
+  } catch {
+    return null;
+  }
+  // Height is bytes 20..23, so 24 bytes is exactly enough -- `> 24` rejected a
+  // header that was complete.
+  if (bytes.length >= 24 && bytes.readUInt32BE(0) === 0x89504e47) {
+    return { width: bytes.readUInt32BE(16), height: bytes.readUInt32BE(20) };
+  }
+  if (bytes.length > 4 && bytes[0] === 0xff && bytes[1] === 0xd8) {
+    for (let at = 2; at + 9 < bytes.length;) {
+      if (bytes[at] !== 0xff) { at += 1; continue; }
+      const marker = bytes[at + 1];
+      // The SOF markers carry the dimensions; DHT/DAC/RST and the like do not.
+      if (marker >= 0xc0 && marker <= 0xcf && marker !== 0xc4 && marker !== 0xc8 && marker !== 0xcc) {
+        return { height: bytes.readUInt16BE(at + 5), width: bytes.readUInt16BE(at + 7) };
+      }
+      at += 2 + bytes.readUInt16BE(at + 2);
+    }
+  }
+  return null;
+}
+
+// How many elements the prompt lists before it stops. The count matters to what
+// the prompt may claim about the list: a truncated list is not an inventory.
+const LISTED_ELEMENTS = 60;
+
+function buildPrompt({ url, task, personaSummary, elements, capture }) {
+  const detected = (elements || []).length;
+  const shown = (elements || []).slice(0, LISTED_ELEMENTS);
+  const elementList = shown.map((element, index) =>
     `${index}. selector="${element.selector}" role=${element.role || element.tag} text="${(element.text || "").slice(0, 80)}" box=${JSON.stringify(element.boundingBox || {})}`,
   ).join("\n");
+  // What the list is, said plainly, because what it is decides what may be
+  // concluded from it. A complete list is ground truth a claim can be checked
+  // against; a truncated one is a sample and says nothing about what is missing.
+  const inventory = detected <= LISTED_ELEMENTS
+    ? `This list is complete for this capture: every element the page declared is in it, `
+      + `each exactly once. If something is not here, it is not on the page; if something `
+      + `appears here once, it is on the page once.`
+    : `This list is the first ${LISTED_ELEMENTS} of ${detected} elements detected, so it is a `
+      + `sample rather than an inventory -- draw no conclusion from a thing being absent from it.`;
   return {
     system: "You are a senior UX and accessibility reviewer critiquing a real screenshot of a live "
       + "web page. Only report issues you can actually see or infer from the provided element list -- "
-      + "never invent elements that are not in the list or in the image. Respond with ONLY a JSON array "
+      + "never invent elements that are not in the list or in the image.\n"
+      // Three things this reviewer has been confidently wrong about, each of
+      // which the run could disprove afterwards. Said here so the claim is not
+      // made rather than caught later.
+      + "Three things you are not looking at, and must not report:\n"
+      + "- The capture may be a stitched full-page image, taller than any screen and taller than "
+      + "anything a visitor sees at once. Generous vertical whitespace between sections is normal "
+      + "page design at that scale. Do not report empty space, tall gaps or a page's length as a "
+      + "rendering bug.\n"
+      + "- Repeated structure is not repeated content. Pricing tiers, feature cards and testimonial "
+      + "rows are deliberately alike. Before reporting that anything is duplicated, check the element "
+      + "list: a thing that is on the page twice is in the list twice.\n"
+      + "- You are looking at one frame of a journey, not the journey. You cannot see what the "
+      + "visitor did next, what scrolling revealed, or whether they found what they came for. Report "
+      + "what is wrong with this screen; never that it prevented, blocked or stopped anyone.\n"
+      + "Respond with ONLY a JSON array "
       + "(no markdown fences, no commentary), where each item is:\n"
       + `{"category": one of ${JSON.stringify(FINDING_CATEGORIES)}, "severity": "low"|"medium"|"high"|"critical", `
       + '"title": short finding title, "description": what is wrong and why, '
@@ -99,7 +164,14 @@ function buildPrompt({ url, task, personaSummary, elements }) {
       + "do not invent problems to fill it.",
     user: `Target URL: ${url}\nTask the synthetic user was attempting: ${task}\n`
       + (personaSummary ? `Synthetic user: ${personaSummary}\n` : "")
-      + `\nInteractive elements detected on this screenshot (index, selector, role, visible text, bounding box in CSS pixels):\n${elementList || "(none detected)"}\n\n`
+      + (capture?.width && capture?.height
+          ? `\nThis capture is ${capture.width}x${capture.height} CSS pixels`
+            + (capture.height > capture.width * 1.6
+                ? " -- a stitched full-page image, far taller than the visitor's screen."
+                : ".") + "\n"
+          : "")
+      + `\nInteractive elements detected on this screenshot (index, selector, role, visible text, bounding box in CSS pixels):\n${elementList || "(none detected)"}\n`
+      + `${inventory}\n\n`
       + "Critique the attached screenshot for real, specific UX/accessibility/visual-design/copy/navigation issues.",
   };
 }
@@ -326,7 +398,8 @@ async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], u
       "OPENAI_API_KEY/OPENAI_BASE_URL (or BLABLADOR_* aliases) are required for vision critique",
       503, "vision_not_configured");
   }
-  const { system, user } = buildPrompt({ url, task, personaSummary, elements });
+  const { system, user } = buildPrompt({ url, task, personaSummary, elements,
+    capture: captureSize(imageBase64) });
   // The producer downscales and re-encodes before sending, so the bytes are not
   // necessarily PNG any more; mislabelling them breaks strict providers.
   const { content, truncated } = await completeVision({ systemPrompt: system, userText: user, imageBase64,
@@ -386,6 +459,7 @@ function toPainPoint(finding, context) {
   };
 }
 
-module.exports = { DEFAULT_VISION_MAX_TOKENS, completeObjectsIn, salvageTruncatedCritique, visionMaxTokens,
+module.exports = {
+  buildPrompt, captureSize, DEFAULT_VISION_MAX_TOKENS, completeObjectsIn, salvageTruncatedCritique, visionMaxTokens,
   critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
   VisionUnavailableError, FINDING_CATEGORIES, ELEMENT_ROLES };
