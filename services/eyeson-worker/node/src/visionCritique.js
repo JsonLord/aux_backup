@@ -114,7 +114,10 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
   const detected = (elements || []).length;
   const shown = (elements || []).slice(0, LISTED_ELEMENTS);
   const elementList = shown.map((element, index) =>
-    `${index}. selector="${element.selector}" role=${element.role || element.tag} text="${(element.text || "").slice(0, 80)}" box=${JSON.stringify(element.boundingBox || {})}`,
+    // "kind" rather than "role" for the element's own type: the reviewer is asked
+    // for a `role` of its own (what part the element plays in the finding), and
+    // one word meaning two things in one prompt is an invitation to conflate them.
+    `${index}. kind=${element.role || element.tag} text="${(element.text || "").slice(0, 80)}" box=${JSON.stringify(element.boundingBox || {})}`,
   ).join("\n");
   // What the list is, said plainly, because what it is decides what may be
   // concluded from it. A complete list is ground truth a claim can be checked
@@ -147,7 +150,7 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
       + "(no markdown fences, no commentary), where each item is:\n"
       + `{"category": one of ${JSON.stringify(FINDING_CATEGORIES)}, "severity": "low"|"medium"|"high"|"critical", `
       + '"title": short finding title, "description": what is wrong and why, '
-      + `"elements": [{"elementSelector": exact selector string from the numbered list, "role": one of ${JSON.stringify(ELEMENT_ROLES)}}] `
+      + `"elements": [{"element": the index number of a line in the numbered list below, "role": one of ${JSON.stringify(ELEMENT_ROLES)}}] `
       + '-- name every element the finding is about. Across sixteen findings in a row this '
       + 'came back empty every time, which leaves a reader nothing to look at and leaves the '
       + 'claim unanchored to anything that can be checked. An empty array means the finding is '
@@ -161,7 +164,7 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
       + "Respond with ONLY a JSON object (no markdown fences, no commentary) of the form "
       + '{"issues": [ ...items as described above... ], "strengths": [{"title": short name of the '
       + 'design decision that works well, "description": why it works and what it does for the user, '
-      + `"elements": [{"elementSelector": exact selector string from the numbered list, "role": one of ${JSON.stringify(ELEMENT_ROLES)}}]}]}. `
+      + `"elements": [{"element": the index number of a line in the numbered list below, "role": one of ${JSON.stringify(ELEMENT_ROLES)}}]}]}. `
       + "\"strengths\" are design decisions on THIS screenshot that are working and should be preserved "
       + "in any redesign (consistent control styling, restrained colour use, well-understood icons, clear "
       + "hierarchy, and so on) -- report only what you can actually see, and return an empty array rather "
@@ -175,7 +178,9 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
                 ? " -- a stitched full-page image, far taller than the visitor's screen."
                 : ".") + "\n"
           : "")
-      + `\nInteractive elements detected on this screenshot (index, selector, role, visible text, bounding box in CSS pixels):\n${elementList || "(none detected)"}\n`
+      + `\nElements on this screenshot. Cite one by its index number -- the number at the `
+      + `start of the line -- and nothing else; the selector is resolved from it here.\n`
+      + `${elementList || "(none detected)"}\n`
       + `${inventory}\n\n`
       + "Critique the attached screenshot for real, specific UX/accessibility/visual-design/copy/navigation issues.",
   };
@@ -290,8 +295,11 @@ function normalizeStrengths(value, elements) {
     .map((item) => ({
       title: String(item.title), description: String(item.description),
       elements: citedOnThePage(Array.isArray(item.elements) ? item.elements
-        .filter((element) => element && typeof element.elementSelector === "string")
-        .map((element) => ({ elementSelector: element.elementSelector,
+        // A citation is a line number or a selector; either can name a real
+        // element, and citedOnThePage decides which of them actually does.
+        .filter((element) => element && (element.element !== undefined
+          || typeof element.elementSelector === "string"))
+        .map((element) => ({ element: element.element, elementSelector: element.elementSelector,
           role: ELEMENT_ROLES.includes(element.role) ? element.role : "cause" }))
         : [], elements),
     }));
@@ -320,7 +328,8 @@ function parseFindings(content) {
  * which says nothing three times.
  */
 function citedOnThePage(cited, elements) {
-  const real = new Set((elements || []).map((element) => element.selector).filter(Boolean));
+  const page = elements || [];
+  const real = new Map(page.map((element) => [element.selector, element]).filter(([key]) => key));
   // Nothing to check against is not the same as a citation that failed a check.
   // A caller that did not pass the page's elements -- a test of the parser, a
   // legacy path -- has given no basis to judge, and stripping every citation on
@@ -329,10 +338,22 @@ function citedOnThePage(cited, elements) {
   const kept = [];
   const seen = new Set();
   for (const element of cited || []) {
-    const selector = element.elementSelector;
-    if (!real.has(selector) || seen.has(selector)) continue;
+    // The number first. The reviewer is asked to point at a line of the numbered
+    // list rather than to transcribe a selector, because an index is a thing it
+    // cannot make plausible: 3 is either in range or it is not, and "e6" spelled
+    // as `a.btn.btn-primary.btn-lg.mr-3` is not detectable as wrong without
+    // checking, whereas 97 out of 29 is.
+    const index = Number.isInteger(element.element) ? element.element
+      : (/^\d+$/.test(String(element.element ?? "")) ? Number(element.element) : null);
+    const selector = index !== null && index >= 0 && index < page.length
+      ? page[index].selector
+      // A model that wrote the selector out anyway is not punished for it, as
+      // long as the selector is real: this check is about whether the thing
+      // exists, not about which way it was named.
+      : (real.has(element.elementSelector) ? element.elementSelector : null);
+    if (!selector || seen.has(selector)) continue;
     seen.add(selector);
-    kept.push(element);
+    kept.push({ ...element, elementSelector: selector });
   }
   return kept;
 }
@@ -345,8 +366,11 @@ function normalizeIssues(value, elements) {
       severity: ["low", "medium", "high", "critical"].includes(item.severity) ? item.severity : "medium",
       title: String(item.title), description: String(item.description),
       elements: citedOnThePage(Array.isArray(item.elements) ? item.elements
-        .filter((element) => element && typeof element.elementSelector === "string")
-        .map((element) => ({ elementSelector: element.elementSelector,
+        // A citation is a line number or a selector; either can name a real
+        // element, and citedOnThePage decides which of them actually does.
+        .filter((element) => element && (element.element !== undefined
+          || typeof element.elementSelector === "string"))
+        .map((element) => ({ element: element.element, elementSelector: element.elementSelector,
           role: ELEMENT_ROLES.includes(element.role) ? element.role : "cause" }))
         : [], elements),
       estimatedImpact: { frustration: clamp01(item.estimatedImpact?.frustration),

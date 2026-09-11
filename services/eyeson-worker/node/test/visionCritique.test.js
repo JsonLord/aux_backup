@@ -6,14 +6,43 @@ const { captureSize, critiqueScreenshot, toPainPoint, buildPrompt, parseFindings
   VisionUnavailableError } = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
 
-test("buildPrompt includes the real element list so findings can reference actual selectors", () => {
+test("buildPrompt lists the page's elements by index, and does not show the selector", () => {
+  // The reviewer is asked to point at a line number rather than to transcribe a
+  // selector. An index is a thing it cannot make plausible -- 3 is either in
+  // range or it is not -- while a selector it has never seen comes out as
+  // confident CSS for some other website. It cannot transcribe what it is not
+  // shown, so the selector is resolved from the index here instead.
   const { user } = buildPrompt({
     url: "https://example.com", task: "Find pricing",
     elements: [{ selector: "#buy-button", role: "button", text: "Buy now", boundingBox: { x: 10, y: 20, width: 80, height: 30 } }],
   });
-  assert.match(user, /#buy-button/);
+  assert.match(user, /^0\. kind=button text="Buy now"/m);
+  assert.match(user, /Cite one by its index number/);
   assert.match(user, /Buy now/);
   assert.match(user, /Find pricing/);
+  assert.doesNotMatch(user, /#buy-button/, "the selector is ours to resolve, not the model's to copy");
+  // One word meaning two things in one prompt is an invitation to conflate them:
+  // the reviewer is asked for a `role` of its own, so the element's own type is
+  // listed as `kind`.
+  assert.doesNotMatch(user, /role=button/);
+});
+
+test("a citation is a line number, and an out-of-range one is not a citation", () => {
+  const page = [{ selector: "e1" }, { selector: "e6" }, { selector: "span@316,533" }];
+  const cite = (elements) => parseCritique(JSON.stringify({ issues: [{
+    title: "T", description: "D", category: "usability", severity: "low", elements }], strengths: [],
+  }), { elements: page }).issues[0].elements.map((item) => item.elementSelector);
+
+  assert.deepEqual(cite([{ element: 1, role: "cause" }]), ["e6"]);
+  // A number written as a string is still a number.
+  assert.deepEqual(cite([{ element: "2", role: "cause" }]), ["span@316,533"]);
+  // Out of range is caught by arithmetic rather than by recognising bad CSS.
+  assert.deepEqual(cite([{ element: 97, role: "cause" }]), []);
+  assert.deepEqual(cite([{ element: -1, role: "cause" }]), []);
+  // A model that wrote the selector out anyway is not punished for it, as long as
+  // the selector is real.
+  assert.deepEqual(cite([{ elementSelector: "e1", role: "cause" }]), ["e1"]);
+  assert.deepEqual(cite([{ elementSelector: "a.btn.btn-primary", role: "cause" }]), []);
 });
 
 test("parseFindings tolerates a markdown-fenced JSON array, normalizes elements/impact/alternatives, and rejects malformed entries", () => {
