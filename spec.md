@@ -3225,3 +3225,119 @@ code looked correct and the result was luck:
 | A judge that was unavailable | It answered correctly and the reply was truncated at 29 tokens |
 
 Section 53.4 lists the seven trap shapes these fall into.
+
+---
+
+## 55. The deploy–run–judge loop, and what five cycles found
+
+Five rounds of: deploy to the Space, fire one live run against
+`https://taoshq.com/` with a bundled persona, read every artifact the run
+produced, and fix what the run showed. Each entry below is a defect the code did
+not reveal and a live run did.
+
+### 55.1 The one that mattered most
+
+**The persona director had shipped unreachable.** Director selection in
+`services/journey-worker/node/src/journeytest.js` read
+`JOURNEY_DIRECTOR === "persona"` against an environment variable that no
+deployment script set, no test asserted, and no document mentioned. Every live
+run built the competent-agent director instead.
+
+Nothing failed. Runs completed, reports carried real findings, the job succeeded.
+The only trace anywhere was one field in the journey log: `director: "pi-sdk"`.
+The persona's eyes, its expectation before acting, the adherence gate and the
+memory bank had never executed on a single live run.
+
+The fix is a named, exported `directorKind()` seam, defaulting to `persona`, with
+`JOURNEY_DIRECTOR=pi` as the explicit opt-out — and a test that asserts *the
+default* rather than the mechanism, because the mechanism was always correct and
+the default was the defect. `spaces/aux-live/start-live.sh` now states the
+setting: a setting nothing states is a setting nobody can check.
+
+The general lesson is worth more than the fix. **A flag whose default has never
+been exercised is not a flag, it is dead code with a plausible name.** Anything
+gated behind one wants either a test on the default or a deployment that names it
+— ideally both.
+
+### 55.2 What each cycle produced
+
+| Cycle | The report said | What was true | What it cost to find |
+|---|---|---|---|
+| 1 | `Fails WCAG AA contrast: "Talent Augmentation OS"`, 1:1, high | The site's own navigation bar, for a persona at 0.95 acuity, on links the same run clicked twice | The reveal keeper scrolled the page between the boxes being read and the pixels being captured |
+| 2 | `Fails WCAG AA contrast: "Sourcing"`, 1.01:1, high | 486×21 of blank page below a chat bubble — an animated mock-up line that had not painted | A crop with no ink is the DOM and the pixels disagreeing, not a ratio |
+| 2 | `The journey was blocked`, critical, `FIX: None` | The run knew exactly why | Nothing read the run's own record of what it kept trying |
+| 3 | `No pain points detected` | The run ended at 0.49 frustration and 0.52 confusion, having found two real defects | Nothing turned an unmet expectation into a finding |
+| 4 | `Fails WCAG AA contrast: "/ user / year"`, 1:1, high | A box at `y = -10`, half above the viewport; the crop clamped to `y = 0` and measured the top of the page | Cropping clamps silently |
+
+By cycle 5 the same page yields the two defects three independent runs had all
+observed and none had reported: `"How it works"` does not navigate, and the
+`"Annual · save 17%"` toggle reveals no price.
+
+### 55.3 The measurement rules these produced
+
+Five rules, each bought with a wrong finding in a live report:
+
+1. **Never measure a page that is moving.** Every box is in viewport coordinates.
+   Hold the page still (`holdRevealKeeper`/`releaseRevealKeeper`, a counter so
+   overlapping holds cannot end each other's), read `scrollY` back after the
+   capture, and fall back to the accessibility tree when it moved.
+2. **No ink is not low contrast.** A region the DOM says holds text and the
+   capture says holds nothing is the two sources disagreeing about what exists.
+   It is reported as *"Declared but not drawn"* at info severity with no ratio
+   claimed, because there are no pixels to measure.
+3. **A clamped crop is not the element.** A box overhanging any edge is measured
+   on whatever sits inside the edge. It stays a scan candidate — a person can
+   partly see it — and can never carry a claim about the page.
+4. **1.00:1 is not a measurement.** A real control against a real background is
+   never that. It means the crop and its surroundings are one colour, which is a
+   failure to find the element.
+5. **Find the ink before taking its percentile.** A fixed low percentile assumes
+   text fills a fair share of its box, and headings do not: 44px near-black on
+   near-white across a two-line box measured 1.06:1 and failing, because glyph
+   strokes cover under a tenth of that area. Checked against the WCAG definition
+   on controlled input — `#333333`, `#767676`, `#949494`, `#cccccc` on white
+   return 12.63, 4.54, 3.03 and 1.61 to the hundredth.
+
+Rules 2–4 are all the same underlying mistake: **reporting a number computed from
+pixels that are not the thing.** The arithmetic was never wrong in any of them.
+
+### 55.4 What a report is allowed to say
+
+The finding classes now have a defensible ordering, and it is worth stating
+because it is what keeps the report believable:
+
+- A **broken promise** is first-hand and falsifiable. The persona said what it
+  expected before it acted; the page did something else. No check against the DOM
+  can find this, because the DOM has no opinion about what a link looked like it
+  would do. Severity is the frustration it actually cost, summed over everyone who
+  hit it, read from the run's own affect rather than assigned from a table.
+- A **WCAG failure** is a fact about the site, measured on the page as drawn, true
+  for every visitor — and only reportable when the pixels measured were the
+  element's.
+- **What one unusual pair of eyes could not read** is a fact about that person and
+  is reported as such, never as a defect.
+- **An instrument that stopped answering** is reported, because the findings a run
+  could not make are unknown rather than absent.
+
+Two rules cut across all of them. A finding must name the thing the way a person
+would — `e17` groups nothing across runs and means nothing to a reader, so the
+label is the one the persona used. And a citation must resolve: evidence a reader
+cannot open from the name given for it reads as corroborated and is worse than no
+citation.
+
+### 55.5 Four more trap shapes, for §53.4
+
+- **A flag whose default was never exercised.** §55.1. The mechanism was correct
+  and had simply never run.
+- **A guard whose threshold is in the wrong space.** An absolute luminance epsilon
+  for "these are the same colour" swallowed every dark-on-dark control: `#232326`
+  on `#19191e` differ by 0.006 and stand at 1.10:1. Luminance is not linear in
+  what the eye does with it; the test belongs on the ratio.
+- **One thing counted as two.** `"Annual · save 17%"` and `"Annual"` are one
+  toggle. Split, the report says a control was hit once when it was hit twice and
+  prices each half at half the patience it cost — which is exactly what severity
+  is read from.
+- **A model with no way to say "nothing is wrong".** The coping table had no
+  `continue`, so a calm persona whose expectation had just been met had a 60.3%
+  chance of retrying the action that worked. Every option in a distribution being
+  a response to trouble means trouble is the only thing it can express.
