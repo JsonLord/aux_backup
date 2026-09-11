@@ -2931,3 +2931,27 @@ def test_evidence_paired_to_its_own_step_is_not_replaced_by_a_title_match():
         "monthly cost amounts for the tiers are not shown"), "paired evidence is the better evidence"
     # A finding that arrived with none still gets the best match available.
     assert findings[1].get("personaEvidence"), "the matcher still works where nothing was paired"
+
+
+def test_a_finding_is_titled_by_what_the_walk_read_off_the_control():
+    """The label was recovered by pattern-matching the persona's prose, which works
+    right up until the persona writes "The Pricing page will load and display the
+    company's pricing details" -- naming no control at all. Cycle 19 published
+    "Promised more than it did: e6" as a report headline while the element walk
+    had known it was the Pricing link the whole time.
+
+    A ref groups nothing and means nothing: the same control is e6 in one run and
+    e17 in another."""
+    prose = ("The Pricing page will load and display the company's pricing details "
+             "and plan options.")
+    click = {"type": "CLICK", "target": "e6"}
+
+    assert JobExecutor._promise_label(prose, click) == "e6", "this is what it did"
+    assert JobExecutor._promise_label(prose, click, "Pricing") == "Pricing"
+    # A measured name that is blank or absent changes nothing: old runs carry none.
+    assert JobExecutor._promise_label(prose, click, "   ") == "e6"
+    # And the persona's own quoted label still wins over the ref when there is no
+    # measured name, which is what made this work at all for fifteen cycles.
+    assert JobExecutor._promise_label(
+        "Clicking the 'Annual - save 17%' button will show prices",
+        {"type": "CLICK", "target": "e17"}) == "Annual - save 17%"

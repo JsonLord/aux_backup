@@ -1378,12 +1378,14 @@ class JobExecutor:
                             or profile.get("name") or persona_id or "Synthetic user")
             pending: dict[str, Any] | None = None
             expectation = ""
+            measured_name = ""
             unmet: dict[str, Any] | None = None
             previous = 0.0
             for event in journey.get("timeline") or []:
                 kind, data = event.get("type"), event.get("data") or {}
                 if kind == "persona.expectation":
                     pending, expectation = data.get("action") or {}, str(data.get("expectation") or "")
+                    measured_name = str(data.get("targetName") or "").strip()
                     unmet = None
                 elif kind == "persona.reflection" and pending is not None:
                     # A promise is made by a control. A READ that returns something
@@ -1396,6 +1398,7 @@ class JobExecutor:
                     if (str(data.get("matched") or "").lower() == "no"
                             and str(pending.get("type") or "").upper() in cls._PROMISING_ACTIONS):
                         unmet = {"action": pending, "expectation": expectation,
+                                 "name": measured_name,
                                  "gap": str(data.get("gap") or "").strip()}
                     pending = None
                 elif kind == "persona.affect":
@@ -1405,7 +1408,8 @@ class JobExecutor:
                     # are not the same finding.
                     frustration = float((data.get("state") or {}).get("frustration") or 0.0)
                     if unmet is not None:
-                        label = cls._promise_label(unmet["expectation"], unmet["action"])
+                        label = cls._promise_label(unmet["expectation"], unmet["action"],
+                                                   unmet.get("name"))
                         group = groups.setdefault(label, {
                             "label": label, "hits": 0, "cost": 0.0, "personas": [], "names": [],
                             "runs": [], "gaps": [], "expectations": [], "actions": []})
@@ -1468,7 +1472,7 @@ class JobExecutor:
         return kept
 
     @staticmethod
-    def _promise_label(expectation: str, action: dict[str, Any]) -> str:
+    def _promise_label(expectation: str, action: dict[str, Any], measured: str = "") -> str:
         """What the persona thought it was interacting with, named the way it named
         it.
 
@@ -1479,10 +1483,20 @@ class JobExecutor:
         toggle, because one run happened to quote the label and the other wrote
         "the Annual button" without quotes.
 
-        So: the quoted label first, then the phrase the sentence names as the
-        thing being clicked, and the ref only when the persona said nothing useful
-        at all.
+        So: what the element walk read off the control first -- it is the one name
+        here that was measured rather than parsed out of a sentence, and it is the
+        same string on every run, which is what makes it group. Then the quoted
+        label, then the phrase the sentence names as the thing being clicked, and
+        the ref only when nothing else said anything useful at all.
+
+        Reading it out of prose is what put "Promised more than it did: e6" in a
+        report headline: the persona wrote "The Pricing page will load and display
+        the company's pricing details", which names no control, so every pattern
+        here missed and the ref fell through. The walk knew it was the Pricing
+        link the whole time.
         """
+        if (measured or "").strip():
+            return measured.strip()
         quoted = _QUOTED_LABEL.search(expectation or "")
         if quoted:
             return quoted.group(1).strip()

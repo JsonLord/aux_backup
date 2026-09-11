@@ -1267,3 +1267,51 @@ test("a walk that caught the page mid-scroll is given one more chance", async ()
   assert.equal(reflection.data.judgedAgainst, "perceived",
     "and the retry is what makes the comparison possible");
 });
+
+test("a walk that cannot be used says which of its reasons stopped it", async () => {
+  // Every fallback path returned the same silent object, so a run that lost half
+  // its comparisons looked exactly like a run that never tried. Cycle 19 lost six
+  // and the record could not say which of five reasons cost them.
+  const cases = [
+    { walk: async () => { throw new Error("navigation mid-batch"); },
+      perceive: async () => ({ observation: "x" }), expect: /the walk failed: navigation mid-batch/ },
+    { walk: async () => ({ elements: [], viewport: {}, screenshotBase64: "AAA" }),
+      perceive: async () => ({ observation: "x" }), expect: /the walk found nothing on the page/ },
+    { walk: async () => ({ elements: [{ selector: "e1", name: "x", box: {} }], viewport: {}, screenshotBase64: "" }),
+      perceive: async () => ({ observation: "x" }), expect: /without a picture/ },
+    { walk: async () => ({ elements: [{ selector: "e1", name: "x", box: {} }], viewport: {},
+        screenshotBase64: "AAA", moved: true }),
+      perceive: async () => ({ observation: "x" }), expect: /the page moved under the walk/ },
+    { walk: async () => ({ elements: [{ selector: "e1", name: "x", box: {} }], viewport: {}, screenshotBase64: "AAA" }),
+      perceive: async () => null, expect: /the perception service returned nothing/ },
+  ];
+  for (const one of cases) {
+    const director = new PersonaDirector({
+      profile: dogged, sleepFn: async () => {}, walk: one.walk, frames: () => [],
+      perception: { available: true, perceive: one.perceive },
+      actor: scriptedActor([{ type: "DONE", content: "done" }]),
+    });
+    const recorder = fakeRecorder();
+    await run(director, fakeBrowser(), recorder);
+    const said = recorder.events.find((event) => event.type === "persona.perception_fallback");
+    assert.ok(said, `nothing recorded for ${one.expect}`);
+    assert.match(said.data.reason, one.expect);
+  }
+});
+
+test("a run with no perception configured does not complain every step", async () => {
+  // A run with no perception service is a deliberate mode, not a failure, and it
+  // is already described by the absence of perception events. Saying so every
+  // step would bury the runs where the walk really did fail -- and it broke the
+  // see-expect-act-observe-reflect-feel order the record is read in.
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: { available: false }, frames: () => [],
+    actor: scriptedActor([{ type: "CLICK", target: "e1", expectation: "prices" },
+                          { type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+  assert.deepEqual(
+    recorder.events.filter((event) => event.type === "persona.perception_fallback"), [],
+    "nothing was lost, so nothing is reported lost");
+});

@@ -278,6 +278,13 @@ class PersonaDirector {
           "Stopped seeing the page through this person's eyes", {
             reason: this.perception.lastError, sinceStep: steps });
       }
+      // Only when there were eyes to lose. A run with no perception service is a
+      // deliberate mode, already described by the absence of perception events;
+      // saying so every step would bury the runs where the walk really did fail.
+      if (!perception && seen.why && this.perception?.available) {
+        await recorder.record("persona.perception_fallback",
+          `Looked, and could not use what came back: ${seen.why}`, { reason: seen.why, step: steps });
+      }
       if (perception) {
         const seenImage = await this.keepSeenImage(context, perception, steps);
         await recorder.record("persona.perception",
@@ -371,7 +378,14 @@ class PersonaDirector {
       await recorder.record("persona.expectation",
         decision.expectation || `${decision.action.type}`, {
           visible: decision.visible, expectation: decision.expectation,
-          action: decision.action, malformed: decision.malformed || undefined });
+          action: decision.action,
+          // What the thing acted on says on it, from the walk rather than from
+          // the sentence. The report had been recovering this by reading the
+          // persona's prose, which works right up until the persona writes "The
+          // Pricing page will load" instead of naming a control -- and then a
+          // report headline reads "Promised more than it did: e6".
+          targetName: nameOf(decision.action.target, perception) || undefined,
+          malformed: decision.malformed || undefined });
 
       if (skipAction) {
         skipAction = false;
@@ -405,6 +419,14 @@ class PersonaDirector {
         if (!afterSeen.perception && perception) {
           await this.sleep(LET_IT_COME_TO_REST_MS);
           afterSeen = await this.look(after, tasks);
+        }
+        // Same rule as the pre-action look: only when there were eyes to lose.
+        // Losing the second half of the comparison matters only if the first
+        // half had it.
+        if (!afterSeen.perception && afterSeen.why && perception) {
+          await recorder.record("persona.perception_fallback",
+            `Looked after acting, twice, and could not use what came back: ${afterSeen.why}`,
+            { reason: afterSeen.why, step: steps, afterActing: true });
         }
         pending = after;
         // Only worth carrying if it is worth more than looking again. A walk taken
@@ -606,8 +628,15 @@ class PersonaDirector {
    * Perception is meant to make a run truer, not to make a run fail.
    */
   async look(page, tasks = []) {
-    const fallback = { observation: observationFrom(page.text, this.abilities), perception: null };
-    if (!this.perception?.available) return fallback;
+    // Why it fell back, when it does. Every one of these paths used to return the
+    // same silent object, so a run that lost half its comparisons looked exactly
+    // like a run that never tried -- and cycle 19 could not say which of five
+    // reasons cost it six. An absence of measurement has to be distinguishable
+    // from an absence of findings, and that applies to the walk as much as to the
+    // service it feeds.
+    const fellBack = (why) => ({
+      observation: observationFrom(page.text, this.abilities), perception: null, why });
+    if (!this.perception?.available) return fellBack("no perception service configured");
     let seen;
     // Hold the page still for the walk and the capture. The reveal keeper scrolls
     // the whole document every 1500ms and a perception pass takes longer than
@@ -618,19 +647,22 @@ class PersonaDirector {
     this.hold();
     try {
       seen = await this.walk();
-    } catch {
+    } catch (error) {
       // A page walk can fail for reasons that have nothing to do with the run --
       // a navigation mid-batch, a browser still settling. The tree is still there.
-      return fallback;
+      return fellBack(`the walk failed: ${String(error?.message || error).slice(0, 120)}`);
     } finally {
       this.release();
     }
-    if (!seen?.elements?.length || !seen.screenshotBase64) return fallback;
+    if (!seen?.elements?.length || !seen.screenshotBase64) {
+      return fellBack(seen?.elements?.length
+        ? "the walk came back without a picture" : "the walk found nothing on the page");
+    }
     // Something moved the page anyway -- the page's own script, an animation, a
     // navigation landing mid-batch. Boxes from one scroll position against pixels
     // from another measure nothing, and the failure mode is not a gap in the
     // report but a confident false finding. Fall back to the tree for this step.
-    if (seen.moved) return fallback;
+    if (seen.moved) return fellBack("the page moved under the walk");
     const perception = await this.perception.perceive({
       screenshotBase64: seen.screenshotBase64,
       elements: seen.elements,
@@ -646,7 +678,10 @@ class PersonaDirector {
       // the service could produce it and nobody ever asked.
       returnSeenImage: true,
     });
-    if (!perception?.observation) return fallback;
+    if (!perception?.observation) {
+      return fellBack(`the perception service returned nothing`
+        + (this.perception.lastError ? `: ${String(this.perception.lastError).slice(0, 120)}` : ""));
+    }
     return { observation: perception.observation, perception };
   }
 
