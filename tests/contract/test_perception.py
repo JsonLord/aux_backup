@@ -596,5 +596,71 @@ def test_a_region_with_no_marks_at_all_still_reads_as_flat():
 
     assert legibility(blank, box, font_px=16, acuity=1.0, role="text")["nothingDrawn"] is True
     # Nothing inside, so it is judged against what surrounds it -- which here is
-    # the same flat colour.
-    assert contrast_ratio(blank, box)["measured"] == "a solid region against what surrounds it"
+    # the same flat colour, so there is nothing to compare and no ratio is claimed.
+    measured = contrast_ratio(blank, box)
+    assert measured["measured"] == "a flat region indistinguishable from its surroundings"
+    assert measured["ratio"] is None and measured["passes"] is None
+
+
+def test_an_element_half_off_the_screen_makes_no_claim_about_the_page():
+    """Cropping clamps to the image, so a box that overhangs an edge is measured on
+    whatever sits inside the edge instead. A live report filed "Fails WCAG AA
+    contrast: '/ user / year' -- 1:1, high severity" against a box at y = -10: ten
+    of its twenty-three rows were above the top of the viewport, the crop clamped
+    to y = 0, and what got measured was the top of the page."""
+    import base64
+    import io
+
+    from services.perception_service.perceive import perceive
+
+    buffer = io.BytesIO()
+    _readable_page().save(buffer, format="PNG")
+    capture = base64.b64encode(buffer.getvalue()).decode()
+    # Legible text where the boxes say, plus one element hanging off the top edge.
+    elements = _boxes(10) + [{"selector": "span@285,-10", "role": "span", "name": "/ user / year",
+                             "fontPx": 14, "fontWeight": 400,
+                             "box": {"x": 285, "y": -10, "width": 87, "height": 23}}]
+
+    result = perceive(image_base64=capture, elements=elements, abilities={"vision": {"acuity": 1.0}})
+
+    named = [item.get("name") for item in result["notPerceived"]]
+    assert "/ user / year" not in named, (
+        "an element the capture only partly contains was not the thing measured")
+
+
+def test_a_region_the_same_colour_as_its_surroundings_claims_no_ratio():
+    """A real control against a real background is never 1.00:1. That number means
+    the crop and its surroundings are one uniform colour, which is a failure to
+    find the element rather than a measurement of it -- and it reached a live
+    report as a high-severity compliance verdict, with a recommendation saying the
+    darker side sits at 0.9829 and must reach 0.2943 against a background at
+    0.9829."""
+    from PIL import Image
+
+    from services.perception_service.optics import contrast_ratio
+
+    uniform = Image.new("RGB", (700, 200), (250, 250, 250))
+    measured = contrast_ratio(uniform, {"x": 285, "y": 40, "width": 87, "height": 23})
+
+    assert measured["ratio"] is None
+    assert measured["passes"] is None
+    assert measured["measured"] == "a flat region indistinguishable from its surroundings"
+
+
+def test_two_darks_that_differ_are_still_measured():
+    """The guard tests the ratio, not the absolute difference, because luminance is
+    not linear in what the eye does with it: #232326 on #19191e differ by 0.006 of
+    relative luminance and stand at about 1.1:1, which is a real and failing
+    contrast between two distinguishable darks. An absolute epsilon large enough to
+    catch a uniform white region swallows every dark-on-dark control with it."""
+    from PIL import Image, ImageDraw
+
+    from services.perception_service.optics import contrast_ratio
+
+    image = Image.new("RGB", (700, 200), (25, 25, 30))
+    ImageDraw.Draw(image).rectangle([40, 40, 340, 120], fill=(35, 35, 42))
+    measured = contrast_ratio(image, {"x": 40, "y": 40, "width": 300, "height": 80})
+
+    assert measured["ratio"] is not None, "two different darks are two colours"
+    assert measured["passes"] is False
+    assert 1.0 < measured["ratio"] < 2.0

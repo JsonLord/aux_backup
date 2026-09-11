@@ -369,6 +369,14 @@ _PAPER_PERCENTILE = 90
 # How far below the paper a pixel has to sit to count as a mark rather than as
 # the background's own noise (JPEG ringing, a gradient, a subpixel edge).
 _INK_SEPARATION = 0.02
+# Below this WCAG ratio between two luminances they are one colour, not two.
+#
+# A ratio rather than an absolute difference, because luminance is not linear in
+# what the eye does with it: #232326 on #19191e differ by 0.006 of relative
+# luminance and stand at 1.10:1, which is a real and failing contrast between two
+# distinguishable darks. An absolute epsilon large enough to catch a uniform white
+# region swallows every dark-on-dark control along with it.
+_SAME_COLOUR_RATIO = 1.02
 # And how much of the region has to be marks before they are treated as ink. Two
 # pixels in a thousand is below the stroke coverage of any real text and above
 # what compression noise produces.
@@ -402,6 +410,12 @@ def relative_luminance(pixels: np.ndarray) -> np.ndarray:
     linear = np.where(channels <= _SRGB_KNEE, channels / 12.92,
                       ((channels + 0.055) / 1.055) ** 2.4)
     return linear[..., 0] * _LUMA[0] + linear[..., 1] * _LUMA[1] + linear[..., 2] * _LUMA[2]
+
+
+def _same_colour(one: float, other: float) -> bool:
+    """Whether two relative luminances are the same colour as far as contrast goes."""
+    lighter, darker = max(one, other), min(one, other)
+    return (lighter + 0.05) / (darker + 0.05) < _SAME_COLOUR_RATIO
 
 
 def _luminance_for_ratio(lighter: float, required: float) -> float | None:
@@ -466,7 +480,7 @@ def contrast_ratio(image: Image.Image, box: dict) -> dict:
     # no text of its own, and what WCAG asks about it (1.4.11, non-text contrast)
     # is its boundary against what surrounds it.
     against = "text against its own background"
-    if abs(paper - ink) < 0.01:
+    if _same_colour(paper, ink):
         # The bands outside the box, not the expanded box: a 240x60 control sits
         # inside a 264x84 expansion, so it is 65% of those pixels and their median
         # is the control itself. Measured that way a solid green button on white
@@ -484,6 +498,18 @@ def contrast_ratio(image: Image.Image, box: dict) -> dict:
                     "measured": "a flat region with nothing around it to compare against"}
         ink, paper = float(np.median(luminance)), float(np.median(np.concatenate(bands)))
         against = "a solid region against what surrounds it"
+        # Flat inside, and the same flat outside. A real control against a real
+        # background is never 1.00:1 -- that number means the crop and its
+        # surroundings are one uniform colour, which is a failure to find the
+        # element rather than a measurement of it. Saying so is the honest answer;
+        # reporting 1:1 hands every caller a compliance verdict on pixels that do
+        # not contain the thing. A live report published "Fails WCAG AA contrast:
+        # '/ user / year' -- 1:1" with an ink luminance and a paper luminance of
+        # 0.9829 apiece, which is this arithmetic faithfully reporting that it had
+        # been given one colour twice.
+        if _same_colour(paper, ink):
+            return {"ratio": None, "required": None, "passes": None, "largeText": False,
+                    "measured": "a flat region indistinguishable from its surroundings"}
 
     lighter, darker = max(ink, paper), min(ink, paper)
     ratio = (lighter + 0.05) / (darker + 0.05)

@@ -95,6 +95,19 @@ UNTRUSTWORTHY_ILLEGIBLE_SHARE = 0.5
 # 50%.
 MIN_ELEMENTS_TO_JUDGE = 6
 
+def _outside_capture(box: dict, width: int, height: int) -> bool:
+    """Whether any part of this box falls outside the capture.
+
+    Cropping clamps to the image, so a box that overhangs an edge is measured on
+    whatever sits inside the edge instead -- which is not the element, and is the
+    one case where every number that follows is confidently about the wrong pixels.
+    """
+    left, top = float(box.get("x", 0)), float(box.get("y", 0))
+    return (left < 0 or top < 0
+            or left + float(box.get("width", 0)) > width
+            or top + float(box.get("height", 0)) > height)
+
+
 def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None = None,
              behavior: dict | None = None, motion_frames: list[str] | None = None,
              viewport: dict | None = None, return_seen_image: bool = False,
@@ -129,6 +142,22 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         box = element.get("box") or element.get("boundingBox") or {}
         if not box:
             continue
+        # Part of this element is outside the capture, so the crop is clamped to
+        # the edge and measures pixels that are not the element. A live report
+        # filed "Fails WCAG AA contrast: '/ user / year' -- 1:1" against a box at
+        # y = -10: ten of its twenty-three rows were above the top of the
+        # viewport, the crop clamped to y = 0, and what got measured was the top
+        # of the page. The recommendation it produced said the darker side sits at
+        # 0.9829 and has to reach 0.2943 against a background at 0.9829, which is
+        # the arithmetic faithfully reporting that it had been handed one flat
+        # colour twice.
+        #
+        # Judged here rather than asked of the browser, because it follows from
+        # the box and the capture and needs no round trip. A clipped element is
+        # still something the person can partly see, so it stays a scan candidate
+        # when it is legible; what it can never do is carry a claim about the
+        # page, because the element was not the thing measured.
+        clipped = _outside_capture(box, page.width, page.height)
         # Size and acuity together, not contrast alone. Somebody with poor
         # eyesight reads a large headline on a page whose body copy is invisible
         # to them, and a flat contrast threshold cannot tell those apart.
@@ -146,7 +175,8 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                  # agreeing whose eyes to believe.
                  "contrast": contrast_ratio(page, box)}
         if not readable["visible"]:
-            not_perceived.append({**entry, **readable})
+            if not clipped:
+                not_perceived.append({**entry, **readable})
             continue
         candidates.append({**entry,
                            "salience": salience_of(seen, box, motion, scanner.distractibility),
