@@ -29,7 +29,20 @@ from services.persona_service.actor_program import (  # noqa: E402
     episodes_as_examples, instructions_of, parse_score,
 )
 
+# Two providers, and which one is used decides what the compile can afford.
+#
+# The router has a context window around a million tokens and returns clean
+# content for a one-word answer at one completion token; Blablador's models spend
+# their budget on reasoning they never return, so every call has to be sized for
+# thinking nobody reads. The router is also what the journey worker's actor runs
+# on in production, which makes compiling against it the honest measurement.
+ROUTER = "https://debian-devil.tail3f341b.ts.net/v1"
 BLABLADOR = "https://api.helmholtz-blablador.fz-juelich.de/v1"
+PROVIDERS = {
+    # (base url, env var holding the key)
+    "router": (ROUTER, "freellmapi"),
+    "blablador": (BLABLADOR, "BLABLADOR_API_KEY"),
+}
 # Both endpoints spend completion budget on reasoning they never return, so both
 # budgets are set past what the visible answer needs rather than at it.
 #
@@ -43,14 +56,14 @@ JUDGE_BUDGET = 600
 ACTOR_BUDGET = 6000
 
 
-def blablador_judge(model: str, key: str):
+def http_judge(base: str, model: str, key: str):
     """The same small model the run uses, against the same brief."""
     def judge(system: str, user: str) -> str:
         body = json.dumps({"model": model, "max_tokens": JUDGE_BUDGET,
                            "messages": [{"role": "system", "content": system},
                                         {"role": "user", "content": user}]}).encode()
         request = urllib.request.Request(
-            f"{BLABLADOR}/chat/completions", data=body,
+            f"{base}/chat/completions", data=body,
             headers={"content-type": "application/json", "authorization": f"Bearer {key}"})
         try:
             with urllib.request.urlopen(request, timeout=120) as response:
@@ -92,17 +105,26 @@ def main() -> None:
     parser.add_argument("corpus", type=Path)
     parser.add_argument("-o", "--out", type=Path)
     parser.add_argument("--auto", default="light", choices=["light", "medium", "heavy"])
-    parser.add_argument("--actor-model", default="alias-fast")
-    parser.add_argument("--judge-model", default="alias-fast")
-    parser.add_argument("--reflection-model", default="alias-large")
+    parser.add_argument("--provider", default="router", choices=sorted(PROVIDERS))
+    parser.add_argument("--actor-model", default="")
+    parser.add_argument("--judge-model", default="")
+    parser.add_argument("--reflection-model", default="")
     parser.add_argument("--limit", type=int, default=0, help="use only the first N examples")
     parser.add_argument("--measure-only", action="store_true",
                         help="score the uncompiled actor and stop")
     arguments = parser.parse_args()
 
-    key = os.getenv("BLABLADOR_API_KEY") or ""
+    base, key_name = PROVIDERS[arguments.provider]
+    key = os.getenv(key_name) or ""
     if not key:
-        raise SystemExit("BLABLADOR_API_KEY is required: the judge and the actor both run on it.")
+        raise SystemExit(f"{key_name} is required: the judge and the actor both run on {base}.")
+    # The router takes one model id and picks; Blablador is asked for a model by
+    # name. Defaulted per provider rather than globally, so neither is ever sent
+    # an id the other one's catalogue uses.
+    default = "auto" if arguments.provider == "router" else "alias-fast"
+    actor_model = arguments.actor_model or default
+    judge_model = arguments.judge_model or default
+    reflection_model = arguments.reflection_model or default
 
     import dspy
 
@@ -113,17 +135,18 @@ def main() -> None:
         examples = examples[: arguments.limit]
     if not examples:
         raise SystemExit("the corpus has no usable examples")
-    print(f"{len(examples)} examples for {persona.get('id') or bank.get('personaId')}")
+    print(f"{len(examples)} examples for {persona.get('id') or bank.get('personaId')} "
+          f"on {arguments.provider} ({actor_model})")
 
     def lm(model: str, budget: int = ACTOR_BUDGET) -> "dspy.LM":
         # Retried inside the client: these endpoints return the occasional 502
         # from an upstream that took too long, and a compile measured over
         # eighty-seven sequential calls will meet one.
-        return dspy.LM(f"openai/{model}", api_base=BLABLADOR, api_key=key,
+        return dspy.LM(f"openai/{model}", api_base=base, api_key=key,
                        max_tokens=budget, temperature=1.0, num_retries=3)
 
-    dspy.configure(lm=lm(arguments.actor_model))
-    metric = adherence_metric(blablador_judge(arguments.judge_model, key))
+    dspy.configure(lm=lm(actor_model))
+    metric = adherence_metric(http_judge(base, judge_model, key))
     program = dspy.Predict(build_signature())
 
     before, below_before, lost_before = score_of(program, examples, metric)
@@ -133,8 +156,8 @@ def main() -> None:
     if arguments.measure_only:
         return
 
-    compiled = compile_actor(examples, blablador_judge(arguments.judge_model, key),
-                             reflection_lm=lm(arguments.reflection_model), auto=arguments.auto)
+    compiled = compile_actor(examples, http_judge(base, judge_model, key),
+                             reflection_lm=lm(reflection_model), auto=arguments.auto)
     after, below_after, lost_after = score_of(compiled, examples, metric)
     print(f"after:  mean adherence {after * 10:.2f}/10; "
           f"{below_after} below the gate's threshold; {lost_after} unanswered "
