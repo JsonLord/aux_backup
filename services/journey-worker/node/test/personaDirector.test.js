@@ -939,3 +939,52 @@ test("a persona who walks away did meet the blocked criterion", async () => {
   assert.equal(result.status, "failed");
   assert.equal(result.criteria.find((item) => item.id === "tasks-blocked").result, "met");
 });
+
+test("a full-page capture waits for the page's reveals to run", async () => {
+  // `full: true` stitches a capture as tall as the page, and everything below the
+  // fold on a site that reveals content on scroll is un-revealed the moment a
+  // document loads. The first capture of a run is taken straight after open(), so
+  // it is mostly blank: measured on a live run, 7,921 of 8,620 rows near-uniform,
+  // 92% of the image. The vision critique filed "Massive empty vertical sections
+  // ... a major rendering bug", severity critical, as the most serious finding in
+  // the report. It was describing our capture, not the site.
+  const order = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, maxSteps: 1,
+    perception: { available: false },
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  director.settle = async () => { order.push("settle"); };
+
+  const browser = fakeBrowser();
+  const shot = browser.screenshot;
+  browser.screenshot = async (options) => { order.push("screenshot"); return shot(options); };
+  await run(director, browser, fakeRecorder());
+
+  assert.ok(order.length >= 2, "the run must have captured something");
+  // Every capture is preceded by a settle, and none of them is left unpaired.
+  assert.equal(order.filter((step) => step === "settle").length,
+    order.filter((step) => step === "screenshot").length);
+  for (let index = 0; index < order.length; index += 2) {
+    assert.deepEqual(order.slice(index, index + 2), ["settle", "screenshot"],
+      "the picture has to be of a settled page");
+  }
+});
+
+test("a reveal pass that fails does not cost the capture", async () => {
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, maxSteps: 1,
+    perception: { available: false },
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  // settle() swallows its own failures; this asserts the swallow is real by
+  // making the underlying pass throw.
+  director.settle = PersonaDirector.prototype.settle.bind({
+    ...director, });
+
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.ok(recorder.events.some((event) => event.type === "browser.screenshot"),
+    "a reveal pass is not worth losing the evidence over");
+});

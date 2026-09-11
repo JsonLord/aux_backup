@@ -38,7 +38,7 @@ const { PersonaMemoryBank } = require("./memoryBank");
 const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
-const { holdRevealKeeper, releaseRevealKeeper } = require("./revealKeeper");
+const { holdRevealKeeper, releaseRevealKeeper, revealOnce } = require("./revealKeeper");
 const { recentFrames } = require("./viewportStream");
 
 const DEFAULT_MAX_STEPS = 40;
@@ -186,6 +186,18 @@ class PersonaDirector {
     // An action that does not sound like this person is sent back with the
     // reason, TinyTroupe-style. Without a judge the gate is simply off.
     this.gate = gate || new AdherenceGate({ judge: actor.judgeAdherence });
+  }
+
+  /** Run the page's scroll-reveals through once and wait for them. A seam, so a
+   * test can assert the capture waits for it without a live browser. */
+  async settle() {
+    try {
+      await revealOnce();
+    } catch {
+      // A reveal pass that fails is not worth losing the capture over; the
+      // picture is then of whatever has revealed itself so far, which is what it
+      // was before this existed.
+    }
   }
 
   /** Stop the page being scrolled under a measurement. Seams, so a test can
@@ -460,6 +472,20 @@ class PersonaDirector {
     const name = `${String(this.shots.length + 1).padStart(3, "0")}-${label}.png`;
     const target = path.join(directory, name);
     try {
+      // Scroll the whole document through before photographing it. `full: true`
+      // stitches a capture as tall as the page, and everything below the fold on a
+      // site that reveals content on scroll is still in its un-revealed state the
+      // moment a document loads -- so the first capture of a run, taken straight
+      // after open(), is mostly blank. Measured on a live run: 7,921 of 8,620 rows
+      // near-uniform, 92% of the image. The vision critique looked at it and filed
+      // "Massive empty vertical sections ... a major rendering bug", severity
+      // critical, as the most serious finding in the report. It was describing our
+      // capture, not the site.
+      //
+      // The reveal keeper does this every 1500ms, which is no help to a capture
+      // taken in the first second of a document or to a run that finishes in three
+      // actions. Awaited here so the picture is of a settled page.
+      await this.settle();
       await browser.screenshot({ path: target, full: true });
     } catch {
       return null;      // a capture that fails is not worth ending a journey over
