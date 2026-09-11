@@ -12,7 +12,8 @@ const {
   buildReflectionPrompt,
   describeTarget,
   unreachable,
-  UNREACHABLE_ATTEMPTS} = require("../src/personaActor");
+  UNREACHABLE_ATTEMPTS,
+  describeFailure} = require("../src/personaActor");
 
 test("a decision cut off mid-sentence keeps what the person actually said", async () => {
   // Discarding it costs the run a turn and produces the "malformed" fallback --
@@ -201,6 +202,40 @@ test("patience for an endpoint that is gone is still bounded", async () => {
         baseUrl: "https://example.test/v1", wait: async () => {} }),
       /persona actor call failed after 6 attempt\(s\): fetch failed/);
     assert.equal(calls, UNREACHABLE_ATTEMPTS, "it gives up, it does not retry for ever");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("a transport failure says what actually went wrong, not just that it did", async () => {
+  // Cycles 20 and 21 each lost two of three personas to "fetch failed" and the
+  // record could not say which of four explanations it was -- DNS, a dropped
+  // link, an exhausted connection pool, a provider restart. They call for
+  // different fixes, and undici puts the answer one level down on error.cause.
+  const dns = Object.assign(new Error("getaddrinfo EAI_AGAIN router.example"), { code: "EAI_AGAIN" });
+  assert.equal(describeFailure(Object.assign(new TypeError("fetch failed"), { cause: dns })),
+    "fetch failed <- getaddrinfo EAI_AGAIN router.example (EAI_AGAIN)");
+
+  // A chain deeper than one link still resolves, and a cycle cannot hang it.
+  const looped = new Error("outer");
+  looped.cause = looped;
+  assert.equal(describeFailure(looped), "outer");
+
+  assert.equal(describeFailure(new Error("plain")), "plain");
+  assert.equal(describeFailure(undefined), "");
+});
+
+test("the failure a run reports carries the cause with it", async () => {
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    throw Object.assign(new TypeError("fetch failed"),
+      { cause: Object.assign(new Error("connect ECONNREFUSED 10.0.0.1:443"), { code: "ECONNREFUSED" }) });
+  };
+  try {
+    await assert.rejects(
+      completion({ system: "s", user: "u", model: "m", apiKey: "k",
+        baseUrl: "https://example.test/v1", wait: async () => {} }),
+      /ECONNREFUSED/);
   } finally {
     global.fetch = originalFetch;
   }

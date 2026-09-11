@@ -347,6 +347,28 @@ const UNREACHABLE_ATTEMPTS = 6;
 // be twelve minutes of one step.
 const UNREACHABLE_PATIENCE_MS = 180000;
 
+/**
+ * What actually went wrong, when the answer is hiding one level down.
+ *
+ * undici reports every transport failure as TypeError("fetch failed") and puts
+ * the real cause -- EAI_AGAIN, ECONNREFUSED, UND_ERR_CONNECT_TIMEOUT, a TLS
+ * failure -- on error.cause. Cycles 20 and 21 each lost two of three personas to
+ * "fetch failed" and the record could not say which, so four different
+ * explanations stayed equally plausible: DNS, a dropped link, an exhausted
+ * connection pool, a provider restart. They call for different fixes.
+ */
+function describeFailure(error) {
+  const parts = [];
+  let current = error;
+  for (let depth = 0; current && depth < 4; depth += 1) {
+    const code = current.code ? ` (${current.code})` : "";
+    const text = `${String(current.message || current)}${code}`;
+    if (text && !parts.includes(text)) parts.push(text);
+    current = current.cause;
+  }
+  return parts.join(" <- ").slice(0, 300);
+}
+
 /** Nothing answered. Distinct from something answering unhappily. */
 function unreachable(error) {
   if (error?.status !== undefined) return false;
@@ -468,7 +490,8 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
       clearTimeout(timer);
     }
   }
-  throw new Error(`persona actor call failed after ${allowed} attempt(s): ${lastError?.message}`);
+  throw new Error(`persona actor call failed after ${allowed} attempt(s): `
+    + describeFailure(lastError));
 }
 
 /**
@@ -555,7 +578,7 @@ function scriptedActor(script) {
 }
 
 module.exports = {
-  describeTarget, unreachable, UNREACHABLE_ATTEMPTS,
+  describeTarget, describeFailure, unreachable, UNREACHABLE_ATTEMPTS,
   backoffMs, retryAfterMs, ACTION_CONSTRAINTS, ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES,
   NON_RETRYABLE_STATUS, completionBudget, salvageAction, salvageDecision,
   affectInWords, buildPrompt,
