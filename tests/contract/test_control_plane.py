@@ -2475,3 +2475,45 @@ def test_one_control_named_two_ways_is_one_finding():
              {"type": "CLICK", "target": "e18"}, "no", "Still no price.", 0.40)]),
     ])
     assert len(apart) == 2
+
+
+def test_a_deck_table_renders_an_em_dash_not_the_word_for_one():
+    """`escape(... or "&mdash;")` escapes the entity it was trying to emit, so the
+    Personas column of a live deck's summary table read "&mdash;" as literal text
+    where the finding affected nobody countable."""
+    report = {
+        "url": "https://example.test/", "executive_summary": "One issue.",
+        "critical_pain_points": [
+            {"severity": "critical", "category": "blocker", "title": "The journey was blocked",
+             "summary": "They left.", "affectedPersonas": 0},
+            {"severity": "high", "category": "expectation", "title": "Promised more than it did",
+             "summary": "It did not.", "affectedPersonas": 2},
+        ],
+        "elements_to_preserve": [], "journey_outcome": {"runs": []}, "limitations": [],
+        # The table the entity appears in is built from the priority order.
+        "impact_analysis": {"priorityOrder": [
+            {"title": "The journey was blocked", "severity": "critical", "affectedPersonas": 0},
+            {"title": "Promised more than it did", "severity": "high", "affectedPersonas": 2},
+        ]},
+    }
+
+    deck = JobExecutor._slide_deck(report)
+
+    assert "&amp;mdash;" not in deck, "the dash is markup and must not be escaped"
+    assert "&mdash;" in deck
+    assert "<td>2</td>" in deck
+
+
+def test_a_broken_promise_summary_does_not_double_the_full_stop():
+    """Both quotes carry the persona's own full stop; adding another reads as a
+    typo, and a live deck rendered `as expected.".`"""
+    runs = [_expectation_run("run_1", "friedrich", [
+        ("Clicking the 'Annual' button will reveal the price.",
+         {"type": "CLICK", "target": "e17"}, "no",
+         "Clicking the button did not reveal any annual price as expected.", 0.25)])]
+
+    summary = JobExecutor._pain_points_from_expectations(runs)[0]["summary"]
+
+    assert '.".' not in summary
+    assert 'as expected."' in summary
+    assert 'reveal the price."' in summary

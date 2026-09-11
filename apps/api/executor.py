@@ -1253,8 +1253,11 @@ class JobExecutor:
         return {
             "severity": severity, "category": "expectation",
             "title": f"Promised more than it did: {label}",
-            "summary": (f"Before touching it they said what they expected: \"{expected}\" What "
-                        f"arrived was not that -- \"{happened}\".{again} It cost "
+            # Both quotes carry the persona's own full stop; adding another reads
+            # as a typo.
+            "summary": (f"Before touching it they said what they expected: "
+                        f"\"{expected.rstrip(' .')}.\" What arrived was not that -- "
+                        f"\"{happened.rstrip(' .')}.\"{again} It cost "
                         f"{cost:.2f} of this visitor's patience on a 0-1 scale, measured across the "
                         f"run rather than assumed."),
             "recommendation": (f"Either make {label} do what it reads as doing, or stop it reading "
@@ -2983,7 +2986,10 @@ class JobExecutor:
                 f'<tr><td>{position}</td><td>{escape(str(entry.get("title") or ""))}</td>'
                 f'<td><span class="sev sev-{escape(str(entry.get("severity") or "medium"))}">'
                 f'{escape(str(entry.get("severity") or "")).upper()}</span></td>'
-                f'<td>{escape(str(entry.get("affectedPersonas") or "&mdash;"))}</td></tr>'
+                # The dash is markup, so it goes outside escape(): passing it
+                # through turned an em dash into a literal "&mdash;" in the
+                # rendered table.
+                f'<td>{escape(str(entry["affectedPersonas"])) if entry.get("affectedPersonas") else "&mdash;"}</td></tr>'
                 for position, entry in enumerate(priorities, start=1))
             slides.append(
                 '<section class="slide"><h2>What to fix first</h2>'
