@@ -674,7 +674,8 @@ class JobExecutor:
                 "`timeline`, or `verdict*`); they are not interchangeable."
             )
         return {"schema_version": "1.1", "mode": "user_journey", "url": data.get("url"),
-                "executive_summary": self._executive_summary(data.get("url"), tasks, personas, findings, preserve),
+                "executive_summary": self._executive_summary(data.get("url"), tasks, personas,
+                                                             findings, preserve, journeys),
                 "synthetic_users": personas, "persona_artifacts": persona_artifacts,
                 "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys},
                 "critical_pain_points": findings,
@@ -814,7 +815,8 @@ class JobExecutor:
 
     @staticmethod
     def _executive_summary(url: str | None, tasks: list[str], personas: list[dict[str, Any]],
-                           findings: list[dict[str, Any]], preserve: list[dict[str, Any]]) -> str:
+                           findings: list[dict[str, Any]], preserve: list[dict[str, Any]],
+                           journeys: list[dict[str, Any]] | None = None) -> str:
         """State what was actually found, not what was merely prepared.
 
         A count is not a summary. "12 usability issues were identified, 3 of them
@@ -834,6 +836,22 @@ class JobExecutor:
                     if str(finding.get("severity")) in {"critical", "high"}]
         parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) "
                  f"against {url or 'the target site'}."]
+        # How far the runs actually got, before any count of what they found. A
+        # live report opened "1 synthetic user(s) attempted 2 task(s) ... 10
+        # usability issue(s) were identified" over a run that errored after a
+        # single action on a 429 from the model endpoint. Every other part of the
+        # report was honest about it -- journey_outcome.status said "partial", a
+        # limitation named the error -- but the one line most readers read
+        # presented a collapsed run as a finished review. A caveat five items into
+        # a limitations array is a caveat nobody reads.
+        cut_short = [journey for journey in (journeys or []) if journey.get("harnessError")]
+        if cut_short:
+            steps = sum(1 for journey in cut_short for event in journey.get("timeline") or []
+                        if event.get("type") == "persona.expectation")
+            parts.append(
+                f"{len(cut_short)} of those run(s) stopped early and did not finish the tasks"
+                + (f" -- one got {steps} action(s) in" if len(cut_short) == 1 and steps else "")
+                + ", so what follows is what was seen before that, not a full review.")
         parts.append(f"{len(real)} usability issue(s) were identified"
                      + (f", {len(blocking)} of them high-severity or blocking." if blocking else "."))
 

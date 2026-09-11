@@ -478,13 +478,22 @@ test("a cited selector that is not on the page is not a citation", () => {
   assert.deepEqual(parsed.strengths[0].elements.map((item) => item.elementSelector), ["e1"]);
 });
 
-test("with no element list there is no basis to reject a citation", () => {
+test("with no element list a named citation stands and an index resolves to nothing", () => {
   // Nothing to check against is not the same as a citation that failed a check,
-  // and stripping every citation on that basis would be the guard causing the
-  // harm it exists to prevent.
+  // and stripping every named citation on that basis would be the guard causing
+  // the harm it exists to prevent.
+  //
+  // An index is the exception, because it is not a name: it is a lookup into a
+  // list, and with no list there is nothing to look up. A live report carried
+  // `elementId: null` on twenty-four citations across seven findings for exactly
+  // this reason -- the screenshots had no paired DOM snapshot, so the element
+  // list was empty and the indices passed straight through unresolved.
   const body = JSON.stringify({ issues: [{ title: "T", description: "D", category: "usability",
-    severity: "low", elements: [{ elementSelector: "whatever", role: "cause" }] }], strengths: [] });
+    severity: "low", elements: [{ elementSelector: "whatever", role: "cause" },
+                                { element: 3, role: "cause" }] }], strengths: [] });
 
-  assert.deepEqual(parseCritique(body).issues[0].elements.map((item) => item.elementSelector),
-    ["whatever"]);
+  const withoutList = parseCritique(body).issues[0].elements;
+  assert.deepEqual(withoutList.map((item) => item.elementSelector), ["whatever"]);
+  assert.ok(withoutList.every((item) => item.elementSelector),
+    "a citation that resolves to nothing is not a citation");
 });

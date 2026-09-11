@@ -2800,3 +2800,35 @@ def test_with_no_measured_affect_there_is_no_ceiling_to_impose():
     # same way whether or not there was anything to cap it against.
     assert "frustration 0.80" in findings[0]["evidence"]
     assert "2 observation(s) across 1 persona(s)" in findings[0]["evidence"]
+
+
+def test_a_summary_says_when_the_runs_did_not_finish():
+    """A live report opened "1 synthetic user(s) attempted 2 task(s) ... 10
+    usability issue(s) were identified" over a run that errored after a single
+    action on a 429 from the model endpoint. Every other part of the report was
+    honest about it -- journey_outcome.status said "partial", a limitation named
+    the error -- but the one line most readers read presented a collapsed run as a
+    finished review. A caveat five items into a limitations array is a caveat
+    nobody reads."""
+    cut_short = [{"runId": "run_1", "harnessError": "persona actor endpoint returned HTTP 429",
+                  "timeline": [{"type": "persona.expectation", "data": {}}]}]
+    findings = [{"title": "Unclear pricing", "severity": "high"}]
+
+    summary = JobExecutor._executive_summary(
+        "https://example.test/", ["Find the price", "Say what it does"],
+        [{"id": "persona_1"}], findings, [], cut_short)
+
+    assert "stopped early and did not finish the tasks" in summary
+    assert "got 1 action(s) in" in summary
+    assert "not a full review" in summary
+    # Said before the count of what was found, not after it.
+    assert summary.index("stopped early") < summary.index("usability issue(s)")
+
+    # A clean run says nothing of the kind.
+    clean = JobExecutor._executive_summary(
+        "https://example.test/", ["Find the price"], [{"id": "persona_1"}], findings, [],
+        [{"runId": "run_1", "timeline": []}])
+    assert "stopped early" not in clean
+    # And so does a report built without the runs to hand.
+    assert "stopped early" not in JobExecutor._executive_summary(
+        "https://example.test/", ["Find the price"], [{"id": "persona_1"}], findings, [])

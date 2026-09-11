@@ -334,7 +334,17 @@ function citedOnThePage(cited, elements) {
   // A caller that did not pass the page's elements -- a test of the parser, a
   // legacy path -- has given no basis to judge, and stripping every citation on
   // that basis would be the guard causing the harm it exists to prevent.
-  if (!real.size) return cited || [];
+  //
+  // An index is the exception, because it is not a name: it is a lookup into a
+  // list, and with no list it resolves to nothing. A live report carried
+  // `elementId: null` on twenty-four citations across seven findings for exactly
+  // this reason -- the screenshots had no paired DOM snapshot, so the element
+  // list was empty and the indices passed straight through unresolved. A citation
+  // that resolves to nothing is not a citation.
+  if (!real.size) {
+    return (cited || []).filter((element) => typeof element.elementSelector === "string"
+      && element.elementSelector);
+  }
   const kept = [];
   const seen = new Set();
   for (const element of cited || []) {
