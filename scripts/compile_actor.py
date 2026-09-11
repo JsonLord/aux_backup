@@ -63,16 +63,28 @@ def blablador_judge(model: str, key: str):
     return judge
 
 
-def score_of(program, examples, metric) -> tuple[float, int]:
-    """Mean adherence over the trainset, and how many fall below the gate's bar."""
-    total, below = 0.0, 0
+def score_of(program, examples, metric) -> tuple[float, int, int]:
+    """Mean adherence over the trainset, how many fall below the gate's bar, and
+    how many the endpoint never answered.
+
+    One failed call costs one example. The first attempt at this let a single 502
+    out of eighty-seven sequential requests end the whole compile before the
+    baseline had finished measuring -- an hour of work thrown away by one bad
+    gateway response, which is not a property of the actor being measured.
+    """
+    scored, total, below, lost = 0, 0.0, 0, 0
     for example in examples:
-        prediction = program(persona=example.persona, task=example.task,
-                             observation=example.observation)
+        try:
+            prediction = program(persona=example.persona, task=example.task,
+                                 observation=example.observation)
+        except Exception:
+            lost += 1
+            continue
         result = metric(example, prediction)
+        scored += 1
         total += result.score
         below += int(result.score < 0.7)
-    return (total / len(examples) if examples else 0.0), below
+    return (total / scored if scored else 0.0), below, lost
 
 
 def main() -> None:
@@ -80,7 +92,7 @@ def main() -> None:
     parser.add_argument("corpus", type=Path)
     parser.add_argument("-o", "--out", type=Path)
     parser.add_argument("--auto", default="light", choices=["light", "medium", "heavy"])
-    parser.add_argument("--actor-model", default="alias-large")
+    parser.add_argument("--actor-model", default="alias-fast")
     parser.add_argument("--judge-model", default="alias-fast")
     parser.add_argument("--reflection-model", default="alias-large")
     parser.add_argument("--limit", type=int, default=0, help="use only the first N examples")
@@ -104,24 +116,29 @@ def main() -> None:
     print(f"{len(examples)} examples for {persona.get('id') or bank.get('personaId')}")
 
     def lm(model: str, budget: int = ACTOR_BUDGET) -> "dspy.LM":
+        # Retried inside the client: these endpoints return the occasional 502
+        # from an upstream that took too long, and a compile measured over
+        # eighty-seven sequential calls will meet one.
         return dspy.LM(f"openai/{model}", api_base=BLABLADOR, api_key=key,
-                       max_tokens=budget, temperature=1.0)
+                       max_tokens=budget, temperature=1.0, num_retries=3)
 
     dspy.configure(lm=lm(arguments.actor_model))
     metric = adherence_metric(blablador_judge(arguments.judge_model, key))
     program = dspy.Predict(build_signature())
 
-    before, below_before = score_of(program, examples, metric)
+    before, below_before, lost_before = score_of(program, examples, metric)
     print(f"before: mean adherence {before * 10:.2f}/10; "
-          f"{below_before} of {len(examples)} below the gate's threshold")
+          f"{below_before} below the gate's threshold; {lost_before} unanswered "
+          f"of {len(examples)}")
     if arguments.measure_only:
         return
 
     compiled = compile_actor(examples, blablador_judge(arguments.judge_model, key),
                              reflection_lm=lm(arguments.reflection_model), auto=arguments.auto)
-    after, below_after = score_of(compiled, examples, metric)
+    after, below_after, lost_after = score_of(compiled, examples, metric)
     print(f"after:  mean adherence {after * 10:.2f}/10; "
-          f"{below_after} of {len(examples)} below the gate's threshold")
+          f"{below_after} below the gate's threshold; {lost_after} unanswered "
+          f"of {len(examples)}")
 
     text = instructions_of(compiled)
     if arguments.out:
