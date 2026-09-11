@@ -2353,6 +2353,29 @@ def test_a_blocked_journey_says_where_the_patience_went():
     assert 'appear".' in said and 'appear.".' not in said
     # An action that worked is not the cause.
     assert "scroll" not in said.lower()
+    # A control is somewhere to go and look.
+    assert "Start there" in said
+
+
+def test_what_stopped_them_reads_right_for_something_that_is_not_a_control():
+    """"Start there -- that is where this visitor's patience went" points at a
+    control. It does not parse for a scroll, where what the run shows is somebody
+    hunting and not finding. A SCROLL also carries "down" as its target, which is
+    not a thing on the page to go and look at, so the wording is chosen from the
+    verb rather than from whether a target string happens to be present."""
+    runs = [_expectation_run("run_1", "friedrich", [
+        ("Scrolling down will reveal the prices.",
+         {"type": "SCROLL", "content": "down"}, "no", "No prices appeared.", 0.20),
+        ("Scrolling down will reveal the prices.",
+         {"type": "SCROLL", "content": "down"}, "no", "Still no prices.", 0.40)])]
+
+    said = JobExecutor._what_stopped_them(runs[0])
+
+    assert "Start there" not in said
+    assert "scroll their way to it 2 times" in said
+    assert "not where they kept looking for it" in said
+    # And never "the down control".
+    assert "down" not in said.split("expected")[0]
 
 
 def test_a_journey_that_did_not_repeat_itself_gets_no_invented_cause():

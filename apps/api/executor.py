@@ -986,8 +986,8 @@ class JobExecutor:
                 break
         return quotes
 
-    @staticmethod
-    def _what_stopped_them(journey: dict[str, Any]) -> str:
+    @classmethod
+    def _what_stopped_them(cls, journey: dict[str, Any]) -> str:
         """The thing the run kept doing that never worked, in the run's own terms.
 
         A failed or blocked criterion arrived with no recommendation at all -- a
@@ -1033,10 +1033,18 @@ class JobExecutor:
         # with one and then followed by another reads as a typo.
         said = next((gap for gap in reversed(gaps) if gap), "").rstrip(" .")
         verb, _, ref = action.partition(" ")
-        what = f'the "{named[action]}" control' if action in named else (
-            f"{ref}" if ref else "the same thing")
-        return (f"They tried to {verb.lower()} {what} {len(gaps)} times and it never did what they "
-                f"expected" + (f': "{said}"' if said else "") + ".")
+        # Whether this was a control, from the verb rather than from whether a
+        # target string happens to be present: a SCROLL carries "down" as its
+        # target, which is not a thing on the page to go and look at.
+        control = verb.upper() in cls._PROMISING_ACTIONS
+        what = f'the "{named[action]}" control' if action in named else (ref if control else "")
+        attempt = (f"They tried to {verb.lower()} {what} {len(gaps)} times".replace("  ", " ")
+                   if control else
+                   f"They tried to {verb.lower()} their way to it {len(gaps)} times")
+        follow = (" Start there -- that is where this visitor's patience went." if control else
+                  " Whatever they were looking for was not where they kept looking for it.")
+        return (attempt + " and it never did what they expected"
+                + (f': "{said}"' if said else "") + "." + follow)
 
     # How much of the shorter of {what this finding is about} and {what the persona
     # said} the two must share before the quote is published as evidence for the
@@ -1654,7 +1662,7 @@ class JobExecutor:
                     # cannot act on. The run's own record says where to look: the
                     # thing they kept trying that never answered.
                     "recommendation": (
-                        f"{stopped_them} Start there -- that is where this visitor's patience went."
+                        stopped_them
                         if (stopped_them := JobExecutor._what_stopped_them(journey)) else
                         "Follow this run's timeline back from the last action that did what the "
                         "persona expected; the steps after it are where the journey came apart."),
