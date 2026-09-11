@@ -735,6 +735,21 @@ class JobExecutor:
         scored 0.86 and every wrong one 0.29 or less.
         """
         for finding in findings:
+            # A finding that arrived with its own quotes keeps them. The
+            # broken-promise finding pairs each quote to the exact step that
+            # produced it -- the reflection recorded immediately after that
+            # action -- and this matches by title similarity across the whole
+            # run, which is strictly worse evidence for the same claim.
+            #
+            # Overwriting it put the persona's *expectation* under a finding as
+            # evidence of what went wrong: "Clicking the Monthly toggle button
+            # will display the specific monthly cost amounts" quoted as the
+            # complaint, when the complaint the run recorded was "monthly cost
+            # amounts for the tiers are not shown". A prediction presented as an
+            # observation, and the expectation scored better only because the
+            # title is made from it.
+            if finding.get("personaEvidence"):
+                continue
             persona_ids = finding.get("affectedPersonaIds") or (
                 [finding["personaId"]] if finding.get("personaId") else [])
             subject = (cls._text_tokens(finding.get("title") or "")

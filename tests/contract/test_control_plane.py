@@ -2832,3 +2832,40 @@ def test_a_summary_says_when_the_runs_did_not_finish():
     # And so does a report built without the runs to hand.
     assert "stopped early" not in JobExecutor._executive_summary(
         "https://example.test/", ["Find the price"], [{"id": "persona_1"}], findings, [])
+
+
+def test_evidence_paired_to_its_own_step_is_not_replaced_by_a_title_match():
+    """Two mechanisms write personaEvidence, and the general one was overwriting
+    the specific one. The broken-promise finding pairs each quote to the exact step
+    that produced it -- the reflection recorded immediately after that action --
+    and _attach_persona_evidence then replaced it with the best title-similarity
+    match across the whole run.
+
+    In a live report that put the persona's *expectation* under the finding as
+    evidence of what went wrong: "Clicking the Monthly toggle button will display
+    the specific monthly cost amounts" quoted as the complaint, when the complaint
+    the run recorded was "monthly cost amounts for the tiers are not shown". A
+    prediction presented as an observation -- and the expectation scored better
+    only because the title is made from it."""
+    findings = [{
+        "title": 'Promised more than it did: Monthly', "personaId": "persona_1",
+        "summary": "Clicking Monthly showed nothing.",
+        "personaEvidence": [{"quote": "monthly cost amounts for the tiers are not shown",
+                             "personaName": "Friedrich Wolf", "personaId": "persona_1"}],
+    }, {
+        "title": "Monthly toggle shows no cost amounts", "personaId": "persona_1",
+        "summary": "The monthly cost amounts are not shown for the tiers.",
+    }]
+    thoughts = {"persona_1": [
+        {"kind": "reasoning", "source": "persona.expectation",
+         "text": "Clicking the Monthly toggle button will display the specific monthly cost amounts."},
+        {"kind": "reasoning", "source": "persona.reflection",
+         "text": "monthly cost amounts for the tiers are not shown"},
+    ]}
+
+    JobExecutor._attach_persona_evidence(findings, thoughts, {"persona_1": "Friedrich Wolf"})
+
+    assert findings[0]["personaEvidence"][0]["quote"] == (
+        "monthly cost amounts for the tiers are not shown"), "paired evidence is the better evidence"
+    # A finding that arrived with none still gets the best match available.
+    assert findings[1].get("personaEvidence"), "the matcher still works where nothing was paired"
