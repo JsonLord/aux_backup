@@ -7,7 +7,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  ACTION_TYPES, ACTION_VOCABULARY, completionBudget, parseDecision, salvageAction,
+  ACTION_TYPES, ACTION_VOCABULARY, backoffMs, completion, completionBudget, parseDecision,
+  retryAfterMs, salvageAction,
 } = require("../src/personaActor");
 
 test("a decision cut off mid-sentence keeps what the person actually said", async () => {
@@ -48,4 +49,55 @@ test("an action nothing implements is refused however well-formed the reply", ()
     "and the vocabulary is what decides whether it counts");
   assert.ok(!ACTION_TYPES.includes("TELEPORT"));
   assert.ok(ACTION_VOCABULARY.includes("GIVE_UP"));
+});
+
+test("a rate limit is waited out, not given up on", async () => {
+  // A live run died after a single action -- having already opened the page,
+  // looked at it and formed an expectation -- because two jobs shared a router
+  // for a minute. 429 was being treated exactly like a 502: three attempts, 1.5s
+  // then 3s, four and a half seconds of patience against a rate-limit window that
+  // outlasts it easily.
+  const waits = [];
+  let calls = 0;
+  const fetchStub = async () => {
+    calls += 1;
+    if (calls <= 4) {
+      return { ok: false, status: 429, text: async () => "Too Many Requests",
+        headers: { get: () => "" } };
+    }
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "done" } }] }) };
+  };
+  const original = global.fetch;
+  global.fetch = fetchStub;
+  try {
+    const answer = await completion({ system: "s", user: "u", model: "m", apiKey: "k",
+      baseUrl: "https://example.test", wait: async (ms) => { waits.push(ms); } });
+    assert.equal(answer, "done");
+  } finally {
+    global.fetch = original;
+  }
+
+  assert.equal(calls, 5, "three attempts is not enough patience for a rate limit");
+  // Doubling, so a minute of throttling is outlasted rather than run into.
+  assert.deepEqual(waits, [3000, 6000, 12000, 24000]);
+});
+
+test("a rate limit does not make a healthy endpoint slower", () => {
+  // Everything that is not a 429 keeps exactly the patience it had.
+  assert.deepEqual([1, 2, 3].map((attempt) => backoffMs({ status: 502 }, attempt, 1500)),
+    [1500, 3000, 4500]);
+  assert.equal(backoffMs({}, 1, 1500), 1500);
+});
+
+test("the server's own Retry-After is preferred, and capped", () => {
+  // It is the one party that knows. But a server asking for ten minutes is asking
+  // for more than a journey has, and waiting it out would cost the run anyway.
+  assert.equal(retryAfterMs("5"), 5000);
+  assert.equal(retryAfterMs(""), null);
+  assert.equal(retryAfterMs("soon"), null);
+  assert.equal(backoffMs({ status: 429, retryAfter: "8" }, 1, 1500), 8000);
+  assert.equal(backoffMs({ status: 429, retryAfter: "600" }, 1, 1500), 30000);
+  // An HTTP-date form resolves to a delay rather than being discarded.
+  const soon = new Date(Date.now() + 4000).toUTCString();
+  assert.ok(Math.abs(retryAfterMs(soon) - 4000) < 1500);
 });

@@ -293,6 +293,46 @@ function buildReflectionPrompt({ profile, expectation, action, observation }) {
 // budget and delays a failure that was never going to change.
 const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
 
+// The one status that says, in so many words, "you are going too fast; wait".
+//
+// It was being treated exactly like a 502: three attempts, 1.5s then 3s, four and
+// a half seconds of patience in total. A rate-limit window outlasts that easily,
+// and when it does the whole journey ends -- a live run died after a single
+// action, having already opened the page, looked at it and formed an expectation,
+// because two jobs happened to share a router for a minute.
+//
+// Everything a 502 justifies applies here more strongly: the request is fine, the
+// endpoint is fine, and the only thing wrong is the timing.
+const RATE_LIMITED = 429;
+// Enough attempts, with the pause doubling each time, to outlast a minute of
+// being throttled: 3s, 6s, 12s, 24s, 30s, 30s.
+const RATE_LIMIT_ATTEMPTS = 7;
+const MAX_BACKOFF_MS = 30000;
+
+/**
+ * How long the server asked us to wait, in milliseconds, or null if it did not.
+ *
+ * `Retry-After` is either a number of seconds or an HTTP date. Preferred over any
+ * backoff we would invent, because it is the one party that knows.
+ */
+function retryAfterMs(header) {
+  const value = String(header || "").trim();
+  if (!value) return null;
+  if (/^\d+$/.test(value)) return Number(value) * 1000;
+  const at = Date.parse(value);
+  return Number.isFinite(at) ? Math.max(0, at - Date.now()) : null;
+}
+
+/** How long to hold off before trying this failure again. */
+function backoffMs(error, attempt, retryWaitMs) {
+  if (error?.status !== RATE_LIMITED) return retryWaitMs * attempt;
+  const asked = retryAfterMs(error.retryAfter);
+  // Their number, capped: a server asking for ten minutes is asking for more
+  // than a journey has, and waiting it out would cost the run anyway.
+  if (asked !== null) return Math.min(MAX_BACKOFF_MS, asked);
+  return Math.min(MAX_BACKOFF_MS, retryWaitMs * 2 ** attempt);
+}
+
 /**
  * Ask the model, and do not give up on the first stumble.
  *
@@ -325,7 +365,10 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
   maxTokens = completionBudget(),
   attempts = 3, retryWaitMs = 1500, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
   let lastError;
-  for (let attempt = 1; attempt <= Math.max(1, attempts); attempt += 1) {
+  // Raised for a rate limit only, and only once one is actually met, so a
+  // healthy endpoint is never waited on longer than it was before.
+  let allowed = Math.max(1, attempts);
+  for (let attempt = 1; attempt <= allowed; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -339,6 +382,7 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
         const failure = new Error(`persona actor endpoint returned HTTP ${response.status}: `
           + `${(await response.text()).slice(0, 300)}`);
         failure.status = response.status;
+        failure.retryAfter = response.headers?.get?.("retry-after") || "";
         throw failure;
       }
       const data = await response.json();
@@ -350,12 +394,13 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
     } catch (error) {
       lastError = error;
       if (NON_RETRYABLE_STATUS.has(error?.status)) break;
-      if (attempt < attempts) await wait(retryWaitMs * attempt);
+      if (error?.status === RATE_LIMITED) allowed = Math.max(allowed, RATE_LIMIT_ATTEMPTS);
+      if (attempt < allowed) await wait(backoffMs(error, attempt, retryWaitMs));
     } finally {
       clearTimeout(timer);
     }
   }
-  throw new Error(`persona actor call failed after ${attempts} attempt(s): ${lastError?.message}`);
+  throw new Error(`persona actor call failed after ${allowed} attempt(s): ${lastError?.message}`);
 }
 
 /**
@@ -441,7 +486,8 @@ function scriptedActor(script) {
   return decide;
 }
 
-module.exports = { ACTION_CONSTRAINTS, ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES,
+module.exports = {
+  backoffMs, retryAfterMs, ACTION_CONSTRAINTS, ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES,
   NON_RETRYABLE_STATUS, completionBudget, salvageAction, salvageDecision,
   affectInWords, buildPrompt,
   buildReflectionPrompt, completion, llmActor, parseDecision, parseReflection, personaInWords,
