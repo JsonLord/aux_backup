@@ -540,3 +540,61 @@ def test_a_page_drawn_too_pale_to_read_is_also_refused_as_a_capture():
     assert result["capture"]["blankShare"] < 0.5
     assert "does not line up with the boxes" in result["capture"]["reason"]
     assert result["notPerceived"] == []
+
+
+def _sparse_heading(colour=(51, 51, 51)):
+    """One line of glyph-thin strokes in a box sized for two -- the coverage a real
+    heading has, which is well under a tenth of its own bounding box."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (700, 200), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for x in range(50, 650, 12):
+        draw.rectangle([x, 30, x + 2, 58], fill=colour)
+    return image
+
+
+def test_a_heading_is_measured_on_its_ink_not_on_its_whitespace():
+    """A fixed low percentile of the whole region assumes text fills a fair share
+    of its box, and headings do not. Measured on a real capture, "Start free. Keep
+    what makes you sharper." -- 44px bold, near-black on near-white, across a
+    620x100 box holding two lines -- came back at 1.06:1 and failing, because glyph
+    strokes cover under a tenth of that area and the tenth percentile was still
+    background. Sparse text is the case the number matters most for."""
+    from services.perception_service.optics import contrast_ratio
+
+    box = {"x": 40, "y": 10, "width": 620, "height": 100}
+    coverage = sum(1 for x in range(50, 650, 12)) * 3 * 29 / (620 * 100)
+    assert coverage < 0.10, f"the fixture must be sparse to reproduce this ({coverage:.1%})"
+
+    dark = contrast_ratio(_sparse_heading((51, 51, 51)), box)
+    assert dark["passes"] is True
+    assert dark["ratio"] > 8, f"#333 on white is 12.63:1, measured {dark['ratio']}"
+
+    # And the guard must not simply pass everything: pale sparse text still fails.
+    pale = contrast_ratio(_sparse_heading((204, 204, 204)), box)
+    assert pale["passes"] is False
+    assert pale["ratio"] < 2
+
+    # The canonical grey for 4.5:1 on white lands where the spec says it does, so
+    # the recommendation and the check agree with each other.
+    edge = contrast_ratio(_sparse_heading((118, 118, 118)), box)
+    assert 4.3 <= edge["ratio"] <= 4.8
+
+
+def test_a_region_with_no_marks_at_all_still_reads_as_flat():
+    """The floor that keeps the change from manufacturing ink: below a couple of
+    pixels in a thousand there is nothing to call a mark, and the region has to
+    fall through to the surround comparison rather than take a percentile of
+    compression noise."""
+    from PIL import Image
+
+    from services.perception_service.optics import contrast_ratio, legibility
+
+    blank = Image.new("RGB", (700, 200), (248, 248, 249))
+    box = {"x": 40, "y": 10, "width": 620, "height": 100}
+
+    assert legibility(blank, box, font_px=16, acuity=1.0, role="text")["nothingDrawn"] is True
+    # Nothing inside, so it is judged against what surrounds it -- which here is
+    # the same flat colour.
+    assert contrast_ratio(blank, box)["measured"] == "a solid region against what surrounds it"

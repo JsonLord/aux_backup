@@ -366,6 +366,13 @@ _SRGB_KNEE = 0.04045
 # integrates over a glyph and the paper behind it.
 _INK_PERCENTILE = 10
 _PAPER_PERCENTILE = 90
+# How far below the paper a pixel has to sit to count as a mark rather than as
+# the background's own noise (JPEG ringing, a gradient, a subpixel edge).
+_INK_SEPARATION = 0.02
+# And how much of the region has to be marks before they are treated as ink. Two
+# pixels in a thousand is below the stroke coverage of any real text and above
+# what compression noise produces.
+_MIN_MARK_SHARE = 0.002
 
 # WCAG 2.2 1.4.3 (AA): 4.5:1 for body text, 3:1 for large text and for the
 # non-text contrast of a control's boundary (1.4.11).
@@ -430,8 +437,27 @@ def contrast_ratio(image: Image.Image, box: dict) -> dict:
 
     rgb = image.convert("RGB")
     luminance = relative_luminance(np.asarray(rgb.crop((left, top, right, bottom))))
-    ink = float(np.percentile(luminance, _INK_PERCENTILE))
-    paper = float(np.percentile(luminance, _PAPER_PERCENTILE))
+    flat = luminance.ravel()
+    paper = float(np.percentile(flat, _PAPER_PERCENTILE))
+    # Ink is whatever differs from the paper, however little of the box it covers.
+    #
+    # A fixed low percentile of the whole region assumes text fills a fair share of
+    # its box, and headings do not: measured on a real capture, "Start free. Keep
+    # what makes you sharper." -- 44px bold, near-black on near-white, across a
+    # 620x100 box holding two lines -- came back at 1.06:1, because glyph strokes
+    # cover under a tenth of that area and the tenth percentile was still
+    # background. Sparse text is the case the number matters most for; a heading a
+    # sighted reader can obviously read must not measure as failing.
+    #
+    # So find the marks first, then take the percentile among those: the darkest
+    # part of the ink, which is the glyph core a reader actually resolves rather
+    # than its antialiased edge. Below a floor of differing pixels there is nothing
+    # to call ink and the old whole-region reading stands, which is what keeps a
+    # genuinely flat region flat and hands it to the surround comparison below.
+    marks = flat[flat < paper - _INK_SEPARATION]
+    ink = (float(np.percentile(marks, _INK_PERCENTILE))
+           if marks.size >= max(4, int(_MIN_MARK_SHARE * flat.size))
+           else float(np.percentile(flat, _INK_PERCENTILE)))
 
     # A region of one flat colour has no internal contrast to measure, and taking
     # its deciles gives 1.0:1 for a solid black button on white -- which reads as
