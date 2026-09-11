@@ -892,3 +892,50 @@ test("a run says what it learned and how often the gate fired", async () => {
   assert.equal(end.data.adherence.judged, judged.length);
   assert.equal(typeof end.data.adherence.regenerated, "number");
 });
+
+test("running out of the action budget is not the page blocking anyone", async () => {
+  // A live report headlined "The journey was blocked before completion", severity
+  // critical, over a run whose own record says "Still going after 16 actions
+  // without finishing". Nothing had blocked that person -- the harness's budget
+  // ran out while they were still working. "Blocked" is a claim about the page,
+  // and only giving up or walking away supports it.
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, maxSteps: 2,
+    perception: { available: false },
+    actor: async () => ({ visible: "a link", expectation: "prices",
+      action: { type: "CLICK", target: "e1" } }),
+  });
+
+  const result = await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(result.status, "inconclusive");
+  const blocked = result.criteria.find((item) => item.id === "tasks-blocked");
+  // Not "met": that is what the report reads as a critical blocker.
+  assert.equal(blocked.result, "not-observed");
+  assert.match(blocked.explanation, /not established/);
+  // The criterion vocabulary is "met" | "not-met" | "blocked" | "not-observed" --
+  // the verdict status words are rejected by schema validation and abort the
+  // whole journey (see CRITERION_RESULT_VOCABULARY in journeytest.js).
+  for (const criterion of result.criteria) {
+    assert.ok(["met", "not-met", "blocked", "not-observed"].includes(criterion.result),
+      `${criterion.result} is not a criterion result`);
+  }
+  // What is true is still said: they did not finish.
+  assert.equal(result.criteria.find((item) => item.id === "tasks-completed").result, "not-met");
+});
+
+test("a persona who walks away did meet the blocked criterion", async () => {
+  // The other side of it: giving up or walking away is the page costing somebody
+  // the journey, and that is exactly what the criterion is for.
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, maxSteps: 6,
+    perception: { available: false },
+    actor: async () => ({ visible: "", expectation: "",
+      action: { type: "GIVE_UP", content: "not worth it" } }),
+  });
+
+  const result = await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(result.status, "failed");
+  assert.equal(result.criteria.find((item) => item.id === "tasks-blocked").result, "met");
+});

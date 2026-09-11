@@ -599,8 +599,21 @@ class PersonaDirector {
         { id: passCriterion, result: completed ? "met" : "not-met",
           explanation: completed ? summary : `${summary} The tasks were not completed.`,
           evidence: { screenshot: evidence, url, observation: summary } },
-        { id: failCriterion, result: completed ? "not-met" : "met",
-          explanation: completed ? "Nothing blocked this person." : summary,
+        // "Blocked" is a claim about the page, and only two of the four endings
+        // support it: they gave up, or they walked away. Running out of the
+        // harness's own step budget is not one -- a live report headlined "The
+        // journey was blocked before completion", severity critical, over a run
+        // whose record says "Still going after 16 actions without finishing".
+        // Nothing had blocked that person; the budget ran out while they were
+        // still working. The pass criterion already says they did not finish,
+        // which is true and is what the report should lead with.
+        { id: failCriterion, result: ending.type === "exhausted" ? "not-observed"
+            : completed ? "not-met" : "met",
+          explanation: completed ? "Nothing blocked this person."
+            : ending.type === "exhausted"
+              ? `${summary} They had not given up when the run's action budget ran out, so `
+                + "whether the page would have blocked them is not established."
+              : summary,
           evidence: { screenshot: evidence, url, observation: summary } },
       ],
       blockers: completed ? [] : [{
