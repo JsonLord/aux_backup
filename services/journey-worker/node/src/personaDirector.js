@@ -408,7 +408,16 @@ class PersonaDirector {
     // in the run, and the one the verdict cites.
     await this.capture(browser, context, `left-${ending.type}`);
     await recorder.record("agent.end", `Persona finished: ${ending.type}`, { ...ending, steps,
-      finalState: controller.state });
+      finalState: controller.state,
+      // What this run leaves behind for the next one. Recorded at the end as well
+      // as the start, because "the persona gets better with each action" is a
+      // claim about a difference between two runs, and only the start was ever
+      // written down -- so there was nothing to compare it against.
+      memory: this.memory ? this.memory.describe() : null,
+      // How often an action had to be sent back for not sounding like this person.
+      // A gate that never fires and a gate that is switched off look identical in
+      // a report that does not say which.
+      adherence: this.gate?.stats ? { ...this.gate.stats } : null });
     return this.verdict(ending, controller, journey, steps, lastUrl);
   }
 

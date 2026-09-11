@@ -89,10 +89,18 @@ if [ -d /data ] && ( : > /data/.aux-write-test ) 2>/dev/null; then
   export PERSONA_DATABASE_PATH="/data/control-plane/personas.sqlite3"
   export ARTIFACT_ROOT="/data/artifacts"
   export JOURNEY_ARTIFACT_ROOT="/data/artifacts/journeys"
+  export AUX_MEMORY_ROOT="/data/control-plane/persona-memory"
   echo "[start-live] Using persistent storage at /data for the control-plane DB and artifacts."
 else
+  export AUX_MEMORY_ROOT="${AUX_MEMORY_ROOT:-${ARTIFACT_ROOT}/persona-memory}"
   echo "[start-live] No writable /data mount found; using ephemeral in-container storage ($ARTIFACT_ROOT) -- reports will not survive a Space restart."
 fi
+# Where each persona's bank of what it has learned about itself lives. Unset, the
+# bank is in-memory for one run and thrown away -- which is every run starting from
+# nothing, so the lessons a run earns never reach the next one and the bank cannot
+# do the one thing it is for. A live run confirmed it: `episodes: 0, lessons: [],
+# persisted: false` at the start of a run that went on to be judged eight times.
+mkdir -p "$AUX_MEMORY_ROOT" 2>/dev/null || true
 
 uvicorn apps.api.main:app --host 127.0.0.1 --port 8000 & pids+=("$!")
 uvicorn services.persona_service.main:app --host 127.0.0.1 --port 8090 & pids+=("$!")

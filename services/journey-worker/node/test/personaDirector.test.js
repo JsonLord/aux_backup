@@ -860,3 +860,35 @@ test("a capture taken while the page moved is not measured at all", async () => 
   assert.notEqual(actorSaw[0], "[e1] link Pricing",
     "the step falls back to the accessibility tree");
 });
+
+test("a run says what it learned and how often the gate fired", async () => {
+  // "The persona gets better with each action" is a claim about a difference
+  // between two runs, and only the start of a run was ever written down -- so
+  // there was nothing to compare it against. A live run recorded
+  // `episodes: 0, lessons: [], persisted: false` at the start and nothing at all
+  // at the end, having been judged eight times in between.
+  const judged = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    perception: { available: false },
+    actor: Object.assign(
+      async () => ({ visible: "a link", expectation: "prices",
+        action: { type: "CLICK", target: "e1" } }),
+      { judgeAdherence: async () => { judged.push(1); return JSON.stringify({ score: 9, flaw: "" }); } }),
+    maxSteps: 2,
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const start = recorder.events.find((event) => event.type === "agent.start");
+  const end = recorder.events.find((event) => event.type === "agent.end");
+  assert.ok(start.data.memory, "what they knew arriving");
+  assert.ok(end.data.memory, "and what they know leaving -- the half that was missing");
+  assert.ok(end.data.memory.episodes >= start.data.memory.episodes,
+    "a judged action is an episode this run leaves behind");
+  // A gate that never fires and a gate that is switched off look identical in a
+  // report that does not say which.
+  assert.ok(end.data.adherence, "how often an action had to be sent back is part of the record");
+  assert.equal(end.data.adherence.judged, judged.length);
+  assert.equal(typeof end.data.adherence.regenerated, "number");
+});
