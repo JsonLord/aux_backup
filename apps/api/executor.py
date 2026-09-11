@@ -1319,6 +1319,18 @@ class JobExecutor:
         forty identical findings would bury the rest of the report.
         """
         groups: dict[tuple, dict[str, Any]] = {}
+        # Every element that resolved on any capture of any run. A heading is not
+        # drawn black on one step and invisible on the next: when the same element
+        # reads legible once and blank once, the blank capture caught it mid-render,
+        # and the one that found text is the one to believe. A live report published
+        # "Fails WCAG AA contrast: 'Individual' -- 1.05:1, high" against a
+        # pricing-card heading that is plainly dark, from a capture taken while the
+        # card was still fading in.
+        ever_legible = {selector
+                        for journey in journeys
+                        for event in journey.get("timeline") or []
+                        if event.get("type") == "persona.perception"
+                        for selector in ((event.get("data") or {}).get("legible") or [])}
         for journey in journeys:
             run_id = journey.get("runId")
             persona_id = journey.get("profileId") or journey.get("testerProfileId")
@@ -1333,6 +1345,8 @@ class JobExecutor:
                 for kind, items in (("notPerceived", data.get("notPerceived") or []),
                                     ("missed", data.get("missedWhatTheyCameFor") or [])):
                     for item in items:
+                        if kind == "notPerceived" and item.get("selector") in ever_legible:
+                            continue
                         key = (kind, item.get("selector"))
                         group = groups.setdefault(key, {
                             "kind": kind, "item": item, "steps": 0, "personas": [], "eyes": {},

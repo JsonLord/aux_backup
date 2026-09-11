@@ -2541,3 +2541,49 @@ def test_a_quote_is_attributed_to_whoever_actually_said_it():
         said_by = quote["quote"].split()[0]
         assert quote["personaName"].startswith(said_by), (
             f'{quote["personaName"]} is credited with "{quote["quote"]}"')
+
+
+def test_an_element_that_resolved_on_another_capture_is_not_called_unreadable():
+    """A heading is not drawn black on one step and invisible on the next. When the
+    same element reads legible on one capture and blank on another, the blank one
+    caught it mid-render -- and the one that found text is the one to believe.
+
+    A live report published "Fails WCAG AA contrast: 'Individual' -- 1.05:1, high"
+    against a pricing-card heading that is plainly dark, from a capture taken while
+    the card was still fading in: ink luminance 0.9437 against paper at 0.993, both
+    near-white, and no marks found at all."""
+    mid_animation = {"selector": "e19", "role": "heading", "name": "Individual",
+                     "box": {"x": 172, "y": 426, "width": 262, "height": 36},
+                     "reason": "too little contrast to make anything out",
+                     "internalContrast": 0.0235, "edgeContrast": 0.0353, "ink": 0.0,
+                     "contrast": {"ratio": 1.05, "required": 3, "passes": False,
+                                  "measured": "text against its own background"}}
+
+    def step(unreadable, legible):
+        return {"type": "persona.perception", "data": {
+            "eyes": RARE_EYES,
+            "scan": {"pattern": "spotted", "fixationBudget": 6, "why": ["in a hurry"]},
+            "counts": {"elements": 15, "fixated": 6},
+            "notPerceived": unreadable, "notLookedAt": [], "missedWhatTheyCameFor": [],
+            "legible": legible}}
+
+    # Blank on one capture, resolved on another: no finding.
+    settled = JobExecutor._pain_points_from_perception([{
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [step([mid_animation], []), step([], ["e19"])]}])
+    assert settled == []
+
+    # Never resolved anywhere: still reported, because that is a page that never
+    # draws it and the guard must not swallow the real case.
+    never = JobExecutor._pain_points_from_perception([{
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [step([mid_animation], []), step([mid_animation], ["e20"])]}])
+    assert len(never) == 1
+    assert "Individual" in never[0]["title"]
+
+    # And a different run resolving it is enough: the page is the same page.
+    across = JobExecutor._pain_points_from_perception([
+        {"runId": "run_1", "profileId": "persona_1", "timeline": [step([mid_animation], [])]},
+        {"runId": "run_2", "profileId": "persona_2", "timeline": [step([], ["e19"])]},
+    ])
+    assert across == []

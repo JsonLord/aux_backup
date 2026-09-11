@@ -249,6 +249,16 @@ class PersonaDirector {
             // Present, and nothing legible where it lives. This is a defect in
             // the page, and no check against the DOM can find it.
             notPerceived: perception.notPerceived,
+            // Everything that did resolve on this capture, by selector. Cheap to
+            // carry and it settles a question nothing else can: a heading is not
+            // drawn black on one step and invisible on the next, so when the same
+            // element reads legible on one capture and blank on another, the blank
+            // one caught it mid-render. Without this the report had no way to tell
+            // a page that never draws something from a capture taken while it was
+            // still arriving -- and published "Fails WCAG AA contrast: 'Individual'
+            // -- 1.05:1" against a pricing-card heading that is plainly dark.
+            legible: [...(perception.perceived || []).map((item) => item.selector),
+                      ...(perception.notLookedAt || []).map((item) => item.selector)],
             // Legible, and this person never got to it. Not a defect by itself:
             // it is the answer to "why did they not click the thing that was
             // right there", which is the question a report exists to answer.
