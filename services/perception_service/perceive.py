@@ -204,8 +204,17 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
     # Said out loud rather than acted on quietly: the caller decides what a capture
     # it cannot trust is worth, and a reader of the run record can see that a
     # measurement was withheld rather than that a page was clean.
+    # And the two together, which is the question the guard is actually asking.
+    # Splitting the failures across two buckets let a bad capture through: a live
+    # run measured 14 blank and 4 illegible out of 29, so 62% of the capture did
+    # not resolve -- and 14/29 is 0.483 while 4/15 is 0.267, both under the bar.
+    # It published the entire navigation bar as undrawn. How a capture's failures
+    # divide says which sentence to print; it does not change whether most of the
+    # capture resolved.
+    unresolved_share = (len(not_perceived) / measured) if measured else 0.0
     enough = measured >= MIN_ELEMENTS_TO_JUDGE
-    trustworthy = not (enough and (blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
+    trustworthy = not (enough and (unresolved_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
+                                   or blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
                                    or illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE))
 
     fixations = scan(candidates, size, scanner)
@@ -237,6 +246,7 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         "capture": {"trustworthy": trustworthy, "measured": measured,
                     "illegibleShare": round(illegible_share, 4),
                     "blankShare": round(blank_share, 4),
+                    "unresolvedShare": round(unresolved_share, 4),
                     "reason": "" if trustworthy else
                               (f"{blank} of {measured} regions the tree says hold something had no "
                                f"ink in them at all, which reads as boxes and pixels taken from "
@@ -244,7 +254,12 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                                if blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE else
                                f"{drawn_illegible} of {with_ink} regions that were drawn measured "
                                f"illegible, which reads as a capture that does not line up with "
-                               f"the boxes rather than as a page")},
+                               f"the boxes rather than as a page"
+                               if illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE else
+                               f"{len(not_perceived)} of {measured} regions did not resolve at all "
+                               f"-- {blank} with no ink and {drawn_illegible} drawn but illegible "
+                               f"-- which is too much of one capture to stand behind however the "
+                               f"failures divide")},
         # Legible, but this person never got to it.
         "notLookedAt": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
                          "box": item["box"], "salience": item["salience"],

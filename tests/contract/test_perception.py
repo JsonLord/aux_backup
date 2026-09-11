@@ -664,3 +664,53 @@ def test_two_darks_that_differ_are_still_measured():
     assert measured["ratio"] is not None, "two different darks are two colours"
     assert measured["passes"] is False
     assert 1.0 < measured["ratio"] < 2.0
+
+
+def test_a_capture_that_failed_two_ways_at_once_is_still_refused():
+    """Splitting the failures across two buckets let a bad capture through. A live
+    run measured 14 blank and 4 illegible out of 29 -- 62% of the capture did not
+    resolve -- and 14/29 is 0.483 while 4/15 is 0.267, both under the bar. It
+    published the site's entire navigation bar as undrawn.
+
+    How a capture's failures divide says which sentence to print; it does not
+    change whether most of the capture resolved."""
+    import base64
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from services.perception_service.perceive import perceive
+
+    # 11 legible, 14 blank, 4 drawn-but-pale -- the live proportions.
+    image = Image.new("RGB", (1280, 1400), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    boxes = []
+    for index in range(29):
+        top = 20 + index * 46
+        if index < 11:
+            ink = (0, 0, 0)
+        elif index < 25:
+            ink = None                      # nothing drawn here at all
+        else:
+            ink = (249, 249, 249)           # drawn, far too pale
+        if ink:
+            for offset in range(0, 180, 6):
+                draw.rectangle([100 + offset, top, 102 + offset, top + 16], fill=ink)
+        boxes.append({"selector": f"e{index}", "role": "link", "name": f"Item {index}",
+                      "fontPx": 16, "fontWeight": 400,
+                      "box": {"x": 100, "y": top, "width": 180, "height": 24}})
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    result = perceive(image_base64=base64.b64encode(buffer.getvalue()).decode(),
+                      elements=boxes, abilities={"vision": {"acuity": 1.0}})
+    capture = result["capture"]
+
+    # Neither specific share clears the bar on its own...
+    assert capture["blankShare"] <= 0.5
+    assert capture["illegibleShare"] <= 0.5
+    # ...and together they are most of the capture.
+    assert capture["unresolvedShare"] > 0.5
+    assert capture["trustworthy"] is False
+    assert "however the failures divide" in capture["reason"]
+    assert result["notPerceived"] == []
