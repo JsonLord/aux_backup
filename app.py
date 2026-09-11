@@ -3,7 +3,7 @@ import sys
 
 import base64
 from io import BytesIO
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 import subprocess
 import importlib.util
 import re
@@ -2651,6 +2651,63 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS,
             sid.change(fn=sync_session_ids, inputs=[sid], outputs=session_id_sync_list)
             sid.change(fn=lambda x: x, inputs=[sid], outputs=[active_session_state])
 
+# The provider answered, or did not, as of this many seconds ago. Readiness is
+# polled -- by a deploy script, by a load balancer, by anyone watching -- and a
+# round trip to the model on every poll would be both slow and rude.
+PROVIDER_PROBE_TTL_S = 30.0
+
+
+def build_model_provider_probe(ttl_s: float = PROVIDER_PROBE_TTL_S):
+    """Whether the model endpoint answers, rather than whether a key is set.
+
+    `liveExecutionReady` was computed from `bool(os.getenv("OPENAI_API_KEY"))`:
+    the presence of a string in the environment. Every other dependency in the
+    readiness endpoint gets a real round trip to /healthz; the one thing no run
+    can proceed without got a truthiness test.
+
+    So the Space reported `status: ready`, `personaRuntime: ok`,
+    `liveExecutionReady: true` through four consecutive cycles in which it could
+    not compile a single persona, and the first anyone knew of it was a 500 from
+    a workflow call. A check that cannot fail is not a check.
+
+    /models is the OpenAI-compatible discovery route: it costs no tokens, and a
+    provider that serves it is a provider that is listening. The key goes where
+    it already goes -- in the Authorization header, to the configured endpoint --
+    and only the scheme and host are ever reported back.
+    """
+    held = {"at": 0.0, "result": None}
+
+    def probe():
+        now = time.monotonic()
+        if held["result"] is not None and now - held["at"] < ttl_s:
+            return held["result"]
+        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
+        base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
+                    or os.getenv("BLABLADOR_BASE_URL")
+                    or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
+        # Scheme and host only. A base URL can carry a key in a query string, and
+        # readiness is the most public thing this service serves.
+        split = urlsplit(base_url)
+        where = f"{split.scheme}://{split.netloc}" if split.netloc else "(not configured)"
+        if not api_key:
+            result = {"status": "unconfigured", "endpoint": where,
+                      "error": "no OPENAI_API_KEY or BLABLADOR_API_KEY in the environment"}
+        else:
+            try:
+                response = requests.get(f"{base_url}/models",
+                                        headers={"authorization": f"Bearer {api_key}"}, timeout=8)
+                response.raise_for_status()
+                result = {"status": "ok", "endpoint": where}
+            except requests.RequestException as error:
+                # str() on a requests failure carries the URL but never the
+                # Authorization header, so this cannot leak the key.
+                result = {"status": "unreachable", "endpoint": where, "error": str(error)[:300]}
+        held.update(at=now, result=result)
+        return result
+
+    return probe
+
+
 if __name__ == "__main__":
     print("Starting workspace-scoped UX analysis application")
 
@@ -2812,6 +2869,8 @@ if __name__ == "__main__":
         return {"session": session, "personas": personas, "job": completed,
                 "artifacts": session_client.list_artifacts(session["session_id"])}
 
+    model_provider_probe = build_model_provider_probe()
+
     @fastapi_app.get("/api/readiness")
     def readiness():
         services = {}
@@ -2828,11 +2887,17 @@ if __name__ == "__main__":
             except requests.RequestException as error:
                 services[name] = {"status": "unavailable", "error": str(error)}
         model_configured = bool(os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY"))
+        provider = model_provider_probe()
+        services_ok = all(item.get("status") in {"ok", "ready"} for item in services.values())
         return {
-            "status": "ready" if all(item.get("status") in {"ok", "ready"} for item in services.values()) else "degraded",
+            # A run needs the model as much as it needs any of the four services,
+            # so the provider counts towards the overall word the same way they do.
+            "status": "ready" if services_ok and provider["status"] == "ok" else "degraded",
             "services": services,
+            "modelProvider": provider,
             "modelCredentialsConfigured": model_configured,
-            "liveExecutionReady": model_configured and services.get("personaRuntime", {}).get("tinytroupeAvailable", False)
+            "liveExecutionReady": provider["status"] == "ok"
+                and services.get("personaRuntime", {}).get("tinytroupeAvailable", False)
                 and services.get("journeyWorker", {}).get("engine") == "journeytest",
         }
 
