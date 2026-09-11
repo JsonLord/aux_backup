@@ -153,12 +153,30 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                            "goalAffinity": goal_affinity(entry["name"], wanted, entry["role"])})
 
     measured = len(candidates) + len(not_perceived)
-    illegible_share = (len(not_perceived) / measured) if measured else 0.0
+    # Two different things look the same in a count of "illegible", and lumping
+    # them together means an animating page trips the wire meant for a misaligned
+    # capture.
+    #
+    # A region with no ink at all is the DOM and the capture disagreeing about
+    # what exists. A few of those on a page with fade-in or type-out animations is
+    # ordinary; most of the page being those means the boxes and the pixels came
+    # from different states and nothing measured here means anything.
+    #
+    # A region that was drawn and cannot be read is a measurement. Most of a page
+    # measuring that way is the other kind of impossible: a page where most of
+    # what is on it cannot be read is a blank page, and a run that clicked its way
+    # through one is proof it was not blank.
+    blank = sum(1 for item in not_perceived if item.get("nothingDrawn"))
+    drawn_illegible = len(not_perceived) - blank
+    with_ink = len(candidates) + drawn_illegible
+    blank_share = (blank / measured) if measured else 0.0
+    illegible_share = (drawn_illegible / with_ink) if with_ink else 0.0
     # Said out loud rather than acted on quietly: the caller decides what a capture
     # it cannot trust is worth, and a reader of the run record can see that a
     # measurement was withheld rather than that a page was clean.
-    trustworthy = not (measured >= MIN_ELEMENTS_TO_JUDGE
-                       and illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE)
+    enough = measured >= MIN_ELEMENTS_TO_JUDGE
+    trustworthy = not (enough and (blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
+                                   or illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE))
 
     fixations = scan(candidates, size, scanner)
     # Matched by selector, not by object identity: scan() returns a copy of each
@@ -188,10 +206,15 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         # checked rather than taken.
         "capture": {"trustworthy": trustworthy, "measured": measured,
                     "illegibleShare": round(illegible_share, 4),
+                    "blankShare": round(blank_share, 4),
                     "reason": "" if trustworthy else
-                              (f"{len(not_perceived)} of {measured} elements measured illegible, "
-                               f"which reads as a capture that does not line up with the boxes "
-                               f"rather than as a page")},
+                              (f"{blank} of {measured} regions the tree says hold something had no "
+                               f"ink in them at all, which reads as boxes and pixels taken from "
+                               f"different states of the page"
+                               if blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE else
+                               f"{drawn_illegible} of {with_ink} regions that were drawn measured "
+                               f"illegible, which reads as a capture that does not line up with "
+                               f"the boxes rather than as a page")},
         # Legible, but this person never got to it.
         "notLookedAt": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
                          "box": item["box"], "salience": item["salience"],

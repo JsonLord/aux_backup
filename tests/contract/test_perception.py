@@ -456,10 +456,15 @@ def test_a_capture_that_does_not_line_up_with_its_boxes_reports_nothing_unreadab
                       elements=_boxes(12), abilities={"vision": {"acuity": 0.95}})
 
     assert result["capture"]["trustworthy"] is False
-    assert result["capture"]["illegibleShare"] > 0.5
-    # The share is reported either way, so the judgement can be checked.
+    # A blank capture is the DOM and the pixels disagreeing about what exists, and
+    # is counted separately from regions that were drawn and cannot be read: an
+    # animating page trips the first and a genuinely pale page trips the second,
+    # and lumping them together means neither number says what it means.
+    assert result["capture"]["blankShare"] > 0.5
+    assert result["capture"]["illegibleShare"] == 0.0
+    # The shares are reported either way, so the judgement can be checked.
     assert result["capture"]["measured"] == 12
-    assert "does not line up with the boxes" in result["capture"]["reason"]
+    assert "different states of the page" in result["capture"]["reason"]
     # Nothing is published as unreadable from a capture that cannot be trusted --
     # a confidently wrong report is worse than one with a gap.
     assert result["notPerceived"] == []
@@ -503,3 +508,35 @@ def test_too_few_elements_to_judge_a_capture_is_not_a_verdict_on_it():
     # page really can all be invisible.
     assert len(result["notPerceived"]) == 3
     assert result["counts"]["notPerceived"] == 3
+
+
+def test_a_page_drawn_too_pale_to_read_is_also_refused_as_a_capture():
+    """The other half of the guard, and a different impossibility. A page where
+    most of what is drawn on it cannot be read is a blank page, and a run that
+    clicked its way through one is proof it was not blank."""
+    import base64
+    import io
+
+    from PIL import Image, ImageDraw
+
+    from services.perception_service.perceive import perceive
+
+    # Real ink, in a grey nobody could read, everywhere the boxes say to look.
+    image = Image.new("RGB", (1280, 577), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for index in range(12):
+        top = 20 + index * 40
+        for offset in range(0, 180, 6):
+            draw.rectangle([100 + offset, top, 102 + offset, top + 16], fill=(249, 249, 249))
+    buffer = io.BytesIO()
+    image.save(buffer, format="PNG")
+
+    result = perceive(image_base64=base64.b64encode(buffer.getvalue()).decode(),
+                      elements=_boxes(12), abilities={"vision": {"acuity": 1.0}})
+
+    assert result["capture"]["trustworthy"] is False
+    assert result["capture"]["illegibleShare"] > 0.5
+    # Drawn, so not blank: the two counts do not overlap.
+    assert result["capture"]["blankShare"] < 0.5
+    assert "does not line up with the boxes" in result["capture"]["reason"]
+    assert result["notPerceived"] == []
