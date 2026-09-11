@@ -1081,3 +1081,79 @@ test("a target nothing looked at keeps its raw name rather than vanishing", () =
   assert.equal(nameOf("e99", { perceived: [{ selector: "e18", name: "Monthly" }] }), "");
   assert.equal(nameOf("e18", null), "", "no perception, no name -- and no crash");
 });
+
+test("a walk that failed costs this step, not the next one as well", async () => {
+  // A walk taken the instant an action lands can catch the page still moving, and
+  // falls back to the tree -- the guard working as designed. Carrying that forward
+  // spent the next turn's look too: cycle 15 scrolled three times and four
+  // consecutive steps went by with no perception, two of them on a settled page.
+  let walks = 0;
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [] };
+    },
+  };
+  const actor = scriptedActor([
+    { type: "SCROLL", target: "", visible: "a page", expectation: "more of it" },
+    { type: "CLICK", target: "e1", visible: "a link", expectation: "prices" },
+    { type: "DONE", content: "found it" },
+  ]);
+  actor.reflect = async () => ({ observed: "", matched: "yes", gap: "" });
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, actor,
+    // The walk right after the scroll catches the page mid-motion. Every other
+    // walk is clean.
+    walk: async () => {
+      walks += 1;
+      const stillMoving = walks === 2;
+      return { elements: [{ selector: "e1", role: "link", name: "Pricing",
+        box: { x: 0, y: 0, width: 6, height: 2 } }],
+        viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+        refs: {}, snapshot: "", scrollY: 0, moved: stillMoving };
+    },
+    frames: () => [],
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const looked = recorder.events.filter((event) => event.type === "persona.perception");
+  assert.equal(looked.length, 3,
+    "the step after the failed walk looks again rather than inheriting the failure");
+});
+
+test("the record says which view answered the question", async () => {
+  // An expectation formed from perception and tested against the tree is the
+  // comparison that invented three price gaps in cycle 14, and nothing anywhere
+  // said which view either side came from -- so it read as one measurement
+  // disagreeing with itself.
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [] };
+    },
+  };
+  const actor = scriptedActor([
+    { type: "CLICK", target: "e1", visible: "a link", expectation: "prices" },
+    { type: "DONE", content: "found it" },
+  ]);
+  actor.reflect = async () => ({ observed: "prices", matched: "yes", gap: "" });
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, actor,
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing", box: { x: 0, y: 0, width: 6, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    frames: () => [],
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const reflected = recorder.events.find((event) => event.type === "persona.reflection");
+  assert.equal(reflected.data.decidedFrom, "perceived");
+  assert.equal(reflected.data.judgedAgainst, "perceived",
+    "both sides of the comparison are the same kind of looking");
+});

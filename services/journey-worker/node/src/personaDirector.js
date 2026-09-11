@@ -391,9 +391,18 @@ class PersonaDirector {
       // concluded three times over that "the paragraph detailing the £20 per user
       // per month pricing was not present". Frustration reached 1.00 and the
       // report led on a fault the page does not have.
+      let afterSeen = null;
       if (performed.acted) {
-        pendingSeen = await this.look(after, tasks);
+        afterSeen = await this.look(after, tasks);
         pending = after;
+        // Only worth carrying if it is worth more than looking again. A walk taken
+        // the instant an action lands can catch the page still moving, and then it
+        // falls back to the tree -- correctly, that is the guard working. Carrying
+        // that forward spent the next turn's look as well: cycle 15 scrolled three
+        // times and four consecutive steps went by with no perception at all, two
+        // of them on a page that had long since come to rest. A failed look costs
+        // this step. It must not cost the next one.
+        if (afterSeen.perception) pendingSeen = afterSeen;
       }
       if (after.url && after.url !== lastUrl) {
         await this.capture(browser, context, `page-${steps}`);
@@ -411,14 +420,22 @@ class PersonaDirector {
       const reflection = decision.expectation && typeof this.actor.reflect === "function"
         ? await this.actor.reflect({ profile: this.profile, expectation: decision.expectation,
             action: decision.action, targetName: nameOf(decision.action.target, perception),
-            observation: (performed.acted ? pendingSeen?.observation : observation)
+            observation: (performed.acted ? afterSeen?.observation : observation)
               || observationFrom(after.text, this.abilities) })
         : null;
       if (reflection) {
         await recorder.record("persona.reflection",
           reflection.gap || reflection.observed || `expectation ${reflection.matched}`, {
             expected: decision.expectation, observed: reflection.observed,
-            matched: reflection.matched, gap: reflection.gap });
+            matched: reflection.matched, gap: reflection.gap,
+            // Which view answered the question. An expectation formed from
+            // perception and tested against the tree is the comparison that
+            // invented three price gaps in cycle 14, and nothing in the record
+            // said which view either side came from -- so it read as one
+            // measurement disagreeing with itself. Same-kind or not, say so.
+            judgedAgainst: (performed.acted ? afterSeen : { perception })?.perception
+              ? "perceived" : "tree",
+            decidedFrom: perception ? "perceived" : "tree" });
       }
 
       const applied = controller.apply(
