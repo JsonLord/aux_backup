@@ -81,6 +81,10 @@ const MAX_REAL_WAIT_MS = 8000;
  * guess bounded by a constant.
  */
 const MAX_SCAN_MS = 20000;
+// A scroll animation is over long before this. Long enough that a walk which
+// caught the page mid-motion gets a still one on the second try, short enough
+// that a step does not notice paying it.
+const LET_IT_COME_TO_REST_MS = 700;
 
 const sleep = (ms) => new Promise((resolve) => {
   const timer = setTimeout(resolve, Math.max(0, ms));
@@ -394,6 +398,14 @@ class PersonaDirector {
       let afterSeen = null;
       if (performed.acted) {
         afterSeen = await this.look(after, tasks);
+        // A walk that lands on a moving page falls back, correctly. But the thing
+        // moving it is usually a scroll animation that is over in a moment, and a
+        // step that scrolled is exactly the step most likely to hit this. Wait
+        // once and look again rather than spend the turn without eyes.
+        if (!afterSeen.perception && perception) {
+          await this.sleep(LET_IT_COME_TO_REST_MS);
+          afterSeen = await this.look(after, tasks);
+        }
         pending = after;
         // Only worth carrying if it is worth more than looking again. A walk taken
         // the instant an action lands can catch the page still moving, and then it
@@ -417,7 +429,25 @@ class PersonaDirector {
       // Reflect: did what arrived match what was expected? A separate, factual
       // question, so the answer can be wrong -- which is what makes the feeling
       // that follows it mean something.
-      const reflection = decision.expectation && typeof this.actor.reflect === "function"
+      // An expectation formed from what this person could see, tested against the
+      // accessibility tree, is not a test -- it is two descriptions of different
+      // things, and the difference between them arrives as disappointment. Cycle
+      // 16 lost the run to it: two scrolls whose post-action walk fell back
+      // produced "No description of the company's product or target audience is
+      // present" about a page whose opening paragraph describes exactly that, and
+      // three consecutive false failures took the persona past its tolerance.
+      // When there is no comparable view, the honest answer is that nothing was
+      // observed -- not that the page disappointed someone.
+      const judgedAgainst = (performed.acted ? afterSeen : { perception })?.perception
+        ? "perceived" : "tree";
+      const decidedFrom = perception ? "perceived" : "tree";
+      const comparable = judgedAgainst === decidedFrom;
+      if (!comparable && decision.expectation) {
+        await recorder.record("persona.reflection_unavailable",
+          "Could not see the page the same way twice, so nothing was concluded from it",
+          { expected: decision.expectation, decidedFrom, judgedAgainst, step: steps });
+      }
+      const reflection = comparable && decision.expectation && typeof this.actor.reflect === "function"
         ? await this.actor.reflect({ profile: this.profile, expectation: decision.expectation,
             action: decision.action, targetName: nameOf(decision.action.target, perception),
             observation: (performed.acted ? afterSeen?.observation : observation)
@@ -428,14 +458,12 @@ class PersonaDirector {
           reflection.gap || reflection.observed || `expectation ${reflection.matched}`, {
             expected: decision.expectation, observed: reflection.observed,
             matched: reflection.matched, gap: reflection.gap,
-            // Which view answered the question. An expectation formed from
-            // perception and tested against the tree is the comparison that
-            // invented three price gaps in cycle 14, and nothing in the record
-            // said which view either side came from -- so it read as one
-            // measurement disagreeing with itself. Same-kind or not, say so.
-            judgedAgainst: (performed.acted ? afterSeen : { perception })?.perception
-              ? "perceived" : "tree",
-            decidedFrom: perception ? "perceived" : "tree" });
+            // Which view answered the question. Both sides are the same kind of
+            // looking or the reflection does not happen at all, but the record
+            // says so rather than leaving it to be inferred: this comparison was
+            // wrong for fourteen cycles precisely because nothing anywhere said
+            // where either side came from.
+            judgedAgainst, decidedFrom });
       }
 
       const applied = controller.apply(

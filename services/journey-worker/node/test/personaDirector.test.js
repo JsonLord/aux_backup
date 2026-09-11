@@ -1157,3 +1157,113 @@ test("the record says which view answered the question", async () => {
   assert.equal(reflected.data.judgedAgainst, "perceived",
     "both sides of the comparison are the same kind of looking");
 });
+
+test("a page that cannot be seen the same way twice concludes nothing", async () => {
+  // Cycle 16 lost a run to this. Two scrolls whose post-action walk fell back
+  // produced "No description of the company's product or target audience is
+  // present" -- about a page whose opening paragraph describes exactly that --
+  // and three consecutive false failures took the persona past its tolerance.
+  let reflected = 0;
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [] };
+    },
+  };
+  const actor = scriptedActor([
+    { type: "SCROLL", target: "", visible: "a page", expectation: "what they actually sell" },
+    { type: "DONE", content: "gave up on that" },
+  ]);
+  actor.reflect = async () => { reflected += 1; return { observed: "nav links", matched: "no",
+    gap: "no description of the product is present" }; };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, actor,
+    // Every walk after the first catches the page still moving.
+    walk: (() => {
+      let n = 0;
+      return async () => {
+        n += 1;
+        return { elements: [{ selector: "e1", role: "link", name: "Pricing",
+          box: { x: 0, y: 0, width: 6, height: 2 } }],
+          viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+          refs: {}, snapshot: "", scrollY: 0, moved: n > 1 };
+      };
+    })(),
+    frames: () => [],
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.equal(reflected, 0, "no comparable view, so no conclusion drawn from one");
+  const said = recorder.events.find((event) => event.type === "persona.reflection_unavailable");
+  assert.ok(said, "and the record says why, rather than a step quietly missing its reflection");
+  assert.equal(said.data.decidedFrom, "perceived");
+  assert.equal(said.data.judgedAgainst, "tree");
+  assert.ok(!recorder.events.some((event) => event.type === "persona.reflection"),
+    "a gap nobody could observe is not a gap");
+});
+
+test("a run with no eyes at all still reflects, because both sides are the tree", async () => {
+  // The rule is that the two views match, not that perception is present. A
+  // tree-only run compares tree with tree, which is a comparison.
+  let reflected = 0;
+  const actor = scriptedActor([
+    { type: "CLICK", target: "e1", visible: "a link", expectation: "prices" },
+    { type: "DONE", content: "found it" },
+  ]);
+  actor.reflect = async () => { reflected += 1; return { observed: "prices", matched: "yes", gap: "" }; };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, actor,
+    perception: { available: false }, frames: () => [],
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.equal(reflected, 1);
+  const reflection = recorder.events.find((event) => event.type === "persona.reflection");
+  assert.equal(reflection.data.decidedFrom, "tree");
+  assert.equal(reflection.data.judgedAgainst, "tree");
+});
+
+test("a walk that caught the page mid-scroll is given one more chance", async () => {
+  // The thing moving the page is usually a scroll animation that is over in a
+  // moment, and a step that scrolled is exactly the step most likely to hit it.
+  let walks = 0;
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [] };
+    },
+  };
+  const actor = scriptedActor([
+    { type: "SCROLL", target: "", visible: "a page", expectation: "more of it" },
+    { type: "DONE", content: "found it" },
+  ]);
+  actor.reflect = async () => ({ observed: "more of it", matched: "yes", gap: "" });
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, actor,
+    // Only the walk immediately after the scroll is spoiled.
+    walk: (() => {
+      let n = 0;
+      return async () => {
+        n += 1; walks = n;
+        return { elements: [{ selector: "e1", role: "link", name: "Pricing",
+          box: { x: 0, y: 0, width: 6, height: 2 } }],
+          viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+          refs: {}, snapshot: "", scrollY: 0, moved: n === 2 };
+      };
+    })(),
+    frames: () => [],
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.equal(walks, 3, "the spoiled walk is retried once the page has come to rest");
+  const reflection = recorder.events.find((event) => event.type === "persona.reflection");
+  assert.equal(reflection.data.judgedAgainst, "perceived",
+    "and the retry is what makes the comparison possible");
+});
