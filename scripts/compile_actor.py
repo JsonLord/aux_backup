@@ -20,6 +20,7 @@ import json
 import os
 from pathlib import Path
 import sys
+import time
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
@@ -86,7 +87,8 @@ def score_of(program, examples, metric) -> tuple[float, int, int]:
     gateway response, which is not a property of the actor being measured.
     """
     scored, total, below, lost = 0, 0.0, 0, 0
-    for example in examples:
+    started = time.monotonic()
+    for index, example in enumerate(examples, start=1):
         try:
             prediction = program(persona=example.persona, task=example.task,
                                  observation=example.observation)
@@ -97,6 +99,12 @@ def score_of(program, examples, metric) -> tuple[float, int, int]:
         scored += 1
         total += result.score
         below += int(result.score < 0.7)
+        # Said out loud, because a compile that prints nothing for an hour is
+        # indistinguishable from one that has hung -- and two of them were killed
+        # on a timeout before anyone could tell which.
+        if index % 5 == 0 or index == len(examples):
+            print(f"    {index}/{len(examples)} scored, mean {total / max(1, scored) * 10:.2f}/10, "
+                  f"{lost} unanswered, {time.monotonic() - started:.0f}s elapsed", flush=True)
     return (total / scored if scored else 0.0), below, lost
 
 
@@ -156,6 +164,8 @@ def main() -> None:
     if arguments.measure_only:
         return
 
+    print(f"compiling with GEPA (auto={arguments.auto}); this makes many more calls than the "
+          f"baseline above, so expect it to take several times as long", flush=True)
     compiled = compile_actor(examples, http_judge(base, judge_model, key),
                              reflection_lm=lm(reflection_model), auto=arguments.auto)
     after, below_after, lost_after = score_of(compiled, examples, metric)
