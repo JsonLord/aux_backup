@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from services.persona_service.actor_program import (
+from scripts.actor_program import (
     LESSON_CEILING, SCORE_SCALE, adherence_metric, adherence_prompt, episodes_as_examples,
     parse_score,
 )

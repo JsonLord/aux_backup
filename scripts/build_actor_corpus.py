@@ -4,7 +4,7 @@ Every judged action a persona has taken is already a labelled example and nobody
 had to write it: the director records what they could see and what they expected
 before acting (`persona.expectation`), and the adherence gate records how much it
 sounded like them and why (`persona.adherence`). That pair is exactly the shape
-`services/persona_service/actor_program.episodes_as_examples` consumes.
+`scripts/actor_program.episodes_as_examples` consumes.
 
 The runs are the corpus. Reading them from journey logs rather than from a live
 memory bank matters for two reasons: a bank holds one persona's history and only

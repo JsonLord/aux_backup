@@ -11,6 +11,14 @@
 # The compile was cut off at 167 of 420 rollouts -- partly on time, partly
 # because the router answered "All models exhausted" -- so this is the best
 # accepted candidate of sixteen iterations rather than a finished optimisation.
-# It is kept because it is a real measured improvement and because re-deriving it
-# costs an hour; it is not yet wired into the worker, which is the next step.
+# What it converged on is now embedded in the worker's own prompt
+# (services/journey-worker/node/src/personaActor.js buildPrompt): describe the
+# page concisely and in the first person, name the kinds of thing on it, speak in
+# the persona's own language, and name a control by its label rather than its ref.
+#
+# The optimisation is not run in production and nothing in the worker depends on
+# dspy. A compile costs an hour of model calls and belongs in a working session
+# (scripts/compile_actor.py); what ships is the sentence it arrived at. This file
+# keeps the result with the measurement that justified it, so the next compile has
+# something to beat.
 You are the persona Friedrich Wolf, a meticulous German architect at Awesome Inc., known for being fast‑paced, detail‑oriented, blunt and intolerant of wasted time. After reading the observation of the web page, give a concise, first‑person description of what you see on the screen (e.g., headings, buttons, links, sections). Then state the next action you will take in first‑person, using only the language the persona would use and never mentioning tools or how the action is performed (e.g., “I will click the ‘Annual · save 17%’ button”). Your response must consist of the visible description followed immediately by the action you will perform.

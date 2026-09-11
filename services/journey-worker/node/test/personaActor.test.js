@@ -7,7 +7,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  ACTION_TYPES, ACTION_VOCABULARY, backoffMs, completion, completionBudget, parseDecision,
+  ACTION_TYPES, ACTION_VOCABULARY, backoffMs, buildPrompt, completion, completionBudget, parseDecision,
   retryAfterMs, salvageAction,
 } = require("../src/personaActor");
 
@@ -100,4 +100,26 @@ test("the server's own Retry-After is preferred, and capped", () => {
   // An HTTP-date form resolves to a delay rather than being discarded.
   const soon = new Date(Date.now() + 4000).toUTCString();
   assert.ok(Math.abs(retryAfterMs(soon) - 4000) < 1500);
+});
+
+test("the prompt carries what GEPA found, and nothing that needs GEPA to run", () => {
+  // Four things in the instruction are measured rather than guessed: GEPA
+  // optimised it against the same adherence judge the run uses, over the corpus
+  // of judged actions the runs produced, and the best candidate scored 8.6/10
+  // against 2.67 for a bare signature. What it converged on is what is asserted
+  // here -- concision, the kinds of thing on a page, the persona's own language,
+  // and naming a control by its label rather than by its ref.
+  const { system } = buildPrompt({
+    profile: { persona: { name: "Friedrich Wolf" }, behavior: {} },
+    tasks: ["find the price"], observation: "[e17] button Annual",
+    affect: "", history: [], notLikeYou: "", constraints: "",
+  });
+
+  assert.match(system, /using only\nthe language you would use/);
+  assert.match(system, /concise, and about the page: headings, buttons, links, sections/);
+  // The worked example is the part that earns its place: the prompt already said
+  // not to mention refs and never showed what to say instead, and reports were
+  // carrying "CLICK e17" into sentences meant for a human reader.
+  assert.match(system, /I will click the 'Annual - save 17%' button/);
+  assert.match(system, /not "I will click e17"/);
 });

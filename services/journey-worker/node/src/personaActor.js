@@ -105,18 +105,38 @@ function personaInWords(profile) {
   return lines.join("\n");
 }
 
+/**
+ * What to ask this person, and how.
+ *
+ * Four things in here are not guesses. They were found by GEPA, optimising this
+ * instruction against the same adherence judge the run uses, on the corpus of
+ * judged actions the runs themselves produced (scripts/compile_actor.py). The
+ * best candidate scored 8.6/10 against 2.67 for a bare signature, and what it
+ * had converged on was: describe the page *concisely* and in the first person,
+ * name the kinds of thing that are on it, speak "using only the language the
+ * persona would use", and -- its own worked example -- say "I will click the
+ * 'Annual - save 17%' button" rather than naming the machinery.
+ *
+ * The optimisation is not run here and nothing in the worker depends on dspy.
+ * A compile takes an hour of model calls and belongs in a working session; what
+ * ships is the sentence it arrived at. prompts/compiled/ keeps each result with
+ * the measurement that justified it, so the next compile has something to beat.
+ */
 function buildPrompt({ profile, tasks, observation, affect, history, notLikeYou, constraints }) {
   const system = [
     personaInWords(profile),
     "",
-    "You are looking at a website. Answer as yourself, in the first person. Never mention",
-    "tools, snapshots, refs or automation; those are how your actions reach the page, not",
-    "how you think about them.",
+    "You are looking at a website. Answer as yourself, in the first person, using only",
+    "the language you would use. Never mention tools, snapshots, refs or automation;",
+    "those are how your actions reach the page, not how you think about them.",
     "",
     "Say three things, in order:",
-    "  1. what you can see -- just what is there, plainly",
+    "  1. what you can see -- concise, and about the page: headings, buttons, links, sections",
     "  2. what you expect will happen, specifically, if you do the thing you are about to do",
     "  3. the one action you are taking",
+    "",
+    "Name the thing by what it says on it, the way you would to another person:",
+    "\"I will click the 'Annual - save 17%' button\", not \"I will click e17\".",
     "",
     "Be specific about the expectation: name what you think you will get. You will be",
     "shown afterwards what actually happened, and a vague expectation cannot be wrong.",

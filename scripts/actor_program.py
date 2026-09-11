@@ -33,7 +33,11 @@ import re
 # The judge's brief lives in one file because the compiler and the runtime must
 # grade against the same thing. Optimising a prompt against a judge the run does
 # not use would produce a number that means nothing.
-ADHERENCE_PROMPT = (Path(__file__).resolve().parents[2] / "prompts" / "persona-adherence.txt")
+# parents[1] because this lives in scripts/, one directory below the repo root.
+# It was parents[2] under services/persona_service/ and the move made it point a
+# directory above the repo -- which fails loudly here and would have failed
+# silently in anything that caught the error.
+ADHERENCE_PROMPT = (Path(__file__).resolve().parents[1] / "prompts" / "persona-adherence.txt")
 
 # GEPA's metric works in 0..1; the judge answers out of 10.
 SCORE_SCALE = 10.0

@@ -1,6 +1,6 @@
 """Compile one persona's actor against a corpus of its own judged actions.
 
-The third tier of steering (services/persona_service/actor_program.py): the gate
+The third tier of steering (scripts/actor_program.py): the gate
 fixes an action and learns nothing, the memory bank learns within and across runs
 by adding words to a prompt nobody designed, and this rewrites the instructions
 themselves from the judgements both of those already produce.
@@ -24,8 +24,9 @@ import time
 import urllib.request
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from services.persona_service.actor_program import (  # noqa: E402
+from actor_program import (  # noqa: E402
     adherence_metric, adherence_prompt, build_signature, compile_actor,
     episodes_as_examples, instructions_of, parse_score,
 )
