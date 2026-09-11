@@ -269,6 +269,12 @@ def _evidence_reference_summary(evidence: dict[str, Any] | None, job_id: str = "
 # A label a persona quoted while saying what it expected -- the human name for a
 # control the action record only has a ref for.
 _QUOTED_LABEL = re.compile(r"['\u2018\u201c\"]([^'\u2019\u201d\"]{2,60})['\u2019\u201d\"]")
+# "Clicking the Annual button will..." -- the thing a sentence names as the one
+# being acted on, when the persona did not put quotes round it.
+_NAMED_CONTROL = re.compile(
+    r"\b(?:click(?:ing)?|press(?:ing)?|select(?:ing)?|tapp?(?:ing)?)\s+(?:on\s+)?(?:the\s+)?"
+    r"([\w'\u2019\u00b7][\w'\u2019\u00b7\- ]{0,40}?)\s+(?:button|link|tab|toggle|control|icon)\b",
+    re.IGNORECASE)
 _CITED_CAPTURE = re.compile(r"\bbrowser-(?:screenshot|snapshot|ui-change|video)-[\w.-]+", re.I)
 
 
@@ -516,6 +522,9 @@ class JobExecutor:
             # exist nowhere else, because no check against the DOM can produce
             # either -- see _pain_points_from_perception.
             findings += self._pain_points_from_perception(journeys)
+            # What the page looked like it would do and then did not. First-hand,
+            # falsifiable, and invisible to every other source here.
+            findings += self._pain_points_from_expectations(journeys)
             cohort_runs, screenshot_bytes, raw_strengths, vision_error, repeated_captures = \
                 self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
@@ -1071,6 +1080,199 @@ class JobExecutor:
             if shared / min(len(subject), len(words)) >= cls._PERCEPTION_QUOTE_RELEVANCE:
                 kept.append(quote)
         return kept[:2]
+
+    # How much measured frustration a broken promise has to cost, summed across
+    # everyone who hit it, before it is reported as more than a nuisance. Grounded
+    # in the run's own affect rather than assigned from a table: what makes a
+    # promise that is not kept serious is how much of a visitor's patience it
+    # spends, and that is a number these runs already produce.
+    _COSTLY_FRUSTRATION = 0.25
+    _NOTICEABLE_FRUSTRATION = 0.10
+    # The actions where "it promised something" is a sentence about the product.
+    _PROMISING_ACTIONS = frozenset({"CLICK", "FILL", "SELECT", "SUBMIT", "TYPE"})
+
+    @classmethod
+    def _pain_points_from_expectations(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Things the page looked like it would do and then did not.
+
+        The persona director commits to an expectation before every action, and
+        then compares it against what arrived. A reflection that comes back
+        `matched: "no"` is a first-hand, falsifiable observation of a control that
+        promised something and did not deliver it -- the most common real usability
+        defect there is, and one no check against the DOM can find, because the
+        DOM has no opinion about what a link looked like it would do.
+
+        Nothing read them. Three consecutive live runs against the same page each
+        recorded that clicking "How it works" did not navigate anywhere and that
+        the "Annual - save 17%" toggle showed no price, one of them abandoning the
+        journey over it -- and all three reports said nothing about either. One
+        said "No pain points detected" over a run that ended at 0.49 frustration
+        and 0.52 confusion.
+
+        Only a clear miss counts. `matched: "partly"` is the persona hedging, and
+        a report built on hedges is a report that finds something everywhere.
+        """
+        groups: dict[str, dict[str, Any]] = {}
+        for journey in journeys:
+            run_id = journey.get("runId")
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            profile = journey.get("simulationProfile") or {}
+            persona_name = ((profile.get("persona") or {}).get("name")
+                            or profile.get("name") or persona_id or "Synthetic user")
+            pending: dict[str, Any] | None = None
+            expectation = ""
+            unmet: dict[str, Any] | None = None
+            previous = 0.0
+            for event in journey.get("timeline") or []:
+                kind, data = event.get("type"), event.get("data") or {}
+                if kind == "persona.expectation":
+                    pending, expectation = data.get("action") or {}, str(data.get("expectation") or "")
+                    unmet = None
+                elif kind == "persona.reflection" and pending is not None:
+                    # A promise is made by a control. A READ that returns something
+                    # other than expected is about what the persona could take in,
+                    # which is the perception findings' subject and measured there
+                    # properly; a SCROLL that does not reveal what was hoped for is
+                    # a guess about a page, not a promise it made. Reporting those
+                    # here would file "the paragraph at 321,417 promised more than
+                    # it did", which is not a sentence about the product.
+                    if (str(data.get("matched") or "").lower() == "no"
+                            and str(pending.get("type") or "").upper() in cls._PROMISING_ACTIONS):
+                        unmet = {"action": pending, "expectation": expectation,
+                                 "gap": str(data.get("gap") or "").strip()}
+                    pending = None
+                elif kind == "persona.affect":
+                    # The affect event that follows a reflection is what that
+                    # reflection cost. Read here rather than assumed, because a
+                    # miss a persona shrugs off and a miss that ends the journey
+                    # are not the same finding.
+                    frustration = float((data.get("state") or {}).get("frustration") or 0.0)
+                    if unmet is not None:
+                        label = cls._promise_label(unmet["expectation"], unmet["action"])
+                        group = groups.setdefault(label, {
+                            "label": label, "hits": 0, "cost": 0.0, "personas": [], "names": [],
+                            "runs": [], "gaps": [], "expectations": [], "actions": []})
+                        group["hits"] += 1
+                        group["cost"] += max(0.0, frustration - previous)
+                        if persona_id and persona_id not in group["personas"]:
+                            group["personas"].append(persona_id)
+                            group["names"].append(persona_name)
+                        if run_id and run_id not in group["runs"]:
+                            group["runs"].append(run_id)
+                        if unmet["gap"]:
+                            group["gaps"].append(unmet["gap"])
+                        if unmet["expectation"]:
+                            group["expectations"].append(unmet["expectation"])
+                        group["actions"].append(unmet["action"])
+                        unmet = None
+                    previous = frustration
+        merged = cls._merge_promise_labels(groups)
+        return [cls._broken_promise_finding(group) for group in
+                sorted(merged, key=lambda item: -item["cost"])]
+
+    @staticmethod
+    def _merge_promise_labels(groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
+        """Fold labels that name the same control into one finding.
+
+        One persona quotes "Annual - save 17%" and the next writes "the Annual
+        button", and the page has one toggle. Left split, the report says a
+        control was hit once when it was hit twice, and prices each half at half
+        the patience it actually cost -- the exact thing severity is read from.
+
+        Containment on whole words, keeping the longer name: the specific label is
+        the one a reader can find on the page. Not fuzzy similarity -- "Annual" and
+        "Monthly" are close by most string measures and are two different controls.
+        """
+        remaining = sorted(groups.values(), key=lambda item: -len(item["label"]))
+        kept: list[dict[str, Any]] = []
+        for group in remaining:
+            words = group["label"].lower().split()
+            host = next((item for item in kept
+                         if words and item["label"].lower().split()[:len(words)] == words), None)
+            if host is None:
+                kept.append(group)
+                continue
+            host["hits"] += group["hits"]
+            host["cost"] += group["cost"]
+            for field in ("gaps", "expectations", "actions"):
+                host[field].extend(group[field])
+            for persona, name in zip(group["personas"], group["names"]):
+                if persona not in host["personas"]:
+                    host["personas"].append(persona)
+                    host["names"].append(name)
+            for run in group["runs"]:
+                if run not in host["runs"]:
+                    host["runs"].append(run)
+        return kept
+
+    @staticmethod
+    def _promise_label(expectation: str, action: dict[str, Any]) -> str:
+        """What the persona thought it was interacting with, named the way it named
+        it.
+
+        A ref groups nothing and means nothing: the same control is e6 in one run
+        and e17 in another, and no reader knows what either is. Worse, a ref that
+        leaks through splits one control into two findings -- a live replay
+        produced both "Annual - save 17%" (high) and "e17" (low) for the same
+        toggle, because one run happened to quote the label and the other wrote
+        "the Annual button" without quotes.
+
+        So: the quoted label first, then the phrase the sentence names as the
+        thing being clicked, and the ref only when the persona said nothing useful
+        at all.
+        """
+        quoted = _QUOTED_LABEL.search(expectation or "")
+        if quoted:
+            return quoted.group(1).strip()
+        named = _NAMED_CONTROL.search(expectation or "")
+        if named:
+            return named.group(1).strip()
+        target = str((action or {}).get("target") or (action or {}).get("content") or "").strip()
+        return target or str((action or {}).get("type") or "the page").lower()
+
+    @classmethod
+    def _broken_promise_finding(cls, group: dict[str, Any]) -> dict[str, Any]:
+        """One promise the page did not keep, priced by what it cost."""
+        label, hits, cost = group["label"], group["hits"], group["cost"]
+        personas = group["personas"]
+        # Severity from the measured cost and from how many different people hit
+        # it, not from which bucket the finding came out of. Several people losing
+        # patience over one control is the page; one person losing a little is a
+        # nuisance worth recording and not worth leading with.
+        if len(personas) > 1 or cost >= cls._COSTLY_FRUSTRATION:
+            severity = "high"
+        elif hits > 1 or cost >= cls._NOTICEABLE_FRUSTRATION:
+            severity = "medium"
+        else:
+            severity = "low"
+        expected = group["expectations"][0] if group["expectations"] else ""
+        happened = group["gaps"][-1] if group["gaps"] else ""
+        again = (f" {len(personas)} different personas expected the same thing of it."
+                 if len(personas) > 1 else
+                 f" They tried it {hits} times." if hits > 1 else "")
+        return {
+            "severity": severity, "category": "expectation",
+            "title": f"Promised more than it did: {label}",
+            "summary": (f"Before touching it they said what they expected: \"{expected}\" What "
+                        f"arrived was not that -- \"{happened}\".{again} It cost "
+                        f"{cost:.2f} of this visitor's patience on a 0-1 scale, measured across the "
+                        f"run rather than assumed."),
+            "recommendation": (f"Either make {label} do what it reads as doing, or stop it reading "
+                               f"that way. This is not a wording problem in the copy around it: the "
+                               f"visitor said out loud what they expected before they touched it, "
+                               f"and the control itself is what set that expectation."),
+            "evidence": (f"{hits} unmet expectation(s) across {len(group['runs']) or 1} run(s) and "
+                         f"{len(personas) or 1} persona(s), costing {cost:.2f} frustration"),
+            "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
+            "elementName": label, "observation": happened,
+            "personaEvidence": [{"quote": gap, "personaName": name, "personaId": persona}
+                                for gap, name, persona in zip(
+                                    group["gaps"][:2], group["names"] + group["names"],
+                                    group["personas"] + group["personas"])],
+            "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+            "source": "persona.expectation",
+            "runId": (group["runs"] or [None])[0], "personaId": (personas or [None])[0],
+        }
 
     @classmethod
     def _pain_points_from_perception(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:

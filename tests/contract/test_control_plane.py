@@ -2369,3 +2369,109 @@ def test_a_journey_that_did_not_repeat_itself_gets_no_invented_cause():
 
     assert JobExecutor._what_stopped_them(journey) == ""
     assert JobExecutor._what_stopped_them({"timeline": []}) == ""
+
+
+def _expectation_run(run_id, persona, steps):
+    """A run as the persona director records it: expectation, reflection, affect."""
+    timeline = []
+    for expectation, action, matched, gap, frustration in steps:
+        timeline.append({"type": "persona.expectation",
+                         "data": {"expectation": expectation, "action": action}})
+        timeline.append({"type": "persona.reflection", "data": {"matched": matched, "gap": gap}})
+        timeline.append({"type": "persona.affect", "data": {"state": {"frustration": frustration}}})
+    return {"runId": run_id, "profileId": persona,
+            "simulationProfile": {"persona": {"name": persona.title()}}, "timeline": timeline}
+
+
+def test_a_control_that_promised_more_than_it_did_becomes_a_finding():
+    """Three consecutive live runs against the same page each recorded that
+    clicking "How it works" did not navigate anywhere and that the "Annual - save
+    17%" toggle showed no price -- one of them abandoning the journey over it --
+    and all three reports said nothing about either. One said "No pain points
+    detected" over a run that ended at 0.49 frustration and 0.52 confusion.
+
+    A reflection that comes back `matched: "no"` is a first-hand, falsifiable
+    observation of a control that promised something and did not deliver, which is
+    the most common real usability defect and one no check against the DOM can
+    find."""
+    runs = [
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'How it works' link will explain the product.",
+             {"type": "CLICK", "target": "e3"}, "no",
+             "Click did not navigate anywhere; the landing page remained.", 0.20),
+            ("Scrolling will reveal the prices.",
+             {"type": "SCROLL", "content": "down"}, "yes", "", 0.20),
+        ]),
+        _expectation_run("run_2", "sophie", [
+            ("Clicking the 'How it works' link will explain the product.",
+             {"type": "CLICK", "target": "e6"}, "no",
+             "Nothing happened when I clicked it.", 0.24),
+        ]),
+    ]
+
+    findings = JobExecutor._pain_points_from_expectations(runs)
+
+    assert len(findings) == 1, "one control, one finding, however many runs hit it"
+    finding = findings[0]
+    assert finding["title"] == "Promised more than it did: How it works"
+    # Two different people losing patience over one control is the page, not them.
+    assert finding["severity"] == "high"
+    assert finding["affectedPersonas"] == 2
+    # Priced by what it actually cost, read from the run's own affect rather than
+    # assigned from a table.
+    assert "0.44" in finding["evidence"] or "0.44" in finding["summary"]
+    # Both halves, in the persona's own words: what they expected before touching
+    # it, and what arrived.
+    assert "will explain the product" in finding["summary"]
+    assert "Nothing happened when I clicked it" in finding["summary"]
+    # An expectation that was met is not a finding.
+    assert "Scrolling" not in finding["summary"]
+
+
+def test_only_a_control_can_promise_something():
+    """A READ that returns something unexpected is about what the persona could
+    take in, which the perception findings measure properly. A SCROLL that does not
+    reveal what was hoped for is a guess about a page, not a promise it made.
+    Reporting those here files "the paragraph at 321,417 promised more than it
+    did", which is not a sentence about the product."""
+    runs = [_expectation_run("run_1", "friedrich", [
+        ("I will see the full paragraph describing what this does.",
+         {"type": "READ", "target": "p@321,417"}, "no", "The paragraph was not there.", 0.20),
+        ("Scrolling down will reveal pricing.",
+         {"type": "SCROLL", "content": "down"}, "no", "No pricing appeared.", 0.40),
+    ])]
+
+    assert JobExecutor._pain_points_from_expectations(runs) == []
+
+
+def test_one_control_named_two_ways_is_one_finding():
+    """One persona quotes "Annual - save 17%" and the next writes "the Annual
+    button", and the page has one toggle. Left split, the report says a control was
+    hit once when it was hit twice, and prices each half at half the patience it
+    actually cost -- which is what severity is read from."""
+    runs = [
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'Annual · save 17%' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "No price appeared.", 0.28)]),
+        _expectation_run("run_2", "sophie", [
+            ("Clicking the Annual button will display the annual price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Only the button remains.", 0.21)]),
+    ]
+
+    findings = JobExecutor._pain_points_from_expectations(runs)
+
+    assert len(findings) == 1
+    # The specific label survives -- it is the one a reader can find on the page.
+    assert findings[0]["title"] == "Promised more than it did: Annual · save 17%"
+    assert findings[0]["affectedPersonas"] == 2
+
+    # But two genuinely different controls stay two findings: "Annual" and
+    # "Monthly" are close by most string measures and are not the same toggle.
+    apart = JobExecutor._pain_points_from_expectations([
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "No price.", 0.20),
+            ("Clicking the 'Monthly' button will show the price.",
+             {"type": "CLICK", "target": "e18"}, "no", "Still no price.", 0.40)]),
+    ])
+    assert len(apart) == 2
