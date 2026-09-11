@@ -43,6 +43,8 @@ const MAX_STEPS = 60;
 // How often to check whether the current document still needs a pass. The script
 // no-ops on a document it has already done, so this is one cheap round trip.
 const DEFAULT_INTERVAL_MS = 1500;
+// Outstanding requests to keep the page still (see holdRevealKeeper).
+let holds = 0;
 
 let timer = null;
 let lastError = "";
@@ -155,6 +157,29 @@ function evalResult(stdout) {
   }
 }
 
+/**
+ * Keep the page still while something measures it.
+ *
+ * A counter rather than a flag so overlapping holds cannot end each other's:
+ * every hold() must be matched by a release(), and the keeper resumes only when
+ * the last one does. Release is clamped at zero so an unmatched release cannot
+ * leave the count negative and permanently re-enable scrolling mid-measurement.
+ */
+function holdRevealKeeper() {
+  holds += 1;
+  return holds;
+}
+
+function releaseRevealKeeper() {
+  holds = Math.max(0, holds - 1);
+  return holds;
+}
+
+/** How many holds are outstanding. Exported for assertions, not for control. */
+function revealHolds() {
+  return holds;
+}
+
 function startRevealKeeper({ intervalMs, env = process.env, runner = batch, settleMs, maxSteps } = {}) {
   if (!enabled(env)) return { running: false, reason: "disabled" };
   if (timer) return { running: true, reason: "already-running" };
@@ -162,7 +187,17 @@ function startRevealKeeper({ intervalMs, env = process.env, runner = batch, sett
     ? intervalMs
     : Number.parseInt(env.AUX_REVEAL_INTERVAL_MS || "", 10) || DEFAULT_INTERVAL_MS;
 
-  const tick = () => { revealOnce(runner, { settleMs, maxSteps }).catch(() => {}); };
+  const tick = () => {
+    // Never scroll the page while something is measuring it. The keeper fires
+    // every 1500ms and a perception pass (snapshot, box walk, capture) takes
+    // longer than that, so a pass would land between the boxes being read and
+    // the pixels being captured -- leaving every box describing where an element
+    // was before the scroll and every pixel showing where the page is now. A
+    // live run reported the entire navigation bar as failing WCAG AA at 1:1 for
+    // a persona with 0.95 acuity, because the crops had landed on blank page.
+    if (holds > 0) return;
+    revealOnce(runner, { settleMs, maxSteps }).catch(() => {});
+  };
   tick();
   timer = setInterval(tick, every);
   // The keeper must never be the reason the worker stays alive.
@@ -185,9 +220,11 @@ function __resetRevealKeeper() {
   lastError = "";
   passes = 0;
   lastResult = null;
+  holds = 0;
 }
 
 module.exports = {
-  DEFAULT_INTERVAL_MS, DEFAULT_SETTLE_MS, MAX_STEPS, enabled, evalResult, revealScript, revealOnce,
-  revealKeeperStatus, startRevealKeeper, stopRevealKeeper, __resetRevealKeeper,
+  DEFAULT_INTERVAL_MS, DEFAULT_SETTLE_MS, MAX_STEPS, enabled, evalResult, holdRevealKeeper,
+  releaseRevealKeeper, revealHolds, revealScript, revealOnce, revealKeeperStatus,
+  startRevealKeeper, stopRevealKeeper, __resetRevealKeeper,
 };

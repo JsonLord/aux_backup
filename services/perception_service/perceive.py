@@ -71,6 +71,30 @@ def _encode(image: Image.Image, quality: int = 78) -> str:
     return base64.b64encode(buffer.getvalue()).decode("ascii")
 
 
+# Above this share of a capture's elements coming back illegible, the capture is
+# not describing the page. A live run measured five clean steps (0 of 15, 0 of 19,
+# 0 of 20 illegible) and then one step at 18 of 29 -- 14 of them "the region and
+# everything around it are the same flat colour" -- and the report published
+# "Fails WCAG AA contrast" on the site's own navigation bar, at 1:1, for a persona
+# with 0.95 acuity, on links the same run clicked twice. The boxes and the pixels
+# had come from different scroll positions.
+#
+# The upstream fix holds the page still and checks it did not move
+# (services/journey-worker/node/src/perception.js). This is the independent one,
+# and it is independent on purpose: it needs no cooperation from the caller and
+# catches any other cause of the same misalignment. It is a ratio rather than a
+# count because a page with four elements may legitimately have two bad ones.
+#
+# Half is the threshold because of what it would mean to be wrong in either
+# direction. A page where most of what is on it cannot be read is a blank page,
+# and a run that clicked its way through one is proof it was not blank. Against
+# that, a genuine page-wide contrast failure loses one capture's findings and is
+# still reported from every other step -- the same finding, one fewer time.
+UNTRUSTWORTHY_ILLEGIBLE_SHARE = 0.5
+# Under this many elements the ratio says nothing: one bad element out of two is
+# 50%.
+MIN_ELEMENTS_TO_JUDGE = 6
+
 def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None = None,
              behavior: dict | None = None, motion_frames: list[str] | None = None,
              viewport: dict | None = None, return_seen_image: bool = False,
@@ -128,6 +152,14 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                            "salience": salience_of(seen, box, motion, scanner.distractibility),
                            "goalAffinity": goal_affinity(entry["name"], wanted, entry["role"])})
 
+    measured = len(candidates) + len(not_perceived)
+    illegible_share = (len(not_perceived) / measured) if measured else 0.0
+    # Said out loud rather than acted on quietly: the caller decides what a capture
+    # it cannot trust is worth, and a reader of the run record can see that a
+    # measurement was withheld rather than that a page was clean.
+    trustworthy = not (measured >= MIN_ELEMENTS_TO_JUDGE
+                       and illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE)
+
     fixations = scan(candidates, size, scanner)
     # Matched by selector, not by object identity: scan() returns a copy of each
     # candidate with its order attached, so `id()` never matches and every
@@ -147,15 +179,27 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                        "box": item["box"], "salience": item["salience"], "order": item["order"],
                        "goalAffinity": item["goalAffinity"], "contrast": item["contrast"],
                        "drawnByMotion": item["drawnByMotion"]} for item in fixations],
-        # In the tree, nothing legible where it lives.
-        "notPerceived": not_perceived,
+        # In the tree, nothing legible where it lives. Empty when the capture
+        # cannot be trusted: one misaligned capture publishing a page's whole
+        # navigation as a WCAG failure is a worse report than one with a gap.
+        "notPerceived": not_perceived if trustworthy else [],
+        # Whether this capture is describing the page the boxes describe, and why
+        # not. `illegibleShare` is reported either way so the judgement can be
+        # checked rather than taken.
+        "capture": {"trustworthy": trustworthy, "measured": measured,
+                    "illegibleShare": round(illegible_share, 4),
+                    "reason": "" if trustworthy else
+                              (f"{len(not_perceived)} of {measured} elements measured illegible, "
+                               f"which reads as a capture that does not line up with the boxes "
+                               f"rather than as a page")},
         # Legible, but this person never got to it.
         "notLookedAt": [{"selector": item["selector"], "role": item["role"], "name": item["name"],
                          "box": item["box"], "salience": item["salience"],
                          "goalAffinity": item["goalAffinity"],
                          "contrast": item["contrast"]} for item in not_looked_at],
         "counts": {"elements": len(elements), "legible": len(candidates),
-                   "fixated": len(fixations), "notPerceived": len(not_perceived),
+                   "fixated": len(fixations),
+                   "notPerceived": len(not_perceived) if trustworthy else 0,
                    "notLookedAt": len(not_looked_at)},
     }
     if return_seen_image:

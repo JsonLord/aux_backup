@@ -405,3 +405,101 @@ def test_a_solid_control_is_still_judged_on_its_edge():
     result = perceive(image_base64=encode(page()), elements=ELEMENTS,
                       abilities={"vision": {"acuity": 0.35, "contrastSensitivity": 0.25}})
     assert "a.cta" not in {item["selector"] for item in result["notPerceived"]}
+
+
+def _flat_page(width=1280, height=577, colour=(247, 247, 248)):
+    """A capture that landed on blank page, which is what a misaligned crop sees."""
+    from PIL import Image
+
+    return Image.new("RGB", (width, height), colour)
+
+
+def _readable_page(width=1280, height=577):
+    """A capture with real ink where the boxes say it is."""
+    from PIL import Image, ImageDraw
+
+    image = Image.new("RGB", (width, height), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for index in range(10):
+        top = 20 + index * 40
+        # Dense black marks: unambiguous ink for anybody's eyes.
+        for offset in range(0, 180, 6):
+            draw.rectangle([100 + offset, top, 102 + offset, top + 16], fill=(0, 0, 0))
+    return image
+
+
+def _boxes(count, *, font_px=16):
+    return [{"selector": f"e{index}", "role": "link", "name": f"Item {index}", "fontPx": font_px,
+             "fontWeight": 400,
+             "box": {"x": 100, "y": 20 + index * 40, "width": 180, "height": 24}}
+            for index in range(count)]
+
+
+def test_a_capture_that_does_not_line_up_with_its_boxes_reports_nothing_unreadable():
+    """A live run measured five clean steps (0 of 15, 0 of 19, 0 of 20 illegible)
+    and then one step at 18 of 29, 14 of them "the region and everything around it
+    are the same flat colour". The report's headline finding was "Fails WCAG AA
+    contrast: 'Talent Augmentation OS'" at 1:1 -- the site's own navigation bar,
+    for a persona with 0.95 acuity, on links the same run clicked twice. The boxes
+    and the pixels had come from two different scroll positions.
+
+    A page where most of what is on it cannot be read is a blank page, and a run
+    that clicked through it is proof it was not blank."""
+    import base64
+    import io
+
+    from services.perception_service.perceive import perceive
+
+    buffer = io.BytesIO()
+    _flat_page().save(buffer, format="PNG")
+    result = perceive(image_base64=base64.b64encode(buffer.getvalue()).decode(),
+                      elements=_boxes(12), abilities={"vision": {"acuity": 0.95}})
+
+    assert result["capture"]["trustworthy"] is False
+    assert result["capture"]["illegibleShare"] > 0.5
+    # The share is reported either way, so the judgement can be checked.
+    assert result["capture"]["measured"] == 12
+    assert "does not line up with the boxes" in result["capture"]["reason"]
+    # Nothing is published as unreadable from a capture that cannot be trusted --
+    # a confidently wrong report is worse than one with a gap.
+    assert result["notPerceived"] == []
+    assert result["counts"]["notPerceived"] == 0
+
+
+def test_a_capture_that_lines_up_still_reports_what_cannot_be_read():
+    """The guard must not cost a real measurement. A page with ink where the boxes
+    say it is stays trustworthy, and low-contrast text on it is still reported."""
+    import base64
+    import io
+
+    from services.perception_service.perceive import perceive
+
+    buffer = io.BytesIO()
+    _readable_page().save(buffer, format="PNG")
+    result = perceive(image_base64=base64.b64encode(buffer.getvalue()).decode(),
+                      elements=_boxes(10), abilities={"vision": {"acuity": 1.0}})
+
+    assert result["capture"]["trustworthy"] is True
+    assert result["capture"]["reason"] == ""
+    assert result["capture"]["illegibleShare"] <= 0.5
+
+
+def test_too_few_elements_to_judge_a_capture_is_not_a_verdict_on_it():
+    """One bad element out of two is 50%. Below a handful of elements the ratio
+    says nothing about the capture, and withholding a real finding on that basis
+    would be the guard causing the harm it exists to prevent."""
+    import base64
+    import io
+
+    from services.perception_service.perceive import perceive
+
+    buffer = io.BytesIO()
+    _flat_page().save(buffer, format="PNG")
+    result = perceive(image_base64=base64.b64encode(buffer.getvalue()).decode(),
+                      elements=_boxes(3), abilities={"vision": {"acuity": 0.95}})
+
+    assert result["capture"]["trustworthy"] is True
+    # And what it measured is still reported, because three invisible elements on a
+    # page really can all be invisible.
+    assert len(result["notPerceived"]) == 3
+    assert result["counts"]["notPerceived"] == 3

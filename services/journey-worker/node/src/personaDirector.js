@@ -38,6 +38,7 @@ const { PersonaMemoryBank } = require("./memoryBank");
 const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
+const { holdRevealKeeper, releaseRevealKeeper } = require("./revealKeeper");
 const { recentFrames } = require("./viewportStream");
 
 const DEFAULT_MAX_STEPS = 40;
@@ -187,6 +188,12 @@ class PersonaDirector {
     this.gate = gate || new AdherenceGate({ judge: actor.judgeAdherence });
   }
 
+  /** Stop the page being scrolled under a measurement. Seams, so a test can
+   * assert the hold without a live keeper. */
+  hold() { return holdRevealKeeper(); }
+
+  release() { return releaseRevealKeeper(); }
+
   /** Spend a slice of simulated time on the wall clock, bounded. */
   async spend(simulatedMs) {
     await this.sleep(Math.min(MAX_REAL_WAIT_MS, Math.max(MIN_STEP_MS, simulatedMs * this.scale)));
@@ -213,6 +220,7 @@ class PersonaDirector {
     await this.capture(browser, context, "arrived");
 
     let reportedGateFailure = false;
+    let reportedPerceptionFailure = false;
     while (steps < this.maxSteps && !ending) {
       if (context.signal?.aborted) { ending = { type: "abandoned", detail: "the run was cancelled" }; break; }
       steps += 1;
@@ -220,6 +228,19 @@ class PersonaDirector {
       const page = pending || await this.observe(browser);
       pending = null;
       const { observation, perception } = await this.look(page, tasks);
+      // One failed call disables the perception client for the rest of the run
+      // (perception.js: `this.disabled = true`). That is the right behaviour --
+      // retrying a dead service every step would only slow the run down -- but it
+      // was silent: the run continued on the accessibility tree, produced a report
+      // with no eyesight findings at all, and nothing anywhere said the eyes had
+      // stopped working. An absence of findings has to be distinguishable from an
+      // absence of measurement.
+      if (!perception && !reportedPerceptionFailure && this.perception?.lastError) {
+        reportedPerceptionFailure = true;
+        await recorder.record("persona.perception_unavailable",
+          "Stopped seeing the page through this person's eyes", {
+            reason: this.perception.lastError, sinceStep: steps });
+      }
       if (perception) {
         const seenImage = await this.keepSeenImage(context, perception, steps);
         await recorder.record("persona.perception",
@@ -460,14 +481,28 @@ class PersonaDirector {
     const fallback = { observation: observationFrom(page.text, this.abilities), perception: null };
     if (!this.perception?.available) return fallback;
     let seen;
+    // Hold the page still for the walk and the capture. The reveal keeper scrolls
+    // the whole document every 1500ms and a perception pass takes longer than
+    // that, so without this the boxes and the pixels describe the page at two
+    // different scroll positions -- which is how a live run came to report the
+    // entire navigation bar as failing WCAG AA at 1:1 for someone with 0.95
+    // acuity: the crops had landed on blank page.
+    this.hold();
     try {
       seen = await this.walk();
     } catch {
       // A page walk can fail for reasons that have nothing to do with the run --
       // a navigation mid-batch, a browser still settling. The tree is still there.
       return fallback;
+    } finally {
+      this.release();
     }
     if (!seen?.elements?.length || !seen.screenshotBase64) return fallback;
+    // Something moved the page anyway -- the page's own script, an animation, a
+    // navigation landing mid-batch. Boxes from one scroll position against pixels
+    // from another measure nothing, and the failure mode is not a gap in the
+    // report but a confident false finding. Fall back to the tree for this step.
+    if (seen.moved) return fallback;
     const perception = await this.perception.perceive({
       screenshotBase64: seen.screenshotBase64,
       elements: seen.elements,

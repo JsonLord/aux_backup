@@ -6,7 +6,7 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
-  resolveSessionState, testerContract } = require("../src/journeytest");
+  resolveSessionState, stepBudget, testerContract } = require("../src/journeytest");
 
 test("maps AUX run input to pinned JourneyTest contracts", () => {
   const profile = {
@@ -186,4 +186,28 @@ test("the worker constructs the persona director on the default path", () => {
   assert.ok(branch, "the director selection is no longer a directorKind() branch");
   assert.match(branch[1], /piDirector\(\)/, "the opt-out branch must build the Pi director");
   assert.match(branch[2], /new PersonaDirector\(/, "the default branch must build the persona director");
+});
+
+// A persona step is three to four model calls plus a perception call, not one
+// request. The director's own ceiling of 40 against a two-task journey runs past
+// the 1800s the API waits for the worker, and a run cut off at the socket has its
+// report salvaged from disk rather than written from a finished journey.
+test("a persona run's action budget follows the work it was given", () => {
+  assert.equal(stepBudget(["a", "b"], {}), 16);
+  assert.equal(stepBudget(["a", "b", "c", "d", "e"], {}), 40);
+  // The floor keeps a single-task journey from being cut off while still orienting.
+  assert.equal(stepBudget(["a"], {}), 12);
+  assert.equal(stepBudget([], {}), 12);
+  // The ceiling holds: eight per task would put ten tasks at eighty.
+  assert.equal(stepBudget(new Array(10).fill("t"), {}), 40);
+});
+
+test("an operator-pinned action budget wins outright", () => {
+  assert.equal(stepBudget(["a", "b"], { JOURNEY_MAX_STEPS: "3" }), 3);
+  assert.equal(stepBudget(["a"], { JOURNEY_MAX_STEPS: "100" }), 100);
+  // Garbage must not silently become a budget of zero, which would end every run
+  // before its first action.
+  for (const bad of ["", "   ", "lots", "0", "-5"]) {
+    assert.equal(stepBudget(["a", "b"], { JOURNEY_MAX_STEPS: bad }), 16, `bad value ${bad}`);
+  }
 });

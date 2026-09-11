@@ -173,6 +173,35 @@ function resolveSessionState(input) {
 }
 
 /**
+ * How many actions a persona run may take, for this many tasks.
+ *
+ * The director's own default is 40, which is the right ceiling for a long journey
+ * and the wrong budget for a short one. A persona step is not one request: it
+ * looks at the page, decides, is scored for adherence (and may be asked again),
+ * acts, then reflects -- three to four model calls, plus a perception call. Forty
+ * of those against a two-task journey runs well past the 1800s the API waits for
+ * the worker to answer (JobExecutor._journey_run_timeout), and a run that is cut
+ * off at the socket is a run whose report is salvaged from disk rather than
+ * written from a finished journey.
+ *
+ * So the budget follows the work. Eight actions per task is more than a real
+ * visitor spends before they have either done the thing or given up -- the live
+ * agent run that produced a complete two-task report took three clicks -- and the
+ * floor keeps a single-task journey from being cut off while it is still orienting.
+ * JOURNEY_MAX_STEPS overrides it outright.
+ *
+ * @param {unknown[]} [tasks]
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {number}
+ */
+function stepBudget(tasks = [], env = process.env) {
+  const pinned = Number.parseInt(env.JOURNEY_MAX_STEPS || "", 10);
+  if (Number.isFinite(pinned) && pinned > 0) return pinned;
+  const count = Array.isArray(tasks) ? tasks.length : 0;
+  return Math.min(40, Math.max(12, count * 8));
+}
+
+/**
  * Which director drives a run. The persona director is the product: it looks at
  * the page through this person's eyes, states an expectation before it acts, is
  * held to sounding like them, and gives up the way a real visitor would. The Pi
@@ -267,7 +296,7 @@ async function runWithJourneyTest(input) {
           || process.env.BLABLADOR_BASE_URL || undefined,
         reflectApiKey: process.env.JOURNEY_REFLECT_API_KEY
           || process.env.BLABLADOR_API_KEY || undefined }),
-      maxSteps: Number.parseInt(process.env.JOURNEY_MAX_STEPS || "", 10) || undefined,
+      maxSteps: stepBudget(input.tasks),
     });
   }
   const outputDir = input.artifactDirectory || process.env.JOURNEY_ARTIFACT_ROOT || "/tmp/aux-journeys";
@@ -340,4 +369,5 @@ async function runWithJourneyTest(input) {
 }
 
 module.exports = { CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
-  loadJourneyTest, resolveSessionState, runWithJourneyTest, sessionNameFor, testerContract };
+  loadJourneyTest, resolveSessionState, runWithJourneyTest, sessionNameFor, stepBudget,
+  testerContract };

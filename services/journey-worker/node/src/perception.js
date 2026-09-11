@@ -126,17 +126,32 @@ function batchResults(stdout) {
  * does not match the pixels is worse than no box, because it moves the question
  * "can this person see it" onto the wrong part of the image.
  */
+// Read back where the page is, after the capture. Every box the walk reports is
+// in viewport coordinates, so a scroll between the walk and the screenshot leaves
+// the boxes describing where things were and the pixels showing where the page is
+// now -- and every crop then lands on whatever happens to be at that offset. A
+// live run reported the whole navigation bar as failing WCAG AA at 1:1 for a
+// persona with 0.95 acuity and 0.92 contrast sensitivity, "the region and
+// everything around it are the same flat colour", because the crops had landed on
+// blank page. The reveal keeper was the scroller, and it is held now -- this is
+// how we know, rather than assume, that nothing else moved.
+const SCROLL_AFTER = "(() => String(Math.round(scrollY)))()";
+
 async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const file = capture ? path.join(os.tmpdir(), `perception-${process.pid}-${Date.now()}.png`) : "";
   const commands = capture
-    ? [["snapshot"], ["eval", WALK], ["screenshot", file]]
+    ? [["snapshot"], ["eval", WALK], ["screenshot", file], ["eval", SCROLL_AFTER]]
     : [["snapshot"], ["eval", WALK]];
-  const empty = { elements: [], refs: {}, viewport: null, scrollY: 0, snapshot: "", screenshotBase64: "" };
+  const empty = { elements: [], refs: {}, viewport: null, scrollY: 0, snapshot: "",
+    screenshotBase64: "", moved: false, scrollCheck: "skipped" };
   const response = await runner(commands, options);
   if (!response.ok) return empty;
   const results = batchResults(response.stdout);
   const snapshot = results.find((item) => item.command?.[0] === "snapshot")?.result || {};
-  const evaluated = results.find((item) => item.command?.[0] === "eval")?.result;
+  const evaluations = results.filter((item) => item.command?.[0] === "eval");
+  const evaluated = evaluations[0]?.result;
+  // The second eval, when there is one, is the scroll read-back.
+  const after = capture && evaluations.length > 1 ? evaluations[1].result : undefined;
   let walked = { elements: [], viewport: null };
   try {
     walked = JSON.parse(typeof evaluated === "string" ? evaluated : evaluated?.result || "{}");
@@ -152,14 +167,54 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     }
     unlink(file).catch(() => {});
   }
+  const before = Number(walked.scrollY) || 0;
+  const settled = scrollNumber(scrollValue(after));
+  // Three states, not two. The hold on the reveal keeper is the fix; this
+  // read-back is corroboration. A read-back we cannot parse has lost the
+  // corroboration, not the fix -- treating "unknown" as "moved" would let one
+  // unexpected envelope shape silently switch perception off for a whole run,
+  // which is a worse failure than the one being guarded against and a much
+  // quieter one.
+  const known = Number.isFinite(settled);
+  const moved = capture && known && settled !== before;
   return {
     elements: linkRefs(walked.elements || [], snapshot.refs || {}),
     refs: snapshot.refs || {},
     viewport: walked.viewport || null,
-    scrollY: walked.scrollY || 0,
+    scrollY: before,
     snapshot: String(snapshot.snapshot || ""),
     screenshotBase64,
+    // Whether the boxes and the pixels are describing the same page.
+    moved,
+    scrolledTo: known ? settled : null,
+    // "same" | "moved" | "unavailable" -- said out loud, because a guard that
+    // cannot run is not a guard that passed.
+    scrollCheck: !capture ? "skipped" : known ? (moved ? "moved" : "same") : "unavailable",
   };
+}
+
+/**
+ * The read-back as a number, or NaN when there is no answer in it.
+ *
+ * Strict on purpose: `Number("")` is 0, so an empty read-back would have matched
+ * a page at the top and reported itself as a passed guard. A guard that cannot
+ * tell "the page is at 0" from "nobody answered" is not a guard.
+ */
+function scrollNumber(value) {
+  if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
+  if (typeof value !== "string" || !/^-?\d+(\.\d+)?$/.test(value.trim())) return NaN;
+  return Number(value.trim());
+}
+
+/** Unwrap agent-browser's eval envelopes down to the scroll number. */
+function scrollValue(value) {
+  let current = value;
+  let depth = 0;
+  while (current && typeof current === "object" && "result" in current && depth < 5) {
+    current = current.result;
+    depth += 1;
+  }
+  return typeof current === "string" ? current.trim() : current;
 }
 
 /** Frame payloads as the perception service wants them: bare base64, oldest first. */
@@ -221,4 +276,5 @@ class PerceptionClient {
   }
 }
 
-module.exports = { PerceptionClient, WALK, batchResults, linkRefs, lookAtPage, motionFramesFrom };
+module.exports = { PerceptionClient, SCROLL_AFTER, WALK, batchResults, linkRefs, lookAtPage,
+  motionFramesFrom, scrollNumber, scrollValue };

@@ -99,13 +99,34 @@ _PROSE_STOPWORDS = frozenset({
     "might", "seem", "seems", "about", "other", "each", "between", "than", "then", "because",
     "while", "where", "what",
 })
-_SUFFIXES = ("ations", "ation", "ings", "ing", "ers", "er", "ies", "ied", "es", "ed", "s")
+# Plural stripping is handled first and on its own (see _stem), so these must not
+# contain a plural rule: two rules that can both fire on one word are how the
+# stemmer came to disagree with itself about "price" and "prices".
+_SUFFIXES = ("ations", "ation", "ings", "ing", "ers", "er", "ied", "ed")
+# English adds "es" rather than "s" after a sibilant. Without this, "classes"
+# stemmed to "classe" while "class" stemmed to "class".
+_SIBILANTS = "sxzhi"
 
 
 def _stem(word: str) -> str:
-    """Crude suffix stripping, enough that "navigation"/"navigate",
-    "control"/"controls" and "confusion"/"confusing" compare equal. Two findings
-    describing one problem rarely reuse the same inflections."""
+    """Crude suffix stripping, enough that "control"/"controls" and
+    "price"/"prices" compare equal. Two findings describing one problem rarely
+    reuse the same inflections.
+
+    The plural comes off first, once, and by English's own rules, because the
+    length guard below made two of these rules disagree on exactly the pair they
+    exist for: "prices" is six letters, so it cleared `len > len("es") + 3` and
+    stemmed to "pric", while "price" is five, cleared nothing, and stayed "price".
+    A live report threw away the one quote that was genuinely about its finding --
+    "No price was visible anywhere." under a finding about text reading "Prices
+    exclude VAT" -- because the two words shared no stem.
+    """
+    if len(word) > 4 and word.endswith("ies"):
+        word = word[:-3] + "y"                       # policies -> policy
+    elif len(word) > 3 and word.endswith("es") and word[-3] in _SIBILANTS:
+        word = word[:-2]                             # classes -> class, boxes -> box
+    elif len(word) > 3 and word.endswith("s") and not word.endswith("ss"):
+        word = word[:-1]                             # prices -> price, links -> link
     for suffix in _SUFFIXES:
         if len(word) > len(suffix) + 3 and word.endswith(suffix):
             return word[: -len(suffix)]
@@ -138,6 +159,58 @@ def _is_run_diagnostic(finding: dict[str, Any]) -> bool:
     """True when a finding describes the harness failing rather than the product."""
     text = f"{finding.get('title', '')} {finding.get('summary', '')}"
     return any(pattern.search(text) for pattern in _RUN_DIAGNOSTIC_PATTERNS)
+
+
+# A run's own instruments failing. Each is recorded by the persona director the
+# moment it happens, and each makes the run weaker in a way a reader cannot infer
+# from the findings: the measurement stopped, so an absence of findings means
+# nothing. Matching on finding *text* (above) can never catch these -- they
+# produce no finding at all, which is exactly the problem.
+_INSTRUMENT_FAILURES = {
+    "persona.perception_unavailable": (
+        "The run stopped seeing the page through this person's eyes",
+        "The perception service stopped answering, so the rest of this run reasoned about the "
+        "accessibility tree instead of the rendered pixels. No eyesight finding -- text too small "
+        "or too low-contrast for this person to read, anything they never looked at -- could be "
+        "made after that point. Their absence from this report is not evidence that the page has "
+        "none."),
+    "persona.adherence_unavailable": (
+        "Nothing checked whether the actions sounded like this person",
+        "The adherence judge stopped answering, so from that point the persona's actions were "
+        "taken as-is rather than scored against who they are and sent back when they did not fit. "
+        "The run still browsed as this person's abilities and patience dictate; what stopped is "
+        "the check on whether its choices read like them."),
+}
+
+
+def _instrument_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Run diagnostics for a run whose own instruments failed mid-flight.
+
+    A live report came back with `run_diagnostics: []` on a run where the whole
+    perception path had never executed. Nothing was wrong with the diagnostic
+    mechanism: it filters *findings* by their wording, and an instrument that stops
+    answering produces no finding to filter. So read the events the director writes
+    when it notices, and report those.
+    """
+    diagnostics = []
+    for journey in journeys:
+        run_id = journey.get("runId")
+        for event in journey.get("timeline") or []:
+            entry = _INSTRUMENT_FAILURES.get(str(event.get("type") or ""))
+            if not entry:
+                continue
+            title, summary = entry
+            data = event.get("data") or {}
+            reason = str(data.get("reason") or "").strip()
+            diagnostics.append({
+                "severity": "high", "category": "harness", "title": title,
+                "summary": summary + (f" Reported reason: {reason}" if reason else ""),
+                "recommendation": "Check the service is reachable from the worker and re-run; the "
+                                  "findings this run could not make are still unknown, not absent.",
+                "evidence": f"{event.get('type')} at step {data.get('sinceStep', '?')} of run {run_id}",
+                "source": "instrument", "runId": run_id,
+                "personaId": journey.get("profileId")})
+    return diagnostics
 
 
 def _capture_name(path: str | None, kind: str = "", job_id: str = "") -> str:
@@ -427,6 +500,10 @@ class JobExecutor:
         # journey" was) misrepresents both.
         run_diagnostics = [finding for finding in findings if _is_run_diagnostic(finding)]
         findings = self._merge_similar_findings([finding for finding in findings if finding not in run_diagnostics])
+        # Added after the split, not before: an instrument failure is a diagnostic by
+        # construction and must never be merged into, or dropped by, the usability
+        # findings it is reported alongside.
+        run_diagnostics = _instrument_diagnostics(journeys) + run_diagnostics
         findings, unverified = self._drop_unverifiable_quotes(findings, self._visible_text_corpus(journeys))
         if unverified:
             quoted = "; ".join(f"{item['title']!r} (quoted {', '.join(repr(q) for q in item['quotes'])})"
@@ -447,6 +524,16 @@ class JobExecutor:
         self._attach_verdict_screenshots(findings, journeys)
         self._attach_redesigns(findings, data.get("url"))
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
+        if any(source.startswith("persona.") for source in sources):
+            limitations.append(
+                "Persona quotes are the person's own account of the page, recorded by the persona director as "
+                "it browsed: what they expected a control to do before they touched it "
+                "(`persona.expectation`), what actually arrived and how it differed (`persona.reflection`), "
+                "and how that left them (`persona.affect`, worded from the gap rather than declared). They "
+                "are first-person statements about a page. They are not the model's completion tokens, which "
+                "are its own working about refs and evidence capture and are kept out of the report's quotes "
+                "for exactly that reason."
+            )
         if "model.reasoning" in sources:
             limitations.append(
                 "Persona quotes are the director model's own reasoning tokens for each request, captured "
@@ -748,25 +835,84 @@ class JobExecutor:
         return acuity <= JobExecutor._RARE_ACUITY or contrast <= JobExecutor._RARE_CONTRAST
 
     @staticmethod
-    def _persona_reasoning(journey: dict[str, Any], limit: int = 2) -> list[dict[str, str]]:
+    def _persona_reasoning(journey: dict[str, Any], limit: int = 8) -> list[dict[str, str]]:
         """What the persona said, in their own words, about not getting what they came for.
 
         A finding is far more use with the reasoning behind it than without, and
         the run already records it: the reflection names the gap between what was
         expected and what arrived.
+
+        Every gap in the run is collected, not the first two. Which of them belongs
+        to a given finding is decided against that finding's own subject, once it
+        exists (`_relevant_quotes`). Taking the first two put "Clicking 'How it
+        works' did not navigate to a detailed service explanation" under a contrast
+        finding about the site's logo in a live report -- the same mistake
+        `_attach_persona_evidence` already carries a comment about, made again here.
+
+        The persona's name comes along with the quote. Without it the report
+        rendered every one of these as being said by nobody: `personaName` was
+        never set, and the presentation falls back to "Synthetic user".
         """
-        quotes = []
+        profile = journey.get("simulationProfile") or {}
+        name = ((profile.get("persona") or {}).get("name")
+                or profile.get("name") or journey.get("profileId")
+                or journey.get("testerProfileId") or "Synthetic user")
+        quotes: list[dict[str, str]] = []
         for event in journey.get("timeline") or []:
             if event.get("type") != "persona.reflection":
                 continue
             data = event.get("data") or {}
             gap = (data.get("gap") or "").strip()
             if gap and data.get("matched") != "yes" and gap not in {item["quote"] for item in quotes}:
-                quotes.append({"quote": gap, "personaId": journey.get("profileId")
+                quotes.append({"quote": gap, "personaName": name,
+                               "personaId": journey.get("profileId")
                                or journey.get("testerProfileId")})
             if len(quotes) >= limit:
                 break
         return quotes
+
+    # How much of the shorter of {what this finding is about} and {what the persona
+    # said} the two must share before the quote is published as evidence for the
+    # finding.
+    _PERCEPTION_QUOTE_RELEVANCE = 0.2
+
+    @classmethod
+    def _relevant_quotes(cls, finding: dict[str, Any]) -> list[dict[str, str]]:
+        """The quotes on this finding that are actually about it.
+
+        A finding the persona never mentioned gets no quote rather than an
+        unrelated one: an irrelevant quote under a finding does not read as
+        "unrelated", it reads as evidence. A live report put "Clicking 'How it
+        works' did not navigate to a detailed service explanation" and "No price or
+        selection indicator appeared after clicking the annual button" under a
+        contrast finding about the site's own logo.
+
+        The subject is the element and the finding's title -- what the finding is
+        *about* -- and deliberately not its summary. A perception summary is two
+        sentences of measurement vocabulary (contrast ratios, WCAG minima, fixation
+        budgets) that no persona ever utters, so including it only inflates the
+        denominator: the one true pairing in the live case shared a single word out
+        of some forty, scoring 0.025 against a 0.2 bar and being thrown away with
+        the wrong ones.
+
+        Containment, not Jaccard, and against the shorter side: "No price was
+        visible anywhere." is six words about an element whose name is a
+        twelve-word sentence, and asking either to cover most of the other would
+        reject a quote that is plainly about it.
+        """
+        subject = (cls._text_tokens(finding.get("elementName") or "")
+                   | cls._text_tokens(finding.get("title") or ""))
+        if not subject:
+            return []
+        kept = []
+        for quote in finding.get("personaEvidence") or []:
+            words = cls._text_tokens(quote.get("quote") or "")
+            if not words:
+                continue
+            shared = len(subject & words)
+            if shared / min(len(subject), len(words)) >= cls._PERCEPTION_QUOTE_RELEVANCE:
+                kept.append(quote)
+        return kept[:2]
 
     @classmethod
     def _pain_points_from_perception(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -843,8 +989,13 @@ class JobExecutor:
         for group in groups.values():
             finding = (cls._unreadable_finding(group) if group["kind"] == "notPerceived"
                        else cls._never_looked_at_finding(group))
-            if finding:
-                findings.append(finding)
+            if not finding:
+                continue
+            # Which of the run's gaps belongs under this finding can only be
+            # decided once the finding exists and has a subject. Done here rather
+            # than in either builder, so one rule covers both and neither can drift.
+            finding["personaEvidence"] = cls._relevant_quotes(finding)
+            findings.append(finding)
         return findings
 
     @staticmethod
@@ -933,7 +1084,8 @@ class JobExecutor:
             "elementBox": item.get("box"),
             "contrastRatio": ratio, "wcagRequired": required, "wcagPasses": contrast.get("passes"),
             "observation": item.get("reason") or "",
-            "personaEvidence": group["reasoning"][:2],
+            "personaEvidence": group["reasoning"],
+            "elementName": item.get("name") or "",
             "affectedPersonaIds": personas, "affectedPersonas": len(personas),
             "source": "perception.notPerceived",
             "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
@@ -964,7 +1116,8 @@ class JobExecutor:
                          f"{group['steps']} step(s) and {len(personas) or 1} persona(s)"),
             "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
             "elementBox": item.get("box"), "observation": "",
-            "personaEvidence": group["reasoning"][:2],
+            "personaEvidence": group["reasoning"],
+            "elementName": item.get("name") or "",
             "affectedPersonaIds": personas, "affectedPersonas": len(personas),
             "source": "perception.missed",
             "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
@@ -1920,16 +2073,29 @@ class JobExecutor:
         three it came from, and nothing else in the report may present them as
         equivalent.
         """
-        thoughts: list[dict[str, Any]] = [
-            {"kind": "reasoning", "source": "model.reasoning", "text": str(item.get("text") or "").strip(),
-             "elapsedMs": item.get("elapsedMs"), "model": item.get("model")}
-            for item in (journey.get("reasoning") or [])
-            if str(item.get("text") or "").strip()
-        ]
+        # A persona run has a better account of itself than the model's completion
+        # tokens: the director records what the person expected before acting and
+        # what they made of what arrived. Those are sentences about the page in the
+        # person's voice. The completion tokens are the model talking to itself
+        # about machinery -- "We'll click 'How it works' link (ref=e3)", "we need
+        # screenshot evidence", first person plural, about refs. A live report
+        # published exactly that as Friedrich Wolf's evidence for its only finding,
+        # including the model arguing with itself ("However, the snapshot does not
+        # show any price numbers. So we can say..."). So where a persona spoke, the
+        # persona is quoted, and the machinery becomes the fallback it always was
+        # for the agent director.
+        persona_said = cls._persona_voice(journey)
+        thoughts: list[dict[str, Any]] = list(persona_said)
+        if not persona_said:
+            thoughts.extend(
+                {"kind": "reasoning", "source": "model.reasoning", "text": str(item.get("text") or "").strip(),
+                 "elapsedMs": item.get("elapsedMs"), "model": item.get("model")}
+                for item in (journey.get("reasoning") or [])
+                if str(item.get("text") or "").strip())
         for event in journey.get("timeline") or []:
             event_type, data = event.get("type", ""), event.get("data") or {}
             elapsed, task_id = event.get("elapsedMs"), event.get("taskId")
-            if event_type == "agent.message.end":
+            if event_type == "agent.message.end" and not persona_said:
                 text = str(data.get("text") or "").strip()
                 if text:
                     thoughts.append({"kind": "reasoning", "source": "timeline", "text": text,
@@ -1956,6 +2122,47 @@ class JobExecutor:
         actions = [item for item in thoughts if item["kind"] == "action"]
         kept = reasoning + actions[: limit - len(reasoning)]
         return sorted(kept, key=lambda item: item.get("elapsedMs") or 0)
+
+    @staticmethod
+    def _persona_voice(journey: dict[str, Any]) -> list[dict[str, Any]]:
+        """What the person said about the page, from the persona director's own
+        thought record.
+
+        Three of its events are the person speaking about what is in front of
+        them, and they are what a report should quote:
+
+        - ``persona.expectation`` -- what they expected the thing they are about to
+          click to do. It is the sentence that makes the next step falsifiable.
+        - ``persona.reflection`` -- what actually arrived, and the gap. When the gap
+          is non-empty it is the single most useful sentence in the run: a
+          first-person statement of a page not doing what it looked like it would.
+        - ``persona.affect`` -- how that left them, in words derived from the
+          reflection rather than declared by the model.
+
+        Everything else the director records is measurement (perception counts,
+        adherence scores, affect numbers) and belongs in the report as numbers, not
+        as a quote. ``persona.perception``'s narrative is deliberately excluded:
+        "looked at 4 of 31 things" is an observation about the person, not the
+        person's own words.
+        """
+        said: list[dict[str, Any]] = []
+        for event in journey.get("timeline") or []:
+            event_type, data = event.get("type", ""), event.get("data") or {}
+            elapsed = event.get("elapsedMs")
+            if event_type == "persona.reflection":
+                # The gap first: "the page loaded, but the numbers I came for are
+                # not on it" is the finding. `observed` alone is only a description.
+                text = str(data.get("gap") or data.get("observed") or "").strip()
+            elif event_type == "persona.expectation":
+                text = str(data.get("expectation") or "").strip()
+            elif event_type == "persona.affect":
+                text = str(data.get("feeling") or "").strip()
+            else:
+                continue
+            if text:
+                said.append({"kind": "reasoning", "source": event_type, "text": text,
+                             "elapsedMs": elapsed, "taskId": event.get("taskId")})
+        return said
 
     @staticmethod
     def _verdict_thoughts(journey: dict[str, Any]) -> list[dict[str, Any]]:

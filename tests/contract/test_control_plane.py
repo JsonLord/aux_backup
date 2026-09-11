@@ -2046,3 +2046,145 @@ def test_a_run_from_before_the_degraded_capture_existed_still_reports():
         [_perception_journey(unreadable=[FAILS_WCAG])])[0]
     assert finding["evidenceScreenshot"] is None
     assert finding["evidenceIsAsTheySawIt"] is False
+
+
+def test_a_report_quotes_the_person_not_the_models_working():
+    """A live report published this as Friedrich Wolf's evidence for its only
+    finding: "We have completed the tasks: 1. ... We read the homepage ... However,
+    the snapshot does not show any price numbers. So we can say the page does not
+    tell you the exact cost." That is the model arguing with itself about refs and
+    evidence capture, in the first person plural. The persona director records the
+    person's own account -- what they expected, what arrived, how it left them --
+    and it was ignored in favour of the completion tokens."""
+    journey = {
+        "profileId": "persona_1",
+        "reasoning": [{"elapsedMs": 4687, "model": "some-router",
+                       "text": "We need screenshot evidence. We'll click the Pricing link (ref=e6). "
+                               "However, the snapshot does not show any price numbers."}],
+        "timeline": [
+            {"type": "persona.expectation", "elapsedMs": 2400,
+             "data": {"expectation": "The Pricing link should take me to the numbers."}},
+            {"type": "persona.reflection", "elapsedMs": 4700,
+             "data": {"matched": False, "observed": "A pricing page with plan names.",
+                      "gap": "The page loaded, but the prices I came for are not on it."}},
+            {"type": "persona.affect", "elapsedMs": 4800,
+             "data": {"feeling": "mildly irritated and unsure where to look next"}},
+            {"type": "agent.message.end", "elapsedMs": 5000, "data": {"text": "Assistant working."}},
+        ],
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+    quoted = [item["text"] for item in thoughts if item["kind"] == "reasoning"]
+
+    assert "The page loaded, but the prices I came for are not on it." in quoted
+    assert "The Pricing link should take me to the numbers." in quoted
+    assert "mildly irritated and unsure where to look next" in quoted
+    # The machinery is not the person, and must not be published as them.
+    assert not any("ref=e6" in text for text in quoted)
+    assert not any(text.startswith("We ") for text in quoted)
+    assert "Assistant working." not in quoted
+    # Every quote says which event it came from, so nothing presents an expectation
+    # as a reflection.
+    assert {item["source"] for item in thoughts if item["kind"] == "reasoning"} == {
+        "persona.expectation", "persona.reflection", "persona.affect"}
+
+
+def test_an_agent_run_still_quotes_the_models_reasoning():
+    """The persona voice is a preference, not a requirement. A run driven by the
+    competent-agent director records no persona.* events at all, and its completion
+    tokens remain the only account it has -- dropping them there would leave every
+    finding from such a run with no evidence."""
+    journey = {
+        "profileId": "persona_1",
+        "reasoning": [{"elapsedMs": 900, "model": "some-router",
+                       "text": "The pricing page shows plan names but no amounts."}],
+        "timeline": [{"type": "browser.click", "summary": "Clicked 'Pricing'", "elapsedMs": 800}],
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+
+    assert [item["text"] for item in thoughts if item["kind"] == "reasoning"] == [
+        "The pricing page shows plan names but no amounts."]
+    assert {item["source"] for item in thoughts if item["kind"] == "reasoning"} == {"model.reasoning"}
+
+
+def test_an_instrument_that_stopped_answering_is_reported_not_inferred():
+    """A live report came back with `run_diagnostics: []` for a run in which the
+    entire perception path never executed. The mechanism was not broken: it filters
+    *findings* by their wording, and an instrument that stops answering produces no
+    finding to filter. The reader was left unable to tell "this page has no eyesight
+    problems" from "nothing looked"."""
+    from apps.api.executor import _instrument_diagnostics
+
+    diagnostics = _instrument_diagnostics([{
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            {"type": "persona.perception_unavailable", "elapsedMs": 3000,
+             "data": {"reason": "perception service returned HTTP 503", "sinceStep": 2}},
+            {"type": "persona.adherence_unavailable", "elapsedMs": 4000,
+             "data": {"reason": "two consecutive judge failures", "sinceStep": 3}},
+            {"type": "browser.click", "summary": "Clicked 'Pricing'", "elapsedMs": 5000},
+        ]}])
+
+    titles = [item["title"] for item in diagnostics]
+    assert "The run stopped seeing the page through this person's eyes" in titles
+    assert "Nothing checked whether the actions sounded like this person" in titles
+    # The reason the service gave is the actionable part, so it is carried through.
+    assert any("HTTP 503" in item["summary"] for item in diagnostics)
+    # An absence of findings after the instrument died must not read as a clean page.
+    assert any("not evidence that the page has none" in item["summary"] for item in diagnostics)
+    # A diagnostic is about the harness, never numbered among the product's issues.
+    assert {item["category"] for item in diagnostics} == {"harness"}
+    assert all(item["runId"] == "run_1" for item in diagnostics)
+    # A healthy run reports nothing.
+    assert _instrument_diagnostics([{"runId": "run_2", "timeline": [
+        {"type": "persona.reflection", "data": {"gap": "no prices"}}]}]) == []
+
+
+def test_a_plural_and_its_singular_stem_to_the_same_word():
+    """The stemmer's whole job, and it got this pair wrong. "prices" is six letters,
+    so it cleared `len > len("es") + 3` and stemmed to "pric"; "price" is five,
+    cleared nothing, and stayed "price". A live report discarded the one quote that
+    was genuinely about its finding -- "No price was visible anywhere." under a
+    finding about text reading "Prices exclude VAT" -- because the two shared no
+    stem."""
+    from apps.api.executor import _stem
+
+    for singular, plural in [("price", "prices"), ("control", "controls"), ("link", "links"),
+                             ("button", "buttons"), ("box", "boxes"), ("class", "classes"),
+                             ("address", "addresses"), ("pass", "passes"),
+                             ("policy", "policies"), ("heading", "headings")]:
+        assert _stem(singular) == _stem(plural), f"{singular}/{plural} must compare equal"
+    # A word that is not a plural keeps its own stem: "access" and "is" end in s.
+    assert _stem("access") == "access"
+    assert _stem("is") == "is"
+
+
+def test_a_perception_finding_only_quotes_what_the_persona_said_about_it():
+    """A live report put "Clicking 'How it works' did not navigate to a detailed
+    service explanation" and "No price or selection indicator appeared after
+    clicking the annual button" under a contrast finding about the site's own logo.
+    An irrelevant quote under a finding does not read as unrelated -- it reads as
+    evidence."""
+    findings = JobExecutor._pain_points_from_perception([{
+        "runId": "run_1", "profileId": "persona_1",
+        "simulationProfile": {"persona": {"name": "Friedrich Wolf"}},
+        "timeline": [
+            {"type": "persona.perception", "data": {
+                "eyes": RARE_EYES,
+                "scan": {"pattern": "spotted", "fixationBudget": 6, "why": ["in a hurry"]},
+                "counts": {"elements": 15, "fixated": 6},
+                "notPerceived": [FAILS_WCAG], "notLookedAt": [], "missedWhatTheyCameFor": []}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "Clicking 'How it works' did not navigate anywhere new."}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "No price was visible anywhere."}},
+        ]}])
+
+    assert len(findings) == 1
+    quotes = [item["quote"] for item in findings[0]["personaEvidence"]]
+    assert quotes == ["No price was visible anywhere."], (
+        "only the quote about this element's text may be published under it")
+    # And it is said by somebody: personaName was never set, so the presentation
+    # rendered every persona quote as "Synthetic user".
+    assert findings[0]["personaEvidence"][0]["personaName"] == "Friedrich Wolf"

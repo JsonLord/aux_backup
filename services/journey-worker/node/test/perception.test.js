@@ -10,7 +10,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  PerceptionClient, batchResults, linkRefs, lookAtPage, motionFramesFrom,
+  PerceptionClient, batchResults, linkRefs, lookAtPage, motionFramesFrom, scrollNumber,
+  scrollValue,
 } = require("../src/perception");
 
 /** agent-browser's batch envelope, as `batch --json` really returns it. */
@@ -112,4 +113,94 @@ test("an HTTP error is a failure, not a body to believe", async () => {
   });
   assert.equal(await client.perceive({ screenshotBase64: "A", elements: [{ selector: "e1" }] }), null);
   assert.match(client.lastError, /HTTP 500/);
+});
+
+/**
+ * A batch whose eval read-back says where the page ended up. The real envelope
+ * puts the eval's value under a nested `result`; `after` of undefined omits the
+ * read-back entirely, which is what a build that does not answer looks like.
+ */
+function capturedAt(scrollBefore, after) {
+  const results = [
+    { command: ["snapshot"], error: null, success: true,
+      result: { refs: { e1: { name: "Home", role: "link" } }, snapshot: "- link \"Home\" [ref=e1]" } },
+    { command: ["eval"], error: null, success: true,
+      result: { result: JSON.stringify({ viewport: { width: 1280, height: 577 }, scrollY: scrollBefore,
+        elements: [{ kind: "control", tag: "a", role: "", name: "Home", x: 483, y: 20,
+          width: 43, height: 24, fontPx: 15, fontWeight: 400 }] }) } },
+    { command: ["screenshot"], error: null, success: true, result: {} },
+  ];
+  if (after !== undefined) {
+    results.push({ command: ["eval"], error: null, success: true, result: { result: after } });
+  }
+  return { ok: true, stdout: JSON.stringify(results) };
+}
+
+// Every box the walk reports is in viewport coordinates. A scroll between the
+// walk and the screenshot leaves the boxes describing where things were and the
+// pixels showing where the page is now, and every crop then lands on whatever
+// happens to sit at that offset. A live run reported the entire navigation bar as
+// failing WCAG AA at 1:1 -- "the region and everything around it are the same
+// flat colour" -- for a persona with 0.95 acuity and 0.92 contrast sensitivity,
+// because the crops had landed on blank page. The scroller was the reveal keeper,
+// firing every 1500ms through a pass that takes longer than that.
+test("a capture taken while the page moved is marked, not measured", async () => {
+  const seen = await lookAtPage(async () => capturedAt(0, "2400"));
+
+  assert.equal(seen.moved, true);
+  assert.equal(seen.scrollCheck, "moved");
+  assert.equal(seen.scrolledTo, 2400);
+  // The pixels and the boxes are still returned -- the caller decides what to do
+  // with a capture it cannot trust, and this one has them fall back to the tree.
+  assert.equal(seen.elements.length, 1);
+});
+
+test("a capture taken on a still page is cleared to measure", async () => {
+  const seen = await lookAtPage(async () => capturedAt(2400, "2400"));
+
+  assert.equal(seen.moved, false);
+  assert.equal(seen.scrollCheck, "same");
+  assert.equal(seen.scrolledTo, 2400);
+});
+
+test("a read-back that cannot be parsed loses the guard, not the feature", async () => {
+  // The hold on the reveal keeper is the fix; this read-back is corroboration.
+  // Treating an unparseable answer as "moved" would let one unexpected envelope
+  // shape switch perception off for a whole run -- a worse failure than the one
+  // being guarded against, and a far quieter one.
+  for (const answer of [undefined, "", "not a number", "{}"]) {
+    const seen = await lookAtPage(async () => capturedAt(0, answer));
+    assert.equal(seen.moved, false, `answer ${JSON.stringify(answer)} must not block the capture`);
+    assert.equal(seen.scrollCheck, "unavailable");
+    assert.equal(seen.scrolledTo, null);
+  }
+});
+
+test("the scroll read-back is asked for in the same batch as the capture", async () => {
+  let asked = null;
+  await lookAtPage(async (commands) => { asked = commands; return capturedAt(0, "0"); });
+
+  assert.deepEqual(asked.map((item) => item[0]), ["snapshot", "eval", "screenshot", "eval"]);
+  // After the screenshot, or it answers a question nobody asked.
+  assert.ok(asked.findIndex((item) => item[0] === "screenshot")
+    < asked.length - 1, "the read-back must come after the capture");
+});
+
+test("the scroll read-back survives the envelope layers agent-browser adds", () => {
+  assert.equal(scrollValue("2400"), "2400");
+  assert.equal(scrollValue({ result: "2400" }), "2400");
+  assert.equal(scrollValue({ result: { result: " 2400 " } }), "2400");
+  assert.equal(scrollValue(undefined), undefined);
+});
+
+test("a read-back of nothing is not a read-back of zero", () => {
+  // Number("") is 0, so an empty answer used to match a page at the top and
+  // report itself as a guard that had run and passed.
+  for (const blank of ["", "   ", "{}", "undefined", null, undefined, {}]) {
+    assert.ok(Number.isNaN(scrollNumber(blank)), `${JSON.stringify(blank)} is not a position`);
+  }
+  assert.equal(scrollNumber("0"), 0);
+  assert.equal(scrollNumber(" 2400 "), 2400);
+  assert.equal(scrollNumber("-12"), -12);
+  assert.equal(scrollNumber(2400), 2400);
 });

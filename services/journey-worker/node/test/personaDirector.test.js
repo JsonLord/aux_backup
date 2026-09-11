@@ -762,3 +762,83 @@ test("the page as they saw it is kept, but only when it is evidence of something
   assert.equal(kept.length, 1,
     "written for the step that found something unreadable, and not for the other");
 });
+
+// Perception measures pixels against boxes, and both are only comparable while
+// the page holds still. The reveal keeper scrolls the whole document every
+// 1500ms, through a pass that takes longer than that. A live run published
+// "Fails WCAG AA contrast: 'Talent Augmentation OS'" at 1:1 as its headline
+// finding, for a persona with 0.95 acuity and 0.92 contrast sensitivity, on a
+// navigation bar the same run clicked twice -- the crops had landed on blank
+// page. The report was confidently wrong, which is worse than a report with a
+// gap in it.
+test("the page is held still for the whole look, and let go afterwards", async () => {
+  const order = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    perception: { available: true, perceive: async () => { order.push("perceive"); return null; } },
+    walk: async () => {
+      order.push("walk");
+      return { elements: [{ selector: "e1", box: { x: 0, y: 0, width: 10, height: 10 } }],
+        viewport: { width: 1280, height: 577 }, screenshotBase64: "AAA", refs: {}, snapshot: "",
+        scrollY: 0, moved: false };
+    },
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  director.hold = () => { order.push("hold"); return 1; };
+  director.release = () => { order.push("release"); return 0; };
+
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.deepEqual(order.slice(0, 3), ["hold", "walk", "release"],
+    "the walk happens inside the hold");
+  assert.equal(order.filter((step) => step === "hold").length,
+    order.filter((step) => step === "release").length,
+    "every hold is released, or the page never scrolls again for the rest of the run");
+});
+
+test("a hold is released even when the walk throws", async () => {
+  let holds = 0;
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    perception: { available: true, perceive: async () => null },
+    walk: async () => { throw new Error("the browser went away mid-batch"); },
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  director.hold = () => { holds += 1; return holds; };
+  director.release = () => { holds -= 1; return holds; };
+
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(holds, 0, "a thrown walk must not leave the page frozen for the rest of the run");
+});
+
+test("a capture taken while the page moved is not measured at all", async () => {
+  // Boxes from one scroll position against pixels from another measure nothing,
+  // and the failure is not a missing finding but a confident false one. The tree
+  // is still there, so the step falls back to it rather than guessing.
+  let perceived = 0;
+  const actorSaw = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    perception: { available: true, perceive: async () => { perceived += 1; return {
+      observation: "[e1] link Pricing", counts: {}, scan: {}, eyes: {},
+      notPerceived: [], notLookedAt: [] }; } },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing", box: { x: 0, y: 0, width: 60, height: 20 } }],
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "AAA", refs: {}, snapshot: "",
+      scrollY: 0, moved: true, scrollCheck: "moved", scrolledTo: 2400,
+    }),
+    actor: async ({ observation }) => {
+      actorSaw.push(observation);
+      return { visible: "", expectation: "", action: { type: "DONE", content: "done" } };
+    },
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.equal(perceived, 0, "a capture the boxes do not match is never sent to be measured");
+  assert.ok(!recorder.events.some((event) => event.type === "persona.perception"),
+    "and nothing is recorded as having been seen");
+  assert.notEqual(actorSaw[0], "[e1] link Pricing",
+    "the step falls back to the accessibility tree");
+});
