@@ -1355,3 +1355,53 @@ test("the look before acting gets a second chance too", async () => {
   assert.ok(recorder.events.some((event) => event.type === "persona.perception"),
     "and the step is recorded as a perceived one, not a lost one");
 });
+
+test("a person who took nothing in keeps their evidence", async () => {
+  // observation_text joined an empty list into "", the caller tested it for
+  // truthiness, and the whole measurement went in the bin -- the counts, the
+  // notPerceived list, every legibility finding on the capture. So the runs
+  // where somebody could read nothing at all, which is the strongest finding
+  // this service can produce, were exactly the runs whose evidence was lost.
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "", eyes: {}, scan: {},
+        counts: { elements: 7, legible: 0, fixated: 0, notPerceived: 7, notLookedAt: 0 },
+        notPerceived: [{ selector: "p@0,400", reason: "too little contrast to make anything out" }],
+        perceived: [], notLookedAt: [] };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, frames: () => [],
+    walk: async () => ({
+      elements: [{ selector: "p@0,400", role: "paragraph", name: "x", box: { x: 0, y: 0, width: 6, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "nothing to see" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.ok(looked, "the measurement is kept, not discarded as a failure");
+  assert.equal(looked.data.notPerceived[0].selector, "p@0,400");
+  assert.equal(looked.data.counts.notPerceived, 7);
+  assert.ok(!recorder.events.some((event) => event.type === "persona.perception_fallback"),
+    "and it is not reported as the service having returned nothing");
+});
+
+test("a service that really returned nothing is still a fallback", async () => {
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, frames: () => [],
+    perception: { available: true, perceive: async () => ({ counts: {} }) },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "x", box: { x: 0, y: 0, width: 6, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const said = recorder.events.find((event) => event.type === "persona.perception_fallback");
+  assert.ok(said, "no observation field at all is a failure and still says so");
+  assert.match(said.data.reason, /returned nothing/);
+});

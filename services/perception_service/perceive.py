@@ -293,4 +293,16 @@ def observation_text(result: dict, limit: int = 60) -> str:
     missed = result.get("counts", {}).get("notLookedAt", 0)
     if missed:
         lines.append(f"... {missed} other thing(s) on the page you have not looked at")
+    if not lines:
+        # Looked, and took in nothing. That is a real thing for a page to do to
+        # somebody and the strongest finding this service can produce -- and it
+        # used to be returned as "", which the caller could not tell from a
+        # service that had failed, so it discarded the whole result: the counts,
+        # the notPerceived list, every legibility finding on the capture. The
+        # runs where a person could read nothing were exactly the runs whose
+        # evidence was thrown away.
+        unreadable = result.get("counts", {}).get("notPerceived", 0)
+        return (f"You cannot make out anything here. {unreadable} thing(s) are on this part of "
+                "the page and none of them are legible to you." if unreadable
+                else "You cannot make out anything here.")
     return "\n".join(lines)

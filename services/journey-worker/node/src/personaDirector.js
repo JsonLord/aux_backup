@@ -689,9 +689,16 @@ class PersonaDirector {
       // the service could produce it and nobody ever asked.
       returnSeenImage: true,
     });
-    if (!perception?.observation) {
+    // Absent, not empty. An empty observation is a person who looked and took
+    // nothing in -- which is the strongest eyesight finding here, not a failure
+    // -- and testing it for truthiness threw the whole measurement away: the
+    // counts, the notPerceived list, every legibility finding on the capture.
+    if (perception?.observation === undefined || perception?.observation === null) {
       return fellBack(`the perception service returned nothing`
         + (this.perception.lastError ? `: ${String(this.perception.lastError).slice(0, 120)}` : ""));
+    }
+    if (!perception.observation) {
+      return { observation: "You cannot make out anything here.", perception };
     }
     return { observation: perception.observation, perception };
   }

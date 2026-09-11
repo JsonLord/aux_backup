@@ -714,3 +714,31 @@ def test_a_capture_that_failed_two_ways_at_once_is_still_refused():
     assert capture["trustworthy"] is False
     assert "however the failures divide" in capture["reason"]
     assert result["notPerceived"] == []
+
+
+def test_looking_and_taking_nothing_in_is_said_rather_than_returned_as_empty():
+    """`observation_text` joined an empty list into "", which the Node caller
+    tested for truthiness and treated as a service that had failed -- discarding
+    the whole measurement: the counts, the notPerceived list, every legibility
+    finding on the capture.
+
+    So the runs where somebody could read nothing at all, which is the strongest
+    finding this service can produce, were exactly the runs whose evidence was
+    lost. Seen live in cycles 19, 24 and 26.
+    """
+    from services.perception_service.perceive import observation_text
+
+    nothing_legible = observation_text(
+        {"perceived": [], "counts": {"notLookedAt": 0, "notPerceived": 7}})
+    assert nothing_legible, "an observation is never empty; empty is indistinguishable from failure"
+    assert "cannot make out anything" in nothing_legible
+    assert "7 thing(s)" in nothing_legible, "and it says how much was there to miss"
+
+    # Nothing measured at all still says the honest thing rather than nothing.
+    assert observation_text({"perceived": [], "counts": {}}) == "You cannot make out anything here."
+
+    # What it already did is unchanged.
+    seen = observation_text({"perceived": [{"selector": "e1", "role": "link", "name": "Pricing"}],
+                             "counts": {"notLookedAt": 2}})
+    assert seen.startswith("[e1] link Pricing")
+    assert "2 other thing(s)" in seen
