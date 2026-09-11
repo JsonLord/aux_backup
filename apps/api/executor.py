@@ -535,6 +535,11 @@ class JobExecutor:
             vision_praise = [item for item in vision_findings
                              if _reads_as_praise(item.get("title"), item.get("summary"))]
             vision_findings = [item for item in vision_findings if item not in vision_praise]
+            # The vision model reads screenshots confidently, and two of the things
+            # it says are checkable against what this run recorded. Where they
+            # disagree the measurement wins, and the report says so rather than
+            # quietly rewriting a severity.
+            tempered = self._temper_contradicted_findings(vision_findings, journeys)
             findings.extend(vision_findings)
             preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys)
                                               + self._praise_as_strengths(vision_praise))
@@ -551,6 +556,7 @@ class JobExecutor:
                 "suggestedImprovements/failed pass-criteria) from a real browser run against the "
                 "target URL, not text inferred from the task description.",
             ]
+            limitations.extend(tempered)
             if vision_findings:
                 limitations.append(
                     "Findings tagged source=eyeson-vision-synthesis are cross-persona-aggregated (spec.md "
@@ -1098,6 +1104,84 @@ class JobExecutor:
     _NOTICEABLE_FRUSTRATION = 0.10
     # The actions where "it promised something" is a sentence about the product.
     _PROMISING_ACTIONS = frozenset({"CLICK", "FILL", "SELECT", "SUBMIT", "TYPE"})
+
+    # A vision finding claiming the page renders itself more than once.
+    _CLAIMS_DUPLICATION = re.compile(
+        r"\brepeat(?:s|ed|ing)?\b|\bduplicat(?:e|ed|ion)\b|\btwice\b|\bthree times\b|\bmultiple copies\b",
+        re.I)
+    # A vision finding claiming the page stopped the visitor doing the thing.
+    _CLAIMS_BLOCKING = re.compile(
+        r"\bprevent(?:s|ing|ed)?\b|\bblocks?\b|\bblocking\b|\bcannot (?:see|find|read)\b"
+        r"|\bunable to\b|\bhide(?:s|n)? the actual\b", re.I)
+
+    @classmethod
+    def _contradicted_by_the_run(cls, finding: dict[str, Any],
+                                 journeys: list[dict[str, Any]]) -> str:
+        """What this run measured that this finding says did not happen.
+
+        The vision model reads screenshots and is a confident reader. A live report
+        led with "Repeated page layout rendering bug", severity critical -- "the
+        entire header and hero section repeats three times vertically ... looks
+        highly broken" -- and second with "Pricing cards are cut off ... preventing
+        users from seeing the actual price", severity high. The capture was
+        correct, every section rendered, and the same run's verdict reads "The page
+        does state the pricing clearly. £200 per user per year for teams (or £100
+        per user per year for individuals)".
+
+        Two of its claims are checkable against what the run itself recorded, and
+        where they disagree the measurement wins -- not because a vision model is
+        worthless, but because a confident, specific, wrong claim at critical
+        severity is the most damaging thing this report can carry.
+        """
+        text = f"{finding.get('title', '')} {finding.get('summary', '')}"
+        # Nothing repeats if the element walk saw each thing once. Every element on
+        # screen is listed by selector on every capture; a hero rendered three
+        # times would be three entries.
+        if cls._CLAIMS_DUPLICATION.search(text):
+            captures = [event for journey in journeys
+                        for event in journey.get("timeline") or []
+                        if event.get("type") == "persona.perception"]
+            seen = [(event.get("data") or {}).get("legible") or [] for event in captures]
+            if seen and all(len(items) == len(set(items)) for items in seen if items):
+                return ("the element walk recorded every element exactly once on all "
+                        f"{len(captures)} capture(s) of this run, so nothing on the page was "
+                        "rendered more than once")
+        # Nothing was blocked if the run finished.
+        if cls._CLAIMS_BLOCKING.search(text):
+            finished = [journey for journey in journeys
+                        if any(item.get("id") == "tasks-completed" and item.get("result") == "met"
+                               for item in (journey.get("verdict") or {}).get("criteria", []))]
+            if finished:
+                said = str((finished[0].get("verdict") or {}).get("summary") or "").strip()
+                return ("the run completed the tasks it came to do"
+                        + (f' -- "{said[:180]}"' if said else ""))
+        return ""
+
+    @classmethod
+    def _temper_contradicted_findings(cls, findings: list[dict[str, Any]],
+                                      journeys: list[dict[str, Any]]) -> list[str]:
+        """Cap a contradicted finding's severity and say so, in place.
+
+        Kept rather than dropped: the visual observation behind it may be worth a
+        look, and deleting a signal because one of its claims overreached is its own
+        kind of dishonesty. What it may not do is lead the report.
+        """
+        notes = []
+        for finding in findings:
+            if finding.get("source") != "eyeson-vision-synthesis":
+                continue
+            against = cls._contradicted_by_the_run(finding, journeys)
+            if not against:
+                continue
+            was = finding.get("severity")
+            if was in ("critical", "high"):
+                finding["severity"] = "medium"
+            finding["summary"] = (f"{finding.get('summary', '').rstrip()} Reported by the vision "
+                                  f"critique and not supported by this run: {against}.")
+            finding["contradictedByRun"] = against
+            notes.append(f"{finding.get('title')!r} was reported as {was} by the vision critique "
+                         f"and is carried at {finding['severity']} instead, because {against}.")
+        return notes
 
     @classmethod
     def _pain_points_from_expectations(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:

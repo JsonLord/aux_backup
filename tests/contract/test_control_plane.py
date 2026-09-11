@@ -2667,3 +2667,82 @@ def test_a_screenful_of_undrawn_elements_is_one_observation():
     few = JobExecutor._fold_undrawn([undrawn("Home"), undrawn("Install")])
     assert [item["title"] for item in few] == [
         'Declared but not drawn: "Home"', 'Declared but not drawn: "Install"']
+
+
+def _finished_run(legible_per_capture, summary="Completed what they came to do. It costs £200."):
+    return {"runId": "run_1", "profileId": "persona_1",
+            "verdict": {"status": "passed", "summary": summary,
+                        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+            "timeline": [{"type": "persona.perception", "data": {"legible": items}}
+                         for items in legible_per_capture]}
+
+
+def test_a_vision_claim_the_run_disproves_does_not_lead_the_report():
+    """A live report led with "Repeated page layout rendering bug", critical -- "the
+    entire header and hero section repeats three times vertically ... looks highly
+    broken" -- and second with "Pricing cards are cut off ... preventing users from
+    seeing the actual price", high. The capture was correct, every section
+    rendered, and the same run's verdict reads "The page does state the pricing
+    clearly. £200 per user per year".
+
+    A confident, specific, wrong claim at critical severity is the most damaging
+    thing this report can carry."""
+    findings = [
+        {"source": "eyeson-vision-synthesis", "severity": "critical",
+         "title": "Repeated page layout rendering bug",
+         "summary": "The entire header and hero section repeats three times vertically."},
+        {"source": "eyeson-vision-synthesis", "severity": "high",
+         "title": "Pricing cards are cut off and hide actual costs",
+         "summary": "The cards are cut off, preventing users from seeing the actual price."},
+        {"source": "eyeson-vision-synthesis", "severity": "high",
+         "title": "Vague value proposition",
+         "summary": "The hero copy is abstract and hard to act on."},
+    ]
+    run = _finished_run([["e1", "e2", "e3"], ["e1", "e2", "e3", "e4"]])
+
+    notes = JobExecutor._temper_contradicted_findings(findings, [run])
+
+    assert [item["severity"] for item in findings] == ["medium", "medium", "high"], (
+        "only the contradicted claims are capped; the rest of the critique stands")
+    assert "rendered more than once" in findings[0]["summary"]
+    assert "completed the tasks it came to do" in findings[1]["summary"]
+    # Kept, not deleted: the visual observation may still be worth a look.
+    assert "repeats three times" in findings[0]["summary"]
+    # And the report says what it did, rather than quietly rewriting a severity.
+    assert len(notes) == 2
+    assert all("reported as" in note and "carried at medium" in note for note in notes)
+
+
+def test_a_duplication_claim_stands_when_the_walk_saw_a_duplicate():
+    """The guard must not swallow a real one. If an element really is on the page
+    twice, the walk lists it twice, and the claim is corroborated rather than
+    contradicted."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Header repeats", "summary": "The header is duplicated on the page."}
+    doubled = _finished_run([["e1", "e2", "e1"]])
+
+    JobExecutor._temper_contradicted_findings([finding], [doubled])
+
+    assert finding["severity"] == "critical"
+    assert "not supported by this run" not in finding["summary"]
+
+
+def test_a_blocking_claim_stands_when_the_run_did_not_finish():
+    """And a page that really did stop somebody keeps its severity."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Cards hide the price",
+               "summary": "The cards are cut off, preventing users from seeing the actual price."}
+    gave_up = {"runId": "run_1", "verdict": {
+        "status": "failed", "summary": "Walked away.",
+        "criteria": [{"id": "tasks-completed", "result": "not-met"}]}, "timeline": []}
+
+    JobExecutor._temper_contradicted_findings([finding], [gave_up])
+
+    assert finding["severity"] == "high"
+
+    # A finding from anywhere but the vision critique is never touched: the other
+    # sources are measurements, not readings of a picture.
+    measured = {"source": "perception.notPerceived", "severity": "high",
+                "title": "Fails WCAG AA contrast", "summary": "It repeats and prevents reading."}
+    JobExecutor._temper_contradicted_findings([measured], [_finished_run([["e1"]])])
+    assert measured["severity"] == "high"
