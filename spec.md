@@ -3396,7 +3396,7 @@ them. That is what task #32 -- compiling the actor with GEPA against a real
 corpus -- exists to close, and it is now the largest single thing between this
 and a persona that behaves like the person on every step.
 
-### 55.7 Four more trap shapes, for §53.4
+### 55.7 Trap shapes, for §53.4
 
 - **A flag whose default was never exercised.** §55.1. The mechanism was correct
   and had simply never run.
@@ -3422,3 +3422,19 @@ and a persona that behaves like the person on every step.
 - **A confident reader of correct evidence.** A vision model handed a good capture
   can still describe something that is not there, with more certainty than any
   measurement would. Whatever part of its claim is checkable should be checked.
+- **A question asked of one view and answered from another.** Cycle 14. The actor
+  chose its action from perception -- what this person's eyes delivered -- and was
+  then asked whether its expectation had come true while holding the accessibility
+  tree. Both views were sound. Comparing across them was not: three times the run
+  denied, verbatim, a price paragraph perception had just listed, frustration
+  reached 1.00, and the top finding in the report was about a fault the page does
+  not have. A comparison is only a comparison if both sides are the same kind of
+  looking. The fix cost nothing -- the second view was already being computed one
+  turn later, and only the order was wrong.
+- **A rule stated at one of the places that needs it.** The instruction never to
+  mention refs went into the acting prompt, because that is where refs were being
+  leaked when it was written. Reflection writes prose a reader sees too, and it
+  had been handed the ref in its own prompt -- `What you did: CLICK e18` -- and
+  told not to say it. When a rule exists because prose reaches a reader, it
+  belongs at every place prose is written, not at the one where it was first
+  noticed.

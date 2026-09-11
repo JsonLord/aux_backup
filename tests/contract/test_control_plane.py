@@ -2748,6 +2748,68 @@ def test_a_blocking_claim_stands_when_the_run_did_not_finish():
     assert measured["severity"] == "high"
 
 
+def _run_that_read_a_price(prices=("£200 / user / year", "£100 / user / year")):
+    """A run whose persona said, before acting, that it could see these sums."""
+    return {"runId": "run_1", "profileId": "persona_1",
+            "verdict": {"status": "passed",
+                        "summary": "Completed what they came to do.",
+                        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+            "timeline": [{"type": "persona.expectation",
+                          "data": {"visible": f"a paragraph: 3-day free trial, then {price}."}}
+                         for price in prices]}
+
+
+def test_a_missing_price_claim_falls_to_what_the_persona_read_off_the_page():
+    """Cycle 14 shipped "Missing pricing details on pricing cards" at critical --
+    "they do not display any actual prices ... cut off at the bottom, making it
+    impossible for users to determine cost" -- in a run whose own verdict reads
+    "it lists two options -- £200 per user per year ... and £100 per user per
+    year", and whose persona had read both off the page before acting.
+
+    A report that contradicts itself in two directions is worth less than one
+    that says nothing."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Missing pricing details on pricing cards",
+               "summary": "The cards do not display any actual prices or currency amounts."}
+
+    notes = JobExecutor._temper_contradicted_findings([finding], [_run_that_read_a_price()])
+
+    assert finding["severity"] == "medium"
+    assert "£200" in finding["summary"] and "persona\'s own eyes" in finding["summary"]
+    assert len(notes) == 1
+    # Kept, not deleted: the cards may well be worth redrawing.
+    assert "do not display any actual prices" in finding["summary"]
+
+
+def test_a_missing_price_claim_stands_when_nobody_ever_saw_a_price():
+    """The guard must not swallow a real one. A page that genuinely never shows a
+    number leaves no number in anything the persona said it could see."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Missing pricing details on pricing cards",
+               "summary": "The cards do not display any actual prices or currency amounts."}
+    priceless = {"runId": "run_1", "verdict": {
+        "status": "passed", "summary": "Never found what it costs.",
+        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+        "timeline": [{"type": "persona.expectation",
+                      "data": {"visible": "a heading and a 'Contact sales' button"}}]}
+
+    JobExecutor._temper_contradicted_findings([finding], [priceless])
+
+    assert finding["severity"] == "critical"
+
+
+def test_an_absence_claim_about_something_other_than_money_is_left_alone():
+    """The rebuttal is only as good as the thing it can spot. A price is
+    unambiguous in free text; "the trust signals are missing" is not, and a
+    guard that cannot check a claim must not temper it."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "No social proof", "summary": "Customer logos are missing from the page."}
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_read_a_price()])
+
+    assert finding["severity"] == "high"
+
+
 def test_a_finding_cannot_claim_more_distress_than_the_page_ever_caused():
     """The vision reviewer estimates frustration, confusion and trust erosion from
     a single screenshot, and those numbers reach the report as the finding's stated

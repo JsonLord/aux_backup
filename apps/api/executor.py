@@ -1147,6 +1147,20 @@ class JobExecutor:
     _CLAIMS_BLOCKING = re.compile(
         r"\bprevent(?:s|ing|ed)?\b|\bblocks?\b|\bblocking\b|\bcannot (?:see|find|read)\b"
         r"|\bunable to\b|\bhide(?:s|n)? the actual\b", re.I)
+    # A finding claiming something is simply not there.
+    _CLAIMS_ABSENCE = re.compile(
+        r"\bmissing\b|\bnot (?:present|shown|displayed|visible|listed)\b|\bno (?:price|prices|"
+        r"pricing|cost|amount)\b|\bwithout (?:any )?(?:price|pricing|cost)\b|\bdoes not (?:show|"
+        r"display|state|list)\b|\bnever (?:shows|displays)\b|\babsent\b|\bfails? to (?:show|"
+        r"display)\b", re.I)
+    # What this finding says is missing has to be the thing the run can prove it
+    # saw. Money is that thing: a price is unambiguous to spot in free text, and
+    # both live false findings were about one.
+    _CLAIMS_ABSENT_MONEY = re.compile(
+        r"\bpric(?:e|es|ing)\b|\bcosts?\b|\bamounts?\b|\bfigures?\b|\brates?\b"
+        r"|[£$€]\s*\d", re.I)
+    # A sum of money as it appears on a page: a currency mark against a number.
+    _A_PRICE = re.compile(r"[£$€]\s?\d[\d,.]*", re.U)
 
     @classmethod
     def _contradicted_by_the_run(cls, finding: dict[str, Any],
@@ -1180,6 +1194,20 @@ class JobExecutor:
                 return ("the element walk recorded every element exactly once on all "
                         f"{len(captures)} capture(s) of this run, so nothing on the page was "
                         "rendered more than once")
+        # Nothing is missing that this person read off the page. The persona
+        # commits to what it can see before every action, and the verdict quotes
+        # what it found; either is the run's own testimony that the thing was
+        # there. Cycle 14 shipped "Missing pricing details on pricing cards" at
+        # critical and "Promised more than it did: Monthly" at high, in a run
+        # whose verdict reads "it lists two options -- £200 per user per year
+        # ... and £100 per user per year". A report that contradicts itself in
+        # two directions is worth less than one that says nothing.
+        if cls._CLAIMS_ABSENCE.search(text) and cls._CLAIMS_ABSENT_MONEY.search(text):
+            quoted = cls._prices_the_run_read(journeys)
+            if quoted:
+                shown = ", ".join(sorted(quoted)[:3])
+                return ("this run read a price off the page with the persona's own eyes "
+                        f"({shown}), so the page does state a cost")
         # Nothing was blocked if the run finished.
         if cls._CLAIMS_BLOCKING.search(text):
             finished = [journey for journey in journeys
@@ -1190,6 +1218,26 @@ class JobExecutor:
                 return ("the run completed the tasks it came to do"
                         + (f' -- "{said[:180]}"' if said else ""))
         return ""
+
+    @classmethod
+    def _prices_the_run_read(cls, journeys: list[dict[str, Any]]) -> set[str]:
+        """Every sum of money this run recorded as visible to the persona.
+
+        Drawn only from what the run says the persona could see -- the `visible`
+        line it commits to before each action, and the verdict it reached -- never
+        from the page source or the accessibility tree. The claim being tested is
+        "a visitor cannot see a price", so the rebuttal has to come from a visitor
+        seeing one.
+        """
+        said: set[str] = set()
+        for journey in journeys:
+            for event in journey.get("timeline") or []:
+                if event.get("type") != "persona.expectation":
+                    continue
+                said.update(cls._A_PRICE.findall(str((event.get("data") or {}).get("visible") or "")))
+            said.update(cls._A_PRICE.findall(
+                str((journey.get("verdict") or {}).get("summary") or "")))
+        return said
 
     @staticmethod
     def _what_the_page_actually_cost(journeys: list[dict[str, Any]]) -> dict[str, float] | None:
