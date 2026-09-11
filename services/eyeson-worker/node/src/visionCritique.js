@@ -54,6 +54,26 @@ class VisionUnavailableError extends Error {
 // Statuses where the identical request is rejected every time. Retrying one
 // burns the attempt budget, delays the failure by the backoff, and buries the
 // real cause (a 413 payload, a bad key) behind a generic "after 3 attempts".
+// A request that never reached a server: DNS, a dropped link, a provider
+// restarting. undici throws TypeError("fetch failed"); a timeout arrives as an
+// AbortError. Neither carries an HTTP status, so both fell through to the plain
+// linear retry.
+const UNREACHABLE_ATTEMPTS = 6;
+// However many attempts are allowed, stop extending them after this long, so an
+// endpoint that hangs rather than refuses cannot hold the critique for ten
+// minutes.
+const UNREACHABLE_PATIENCE_MS = 180000;
+const MAX_BACKOFF_MS = 30000;
+
+/** Nothing answered. Distinct from something answering unhappily. */
+function unreachable(error) {
+  if (error?.status !== undefined) return false;
+  const name = String(error?.name || "");
+  if (name === "TypeError" || name === "AbortError") return true;
+  return /fetch failed|network|socket hang up|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|UND_ERR/i
+    .test(String(error?.message || ""));
+}
+
 const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
 
 const DEFAULT_VISION_MAX_TOKENS = 6000;
@@ -422,7 +442,9 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
   };
   let lastError;
   let attemptsSpent = 0;
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+  let allowed = Math.max(1, maxAttempts);
+  const startedAt = Date.now();
+  for (let attempt = 1; attempt <= allowed; attempt += 1) {
     attemptsSpent = attempt;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
@@ -449,7 +471,20 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
     } catch (error) {
       lastError = error;
       if (NON_RETRYABLE_STATUS.has(error?.status)) break;
-      if (attempt < maxAttempts) await new Promise((resolve) => setTimeout(resolve, retryWaitMs * attempt));
+      // Nothing answered at all. The same blip that ended two of three personas
+      // in cycle 20 also took the whole vision critique, which had the same three
+      // quick tries and the same linear wait -- so the report carried no vision
+      // findings and said so, truthfully, about an outage that lasted under a
+      // minute. An endpoint that is gone deserves more patience than one that
+      // answered unhappily, not less.
+      if (unreachable(error) && Date.now() - startedAt < UNREACHABLE_PATIENCE_MS) {
+        allowed = Math.max(allowed, UNREACHABLE_ATTEMPTS);
+      }
+      if (attempt < allowed) {
+        await new Promise((resolve) => setTimeout(resolve,
+          unreachable(error) ? Math.min(MAX_BACKOFF_MS, retryWaitMs * 2 ** attempt)
+                             : retryWaitMs * attempt));
+      }
     } finally {
       clearTimeout(timeout);
     }
@@ -537,4 +572,5 @@ function toPainPoint(finding, context) {
 module.exports = {
   buildPrompt, captureSize, DEFAULT_VISION_MAX_TOKENS, completeObjectsIn, salvageTruncatedCritique, visionMaxTokens,
   critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
-  VisionUnavailableError, FINDING_CATEGORIES, ELEMENT_ROLES };
+  VisionUnavailableError, FINDING_CATEGORIES, ELEMENT_ROLES,
+  unreachable, UNREACHABLE_ATTEMPTS };

@@ -10,7 +10,9 @@ const {
   ACTION_TYPES, ACTION_VOCABULARY, backoffMs, buildPrompt, completion, completionBudget, parseDecision,
   retryAfterMs, salvageAction,
   buildReflectionPrompt,
-  describeTarget} = require("../src/personaActor");
+  describeTarget,
+  unreachable,
+  UNREACHABLE_ATTEMPTS} = require("../src/personaActor");
 
 test("a decision cut off mid-sentence keeps what the person actually said", async () => {
   // Discarding it costs the run a turn and produces the "malformed" fallback --
@@ -147,4 +149,59 @@ test("an unnamed target still says what was acted on", () => {
     "a ref nobody can read beats an action with no object at all");
   assert.equal(describeTarget({ type: "CLICK", target: "" }, ""), "");
   assert.equal(describeTarget({ type: "CLICK", target: "e18" }, "  Monthly  "), ' the "Monthly"');
+});
+
+test("an endpoint that is gone gets more patience than one that is busy", async () => {
+  // Cycle 20 lost two of three personas to a blip that lasted under a minute.
+  // Both died on their first actor call, 33 seconds apart, because a transport
+  // failure carries no HTTP status and so fell through to the plain linear retry
+  // -- three tries over four seconds -- while a 429, which at least proves
+  // something is listening, was given seven attempts and up to thirty seconds
+  // between them.
+  assert.ok(unreachable(new TypeError("fetch failed")));
+  assert.ok(unreachable(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  assert.ok(unreachable(new Error("connect ECONNREFUSED 10.0.0.1:443")));
+  assert.ok(!unreachable({ status: 502 }), "something answered, unhappily");
+  assert.ok(!unreachable({ status: 429 }), "the rate limit has its own patience");
+
+  // Exponential, and it climbs to the same ceiling a rate limit does.
+  const gone = new TypeError("fetch failed");
+  assert.deepEqual([1, 2, 3, 4, 5].map((n) => backoffMs(gone, n, 1500)),
+    [3000, 6000, 12000, 24000, 30000]);
+  // A plain upstream error is unchanged: it was never the problem.
+  assert.deepEqual([1, 2, 3].map((n) => backoffMs({ status: 502 }, n, 1500)),
+    [1500, 3000, 4500]);
+});
+
+test("a transport failure is retried past the default attempt count", async () => {
+  let calls = 0;
+  const originalFetch = global.fetch;
+  global.fetch = async () => {
+    calls += 1;
+    if (calls < 5) throw new TypeError("fetch failed");
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "recovered" } }] }) };
+  };
+  try {
+    const answer = await completion({ system: "s", user: "u", model: "m", apiKey: "k",
+      baseUrl: "https://example.test/v1", wait: async () => {} });
+    assert.equal(answer, "recovered");
+    assert.equal(calls, 5, "three attempts would have given up before the endpoint came back");
+  } finally {
+    global.fetch = originalFetch;
+  }
+});
+
+test("patience for an endpoint that is gone is still bounded", async () => {
+  let calls = 0;
+  const originalFetch = global.fetch;
+  global.fetch = async () => { calls += 1; throw new TypeError("fetch failed"); };
+  try {
+    await assert.rejects(
+      completion({ system: "s", user: "u", model: "m", apiKey: "k",
+        baseUrl: "https://example.test/v1", wait: async () => {} }),
+      /persona actor call failed after 6 attempt\(s\): fetch failed/);
+    assert.equal(calls, UNREACHABLE_ATTEMPTS, "it gives up, it does not retry for ever");
+  } finally {
+    global.fetch = originalFetch;
+  }
 });

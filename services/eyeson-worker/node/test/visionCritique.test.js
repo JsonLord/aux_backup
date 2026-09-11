@@ -3,7 +3,9 @@ const assert = require("node:assert/strict");
 const test = require("node:test");
 const { captureSize, critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
   completeObjectsIn, visionMaxTokens, DEFAULT_VISION_MAX_TOKENS,
-  VisionUnavailableError } = require("../src/visionCritique");
+  VisionUnavailableError,
+  unreachable,
+  UNREACHABLE_ATTEMPTS} = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
 
 test("buildPrompt lists the page's elements by index, and does not show the selector", () => {
@@ -496,4 +498,15 @@ test("with no element list a named citation stands and an index resolves to noth
   assert.deepEqual(withoutList.map((item) => item.elementSelector), ["whatever"]);
   assert.ok(withoutList.every((item) => item.elementSelector),
     "a citation that resolves to nothing is not a citation");
+});
+
+test("the vision critique also waits out an endpoint that is gone", async () => {
+  // The same blip that ended two of three personas in cycle 20 took the whole
+  // vision critique with it, for the same reason: three quick tries and a linear
+  // wait. The report then said, truthfully, that it carried no vision findings --
+  // about an outage that lasted under a minute.
+  assert.ok(unreachable(new TypeError("fetch failed")));
+  assert.ok(unreachable(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  assert.ok(!unreachable({ status: 413 }), "a payload too large is not a network problem");
+  assert.equal(UNREACHABLE_ATTEMPTS, 6);
 });

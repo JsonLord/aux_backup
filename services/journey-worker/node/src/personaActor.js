@@ -333,6 +333,29 @@ function buildReflectionPrompt({ profile, expectation, action, observation, targ
 // budget and delays a failure that was never going to change.
 const NON_RETRYABLE_STATUS = new Set([400, 401, 403, 404, 413, 422]);
 
+// A request that never reached a server at all: DNS, a dropped link, a provider
+// restarting. undici throws TypeError("fetch failed"); a timeout arrives as an
+// AbortError. Neither carries an HTTP status, so both fell through to the plain
+// linear retry -- three tries over four seconds -- while a 429, which at least
+// proves something is listening, was given seven attempts and up to thirty
+// seconds between them. The endpoint being gone is not a smaller problem than
+// the endpoint being busy. Cycle 20 lost two of three personas to a blip that
+// lasted under a minute: both died on their first actor call, 33 seconds apart.
+const UNREACHABLE_ATTEMPTS = 6;
+// However many attempts are allowed, stop extending them after this long. Six
+// attempts against an endpoint that hangs rather than refuses would otherwise
+// be twelve minutes of one step.
+const UNREACHABLE_PATIENCE_MS = 180000;
+
+/** Nothing answered. Distinct from something answering unhappily. */
+function unreachable(error) {
+  if (error?.status !== undefined) return false;
+  const name = String(error?.name || "");
+  if (name === "TypeError" || name === "AbortError") return true;
+  return /fetch failed|network|socket hang up|ECONNRESET|ECONNREFUSED|ENOTFOUND|EAI_AGAIN|ETIMEDOUT|UND_ERR/i
+    .test(String(error?.message || ""));
+}
+
 // The one status that says, in so many words, "you are going too fast; wait".
 //
 // It was being treated exactly like a 502: three attempts, 1.5s then 3s, four and
@@ -365,6 +388,7 @@ function retryAfterMs(header) {
 
 /** How long to hold off before trying this failure again. */
 function backoffMs(error, attempt, retryWaitMs) {
+  if (unreachable(error)) return Math.min(MAX_BACKOFF_MS, retryWaitMs * 2 ** attempt);
   if (error?.status !== RATE_LIMITED) return retryWaitMs * attempt;
   const asked = retryAfterMs(error.retryAfter);
   // Their number, capped: a server asking for ten minutes is asking for more
@@ -408,6 +432,7 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
   // Raised for a rate limit only, and only once one is actually met, so a
   // healthy endpoint is never waited on longer than it was before.
   let allowed = Math.max(1, attempts);
+  const startedAt = Date.now();
   for (let attempt = 1; attempt <= allowed; attempt += 1) {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -435,6 +460,9 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
       lastError = error;
       if (NON_RETRYABLE_STATUS.has(error?.status)) break;
       if (error?.status === RATE_LIMITED) allowed = Math.max(allowed, RATE_LIMIT_ATTEMPTS);
+      else if (unreachable(error) && Date.now() - startedAt < UNREACHABLE_PATIENCE_MS) {
+        allowed = Math.max(allowed, UNREACHABLE_ATTEMPTS);
+      }
       if (attempt < allowed) await wait(backoffMs(error, attempt, retryWaitMs));
     } finally {
       clearTimeout(timer);
@@ -527,7 +555,7 @@ function scriptedActor(script) {
 }
 
 module.exports = {
-  describeTarget,
+  describeTarget, unreachable, UNREACHABLE_ATTEMPTS,
   backoffMs, retryAfterMs, ACTION_CONSTRAINTS, ACTION_TYPES, ACTION_VOCABULARY, MATCH_OUTCOMES,
   NON_RETRYABLE_STATUS, completionBudget, salvageAction, salvageDecision,
   affectInWords, buildPrompt,
