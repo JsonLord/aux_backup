@@ -2955,3 +2955,147 @@ def test_a_finding_is_titled_by_what_the_walk_read_off_the_control():
     assert JobExecutor._promise_label(
         "Clicking the 'Annual - save 17%' button will show prices",
         {"type": "CLICK", "target": "e17"}) == "Annual - save 17%"
+
+
+def _promise_group(**over):
+    """A broken-promise group in the shape cycle 26 actually produced."""
+    group = {
+        "label": "Start 3-day free trial", "hits": 1, "cost": 0.22,
+        "personas": ["p1"], "names": ["Friedrich Wolf"], "runs": ["r1"],
+        "expectations": ["Clicking the 'Start 3-day free trial' button will open a sign-up modal "
+                         "that displays the pricing details for the service"],
+        "gaps": [{"quote": "Clicked button led to generic content rather than the expected sign-up "
+                           "modal showing pricing.", "personaId": "p1", "personaName": "Friedrich Wolf"}],
+        "actions": [{"type": "CLICK", "target": "e22"}],
+        "boxes": [{"x": 320, "y": 540, "width": 210, "height": 48}],
+        "sightings": [{"quote": "I see a 'Start 3-day free trial' button under each plan, and two "
+                                "pricing paragraphs.", "personaId": "p1", "personaName": "Friedrich Wolf"}],
+        "roles": ["CLICK"],
+    }
+    group.update(over)
+    return group
+
+
+def test_a_finding_says_one_thing_once():
+    """The slide prints four panels. "Clicked button led to generic content rather than the
+    expected sign-up modal showing pricing" used to fill three of them: Observed user
+    issue, Root cause analysis, and In the user's words. Three headings, one sentence,
+    and the panel meant to carry the thinking carried none."""
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+    gap = "Clicked button led to generic content"
+
+    assert gap in finding["summary"], "the observation still reports what happened"
+    assert gap not in finding["rootCause"], "the root cause is not the symptom said again"
+    assert gap not in finding["personaEvidence"][0]["quote"], "nor is the quote"
+    # And the root cause does not simply move the duplication to the expectation.
+    assert "will open a sign-up modal" not in finding["rootCause"]
+    # The quote is the person's own first-person account of what they could see --
+    # the one thing on the slide that is not already elsewhere on it.
+    assert finding["personaEvidence"][0]["quote"].startswith("I see")
+
+
+def test_the_root_cause_names_a_mechanism_and_it_depends_on_what_happened():
+    """"The click only moves the visitor instead" is the wrong lesson for a control that
+    did nothing at all. The mechanism is read from the visitor's own verb and from the
+    way the run described what followed."""
+    # The fixture's own expectation is "will open a modal that displays pricing": the
+    # verb that governs it is "open", and the run recorded that the click did navigate,
+    # just not to what was named.
+    moved_else = JobExecutor._why_they_expected_that(_promise_group())
+    assert "expected to be taken somewhere" in moved_else
+    assert "somewhere it has named" in moved_else
+
+    told_else = JobExecutor._why_they_expected_that(_promise_group(
+        expectations=["Reading the pricing section will show me what the plans cost"],
+        gaps=[{"quote": "the section carried plan names but no amounts"}]))
+    assert "expected to be told something" in told_else
+    assert "the label is the defect" in told_else
+
+    # "open a page showing the plan" is a request to be taken somewhere: the verb that
+    # governs the sentence is the one that comes first, not whichever pattern is tested first.
+    moved_silent = JobExecutor._why_they_expected_that(_promise_group(
+        label="Monthly",
+        expectations=["Clicking Monthly will open a page showing the monthly plan"],
+        gaps=[{"quote": "The view did not change and the button is still present."}]))
+    assert "expected to be taken somewhere" in moved_silent
+    assert "reads as a door" in moved_silent
+    assert "nothing they could see" in moved_silent
+
+    told_silent = JobExecutor._why_they_expected_that(_promise_group(
+        expectations=["Clicking will show the annual price"],
+        gaps=[{"quote": "no price amounts were displayed; nothing changed"}]))
+    assert "Silence reads as a control that is broken" in told_silent
+
+    # Nothing to reason from, nothing asserted.
+    assert JobExecutor._why_they_expected_that(_promise_group(expectations=[])) == ""
+
+
+def test_a_finding_knows_where_its_control_was():
+    """The report crops evidence to the element a finding is about -- but only when the
+    finding knows the box, and the one finding built from what a person actually did
+    carried none. So the best-evidenced finding in the report illustrated itself with a
+    whole-page screenshot captioned "page context"."""
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+    assert finding["elementBox"] == {"x": 320, "y": 540, "width": 210, "height": 48}
+    assert finding["elementName"] == "Start 3-day free trial"
+
+
+def test_measured_cost_arrives_with_the_scale_it_is_measured_on():
+    """"0.22 of this visitor's patience on a 0-1 scale" is a real number in a unit nobody
+    knows, which reads as less credible than a vague sentence."""
+    summary = JobExecutor._broken_promise_finding(_promise_group())["summary"]
+    assert "0.22" in summary, "the measurement stays"
+    assert "calm to walking away" in summary, "and arrives with something to hold it against"
+
+    assert "most of the way" in JobExecutor._patience_in_words(0.8)
+    assert "about a third" in JobExecutor._patience_in_words(0.4)
+    assert "small but measurable" in JobExecutor._patience_in_words(0.03)
+    # Out-of-range input is clamped rather than described as impossible.
+    assert JobExecutor._patience_in_words(-1).startswith("0.00")
+
+
+def test_the_report_writes_plurals_like_a_person():
+    """"1 usability issue(s) were identified" tells the reader, in its own first sentence,
+    that the document was assembled rather than written."""
+    assert JobExecutor._plural(1, "run") == "1 run"
+    assert JobExecutor._plural(2, "run") == "2 runs"
+    assert JobExecutor._plural(1, "person", "people") == "1 person"
+    assert JobExecutor._plural(3, "person", "people") == "3 people"
+    assert "(s)" not in JobExecutor._broken_promise_finding(_promise_group())["evidence"]
+
+
+def test_traits_are_claimed_only_where_the_encounter_shows_them():
+    """A run with three deliberately different visitors reported its findings as though
+    they had happened to a generic one, because susceptibleTraits shipped None."""
+    assert JobExecutor._traits_behind(_promise_group()) == [], "one calm touch claims nothing"
+    assert "low patience" in JobExecutor._traits_behind(_promise_group(hits=3))
+    assert "high irritability" in JobExecutor._traits_behind(_promise_group(cost=0.5))
+    assert "shared across dispositions" in JobExecutor._traits_behind(
+        _promise_group(personas=["p1", "p2"]))
+
+
+def test_a_run_that_saw_less_than_it_tried_to_says_so():
+    """Cycle 26 lost four walks in one journey and shipped run_diagnostics: [], so a reader
+    had no way to know the review was made on ten steps of twelve."""
+    from apps.api.executor import _coverage_diagnostics
+
+    timeline = ([{"type": "persona.expectation"}] * 12
+                + [{"type": "persona.perception"}] * 10
+                + [{"type": "persona.perception_fallback",
+                    "data": {"reason": "the perception service returned nothing"}}] * 4
+                + [{"type": "persona.reflection_unavailable"}] * 3)
+    (entry,) = _coverage_diagnostics([{"runId": "r1", "profileId": "p1", "timeline": timeline}])
+
+    assert entry["severity"] == "medium"
+    assert "10 of 12 steps" in entry["summary"]
+    assert "the perception service returned nothing (4×)" in entry["summary"]
+    assert "3 action(s) drew no conclusion" in entry["summary"]
+    assert "unknown rather than absent" in entry["recommendation"]
+
+    # A run that saw everything says nothing, and a run that lost most of it says more.
+    assert _coverage_diagnostics([{"runId": "r2", "timeline":
+        [{"type": "persona.expectation"}] * 5 + [{"type": "persona.perception"}] * 5}]) == []
+    (bad,) = _coverage_diagnostics([{"runId": "r3", "timeline":
+        [{"type": "persona.expectation"}] * 12 + [{"type": "persona.perception"}] * 4
+        + [{"type": "persona.perception_fallback", "data": {"reason": "the page moved under the walk"}}] * 8}])
+    assert bad["severity"] == "high"

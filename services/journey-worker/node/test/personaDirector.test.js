@@ -3,7 +3,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { PersonaDirector, nameOf, observationFrom, outcomeEvent } = require("../src/personaDirector");
+const { PersonaDirector, boxOf, nameOf, observationFrom, outcomeEvent } = require("../src/personaDirector");
 const { affectInWords, parseDecision, personaInWords, scriptedActor } = require("../src/personaActor");
 
 const JOURNEY = {
@@ -1404,4 +1404,48 @@ test("a service that really returned nothing is still a fallback", async () => {
   const said = recorder.events.find((event) => event.type === "persona.perception_fallback");
   assert.ok(said, "no observation field at all is a failure and still says so");
   assert.match(said.data.reason, /returned nothing/);
+});
+
+test("the expectation event carries where the control was, not just what it said", async () => {
+  // The report crops its evidence to the element a finding is about -- but only when
+  // the finding knows the box, and the one finding built from what a person actually
+  // did carried none. So the best-evidenced finding in the report illustrated itself
+  // with a whole-page screenshot captioned "page context".
+  const box = { x: 320, y: 540, width: 210, height: 48 };
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[e22] button Start 3-day free trial", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], notLookedAt: [],
+        perceived: [{ selector: "e22", name: "Start 3-day free trial", box }] };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, frames: () => [],
+    walk: async () => ({
+      elements: [{ selector: "e22", role: "button", name: "Start 3-day free trial", box }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([
+      { type: "CLICK", target: "e22", visible: "a trial button", expectation: "the price" },
+      { type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const said = recorder.events.find((event) => event.type === "persona.expectation");
+  assert.equal(said.data.targetName, "Start 3-day free trial");
+  assert.deepEqual(said.data.targetBox, box);
+});
+
+test("a box nobody measured is left undefined rather than guessed", () => {
+  const perception = { perceived: [{ selector: "e1", name: "Pricing", box: { x: 1, y: 2, width: 3, height: 4 } }] };
+  assert.deepEqual(boxOf("e1", perception), { x: 1, y: 2, width: 3, height: 4 });
+  assert.equal(boxOf("e9", perception), null);
+  assert.equal(boxOf("e1", null), null);
+  // A box without usable dimensions is no box: cropping to it would produce an
+  // empty image and a slide that looks broken.
+  assert.equal(boxOf("e2", { perceived: [{ selector: "e2", name: "x", box: { x: 0, y: 0 } }] }), null);
+  assert.equal(boxOf("e3", { notLookedAt: [{ selector: "e3", name: "x", box: { x: 5, y: 6, width: 7, height: 8 } }] }).width, 7,
+    "legible but never fixated still has a place on the page");
 });

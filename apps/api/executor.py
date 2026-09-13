@@ -6,6 +6,7 @@ JourneyTest worker can replace this development executor without changing client
 from __future__ import annotations
 
 import base64
+from collections import Counter
 from html import escape
 from io import BytesIO
 import json
@@ -211,6 +212,55 @@ def _instrument_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, An
                 "evidence": f"{event.get('type')} at step {data.get('sinceStep', '?')} of run {run_id}",
                 "source": "instrument", "runId": run_id,
                 "personaId": journey.get("profileId")})
+    return diagnostics
+
+
+def _coverage_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """How much of each run the instruments actually saw.
+
+    `_instrument_diagnostics` reports an instrument that stopped answering, which
+    fires once and ends the run's eyesight. It says nothing about a run that kept
+    its eyesight and lost individual steps -- and that is the common case. Cycle 26
+    lost four walks in one journey and shipped `run_diagnostics: []`, so a reader
+    had no way to know the review was made on ten steps of twelve.
+
+    This is not a failure report. The run worked; it saw less of the page than it
+    tried to, and a reader weighing an absent finding deserves to know which.
+    """
+    diagnostics = []
+    for journey in journeys:
+        timeline = journey.get("timeline") or []
+        steps = sum(1 for event in timeline if event.get("type") == "persona.expectation")
+        looked = sum(1 for event in timeline if event.get("type") == "persona.perception")
+        lost = [str((event.get("data") or {}).get("reason") or "").strip()
+                for event in timeline if event.get("type") == "persona.perception_fallback"]
+        undrawn = sum(1 for event in timeline if event.get("type") == "persona.reflection_unavailable")
+        if not steps or (not lost and not undrawn):
+            continue
+        share = (steps - looked) / steps if steps else 0.0
+        reasons = Counter(reason for reason in lost if reason)
+        why = "; ".join(f"{reason} ({count}\u00d7)" for reason, count in reasons.most_common(3))
+        parts = []
+        if lost:
+            parts.append(f"This person's eyes resolved the page on {looked} of {steps} steps. "
+                         f"Where they did not, the run reasoned about the accessibility tree instead, "
+                         f"so no eyesight finding could be made on those steps"
+                         + (f" -- {why}" if why else "") + ".")
+        if undrawn:
+            parts.append(f"{undrawn} action(s) drew no conclusion at all, because the page could not "
+                         f"be seen the same way before and after them. Comparing across two different "
+                         f"kinds of looking invents gaps, so nothing was concluded rather than "
+                         f"something guessed.")
+        diagnostics.append({
+            "severity": "high" if share > 0.34 else "medium" if share > 0 else "info",
+            "category": "harness", "title": "Part of this run was made without eyesight",
+            "summary": " ".join(parts),
+            "recommendation": ("Read an absent eyesight finding on those steps as unknown rather than "
+                               "absent. Re-running is cheap and the lost steps are usually transient."),
+            "evidence": f"{looked}/{steps} steps perceived, {len(lost)} walk(s) unusable, "
+                        f"{undrawn} comparison(s) skipped",
+            "source": "coverage", "runId": journey.get("runId"),
+            "personaId": journey.get("profileId")})
     return diagnostics
 
 
@@ -625,7 +675,8 @@ class JobExecutor:
         # Added after the split, not before: an instrument failure is a diagnostic by
         # construction and must never be merged into, or dropped by, the usability
         # findings it is reported alongside.
-        run_diagnostics = _instrument_diagnostics(journeys) + run_diagnostics
+        run_diagnostics = (_instrument_diagnostics(journeys)
+                           + _coverage_diagnostics(journeys) + run_diagnostics)
         findings, unverified = self._drop_unverifiable_quotes(findings, self._visible_text_corpus(journeys))
         if unverified:
             quoted = "; ".join(f"{item['title']!r} (quoted {', '.join(repr(q) for q in item['quotes'])})"
@@ -1379,6 +1430,8 @@ class JobExecutor:
             pending: dict[str, Any] | None = None
             expectation = ""
             measured_name = ""
+            measured_box: dict[str, Any] | None = None
+            could_see = ""
             unmet: dict[str, Any] | None = None
             previous = 0.0
             for event in journey.get("timeline") or []:
@@ -1386,6 +1439,12 @@ class JobExecutor:
                 if kind == "persona.expectation":
                     pending, expectation = data.get("action") or {}, str(data.get("expectation") or "")
                     measured_name = str(data.get("targetName") or "").strip()
+                    measured_box = data.get("targetBox") or None
+                    # What this person could see when they formed the expectation,
+                    # in their own words. The slide's fourth panel used to quote the
+                    # gap, which the summary two panels earlier already quotes --
+                    # three headings, one sentence.
+                    could_see = str(data.get("visible") or "").strip()
                     unmet = None
                 elif kind == "persona.reflection" and pending is not None:
                     # A promise is made by a control. A READ that returns something
@@ -1398,7 +1457,9 @@ class JobExecutor:
                     if (str(data.get("matched") or "").lower() == "no"
                             and str(pending.get("type") or "").upper() in cls._PROMISING_ACTIONS):
                         unmet = {"action": pending, "expectation": expectation,
-                                 "name": measured_name,
+                                 "name": measured_name, "box": measured_box,
+                                 "couldSee": could_see,
+                                 "observed": str(data.get("observed") or "").strip(),
                                  "gap": str(data.get("gap") or "").strip()}
                     pending = None
                 elif kind == "persona.affect":
@@ -1412,7 +1473,8 @@ class JobExecutor:
                                                    unmet.get("name"))
                         group = groups.setdefault(label, {
                             "label": label, "hits": 0, "cost": 0.0, "personas": [], "names": [],
-                            "runs": [], "gaps": [], "expectations": [], "actions": []})
+                            "runs": [], "gaps": [], "expectations": [], "actions": [],
+                            "boxes": [], "sightings": [], "roles": []})
                         group["hits"] += 1
                         group["cost"] += max(0.0, frustration - previous)
                         if persona_id and persona_id not in group["personas"]:
@@ -1429,6 +1491,14 @@ class JobExecutor:
                                                   "personaName": persona_name})
                         if unmet["expectation"]:
                             group["expectations"].append(unmet["expectation"])
+                        if unmet.get("box"):
+                            group["boxes"].append(unmet["box"])
+                        if unmet.get("couldSee"):
+                            group["sightings"].append({"quote": unmet["couldSee"], "personaId": persona_id,
+                                                       "personaName": persona_name})
+                        role = str((unmet.get("action") or {}).get("type") or "").upper()
+                        if role:
+                            group["roles"].append(role)
                         group["actions"].append(unmet["action"])
                         unmet = None
                     previous = frustration
@@ -1460,8 +1530,8 @@ class JobExecutor:
                 continue
             host["hits"] += group["hits"]
             host["cost"] += group["cost"]
-            for field in ("gaps", "expectations", "actions"):
-                host[field].extend(group[field])
+            for field in ("gaps", "expectations", "actions", "boxes", "sightings", "roles"):
+                host[field].extend(group.get(field) or [])
             for persona, name in zip(group["personas"], group["names"]):
                 if persona not in host["personas"]:
                     host["personas"].append(persona)
@@ -1506,6 +1576,128 @@ class JobExecutor:
         target = str((action or {}).get("target") or (action or {}).get("content") or "").strip()
         return target or str((action or {}).get("type") or "the page").lower()
 
+    @staticmethod
+    def _plural(count: int, word: str, plural: str | None = None) -> str:
+        """`1 run`, `2 runs` -- not `1 run(s)`.
+
+        A report that writes "1 usability issue(s) were identified" is telling the
+        reader it was assembled rather than written, in its own first sentence.
+        """
+        return f"{count} {word if count == 1 else (plural or word + 's')}"
+
+    @staticmethod
+    def _patience_in_words(cost: float) -> str:
+        """The measured cost, with the scale it is measured on said out loud.
+
+        "0.22 of this visitor's patience on a 0-1 scale" is a real number in a unit
+        nobody knows, which reads as less credible than a vague sentence. The
+        number stays -- it is measured -- but it arrives with something to hold it
+        against.
+        """
+        share = max(0.0, min(1.0, float(cost)))
+        if share >= 0.66:
+            felt = "most of the way from calm to walking away"
+        elif share >= 0.33:
+            felt = "about a third of the way from calm to walking away"
+        elif share >= 0.12:
+            felt = "roughly a fifth of the way from calm to walking away"
+        else:
+            felt = "a small but measurable dent in their patience"
+        return f"{share:.2f} on a 0-1 patience scale -- {felt}"
+
+    # What the person expected the control to do, by the verb they used for it.
+    _EXPECTED_TO_REVEAL = re.compile(
+        r"\b(show|display|reveal|see|list|tell|confirm|explain|give me|find out)\w*\b", re.I)
+    _EXPECTED_TO_MOVE = re.compile(
+        r"\b(open|navigate|go to|take me|bring me|load|lead)\w*\b", re.I)
+    # What the page did, by the way the run described it afterwards.
+    _DID_NOTHING = re.compile(
+        r"\b(did not|didn'?t|nothing|no change|unchanged|remain\w*|still (?:present|there|shown))\b", re.I)
+
+    @classmethod
+    def _why_they_expected_that(cls, group: dict[str, Any]) -> str:
+        """A root cause: the property of the control that produced the expectation.
+
+        The slide headed "Root cause analysis" fell back to `observation`, which is
+        the gap sentence -- already printed under "Observed user issue" and again
+        under "In the user's words". Three headings, one sentence, and the panel
+        meant to carry the thinking carried none.
+
+        So this names a mechanism instead, and it is built from what the run
+        measured rather than asked of a model: the control's own label, the kind of
+        behaviour the visitor's own verbs predicted of it, and the kind of
+        behaviour the run recorded. Requoting either sentence would only move the
+        duplication somewhere else, so neither is repeated here.
+        """
+        label = str(group.get("label") or "").strip()
+        expectation = " ".join(group.get("expectations") or [])
+        gap = " ".join(item.get("quote", "") for item in (group.get("gaps") or []))
+        if not label or not expectation:
+            return ""
+
+        # Whichever verb governs the sentence, which is the one that comes first:
+        # "open a page showing the plan" is a request to be taken somewhere, and
+        # matching on "showing" because the reveal pattern was tested first read it
+        # as the opposite.
+        reveal, move = cls._EXPECTED_TO_REVEAL.search(expectation), cls._EXPECTED_TO_MOVE.search(expectation)
+        if reveal and move:
+            wanted = "be told something" if reveal.start() < move.start() else "be taken somewhere"
+        elif reveal:
+            wanted = "be told something"
+        elif move:
+            wanted = "be taken somewhere"
+        else:
+            wanted = "get a response"
+        silent = bool(cls._DID_NOTHING.search(gap))
+        got = "nothing they could see" if silent else "something else"
+        # The lesson depends on both halves. Saying "the click only moves the
+        # visitor instead" about a control that did nothing at all describes a
+        # different page than the one that was tested.
+        moral = {
+            ("be told something", True): ("A control named for what you will get owes you that, or a "
+                                          "visible reason you are not getting it. Silence reads as a "
+                                          "control that is broken rather than one that declined."),
+            ("be told something", False): ("A control labelled with what you will get is read as the "
+                                           "thing that gives it. When the click delivers something "
+                                           "else, the label is the defect -- not the copy around it."),
+            ("be taken somewhere", True): ("A control that reads as a door has to lead somewhere. "
+                                           "Changing nothing visible leaves the visitor unsure their "
+                                           "click even registered."),
+            ("be taken somewhere", False): ("A control that reads as a door is expected to lead "
+                                            "somewhere it has named. Arriving anywhere else costs the "
+                                            "visitor their place as well as their time."),
+            ("get a response", True): ("A control that invites a click owes the visitor a visible "
+                                       "response to it, even when the answer is no."),
+            ("get a response", False): ("A control that invites a click owes the visitor a response "
+                                        "they can connect to the click they made."),
+        }[(wanted, silent)]
+
+        hits = int(group.get("hits") or 1)
+        again = (f" They came back to it {hits} times, which is what people do when they are sure "
+                 f"they used the right control and assume they mis-clicked." if hits > 1 else "")
+        return (f"The wording is what set the expectation. Reading \u201c{label}\u201d, this visitor "
+                f"expected to {wanted}, and got {got}. {moral}{again}")
+
+    @staticmethod
+    def _traits_behind(group: dict[str, Any]) -> list[str]:
+        """Which dispositions this finding actually lands on.
+
+        `susceptibleTraits` has been in the schema and shipped `None` on every
+        persona-derived finding, so a run with three deliberately different
+        visitors reported its findings as though they had happened to a generic
+        one. Derived from the shape of the encounter, never asserted: a control
+        retried is a patience problem, a control that cost a lot of patience in one
+        touch is an irritability problem.
+        """
+        traits = []
+        if int(group.get("hits") or 0) > 1:
+            traits.append("low patience")
+        if float(group.get("cost") or 0.0) >= 0.3:
+            traits.append("high irritability")
+        if len(group.get("personas") or []) > 1:
+            traits.append("shared across dispositions")
+        return traits
+
     @classmethod
     def _broken_promise_finding(cls, group: dict[str, Any]) -> dict[str, Any]:
         """One promise the page did not keep, priced by what it cost."""
@@ -1523,7 +1715,7 @@ class JobExecutor:
             severity = "low"
         expected = group["expectations"][0] if group["expectations"] else ""
         happened = group["gaps"][-1]["quote"] if group["gaps"] else ""
-        again = (f" {len(personas)} different personas expected the same thing of it."
+        again = (f" {len(personas)} different visitors expected the same thing of it."
                  if len(personas) > 1 else
                  f" They tried it {hits} times." if hits > 1 else "")
         return {
@@ -1533,18 +1725,32 @@ class JobExecutor:
             # as a typo.
             "summary": (f"Before touching it they said what they expected: "
                         f"\"{expected.rstrip(' .')}.\" What arrived was not that -- "
-                        f"\"{happened.rstrip(' .')}.\"{again} It cost "
-                        f"{cost:.2f} of this visitor's patience on a 0-1 scale, measured across the "
-                        f"run rather than assumed."),
+                        f"\"{happened.rstrip(' .')}.\"{again} It cost {cls._patience_in_words(cost)}, "
+                        f"measured across the run rather than assumed."),
             "recommendation": (f"Either make {label} do what it reads as doing, or stop it reading "
                                f"that way. This is not a wording problem in the copy around it: the "
                                f"visitor said out loud what they expected before they touched it, "
                                f"and the control itself is what set that expectation."),
-            "evidence": (f"{hits} unmet expectation(s) across {len(group['runs']) or 1} run(s) and "
-                         f"{len(personas) or 1} persona(s), costing {cost:.2f} frustration"),
+            "evidence": (f"{cls._plural(hits, 'unmet expectation')} across "
+                         f"{cls._plural(len(group['runs']) or 1, 'run')} and "
+                         f"{cls._plural(len(personas) or 1, 'person', 'people')}, "
+                         f"costing {cls._patience_in_words(cost)}"),
             "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
-            "elementName": label, "observation": happened,
-            "personaEvidence": group["gaps"][:2],
+            "elementName": label,
+            # Where the control sat, so the evidence can be cropped to it. Without
+            # this the best-evidenced finding in the report illustrated itself with
+            # a whole-page screenshot captioned "page context".
+            "elementBox": (group.get("boxes") or [None])[0],
+            "observation": happened,
+            "rootCause": cls._why_they_expected_that(group),
+            # What this person could see when they formed the expectation, in their
+            # own first-person words. The gap sentence is already quoted in the
+            # summary; quoting it again under "In the user's words" made a
+            # four-panel analysis read as one observation in fancy dress.
+            "personaEvidence": (group.get("sightings") or group["gaps"])[:2],
+            "susceptibleTraits": cls._traits_behind(group),
+            "claimedImpact": {"frustration": round(cost, 2), "personas": len(personas) or 1,
+                              "attempts": hits},
             "affectedPersonaIds": personas, "affectedPersonas": len(personas),
             "source": "persona.expectation",
             "runId": (group["runs"] or [None])[0], "personaId": (personas or [None])[0],

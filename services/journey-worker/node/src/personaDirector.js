@@ -145,11 +145,33 @@ function taskText(task) {
  * the selectors it uses are the same strings the actor targets -- so the run has
  * always known that "e18" is the "Monthly" button and never told anyone.
  */
-function nameOf(target, perception) {
-  if (!target || !perception) return "";
+function seenElement(target, perception) {
+  if (!target || !perception) return null;
   const items = [...(perception.perceived || []), ...(perception.notLookedAt || [])];
-  const found = items.find((item) => item && item.selector === target);
+  return items.find((item) => item && item.selector === target) || null;
+}
+
+function nameOf(target, perception) {
+  const found = seenElement(target, perception);
   return found && typeof found.name === "string" ? found.name.trim() : "";
+}
+
+/**
+ * Where the thing acted on sat, as the walk measured it.
+ *
+ * The report crops its evidence to the element a finding is about -- but only
+ * when the finding knows the box, and the one finding built from what a person
+ * actually did carried no box at all. So the best-evidenced finding in the
+ * report illustrated itself with a whole-page screenshot captioned "page
+ * context", leaving the reader to hunt for the control under discussion. The
+ * walk has measured this box on every step since perception existed.
+ */
+function boxOf(target, perception) {
+  const found = seenElement(target, perception);
+  const box = found && found.box;
+  if (!box || !Number.isFinite(Number(box.width)) || !Number.isFinite(Number(box.height))) return null;
+  return { x: Number(box.x) || 0, y: Number(box.y) || 0,
+           width: Number(box.width), height: Number(box.height) };
 }
 
 function observationFrom(snapshotText, abilities) {
@@ -396,6 +418,9 @@ class PersonaDirector {
           // Pricing page will load" instead of naming a control -- and then a
           // report headline reads "Promised more than it did: e6".
           targetName: nameOf(decision.action.target, perception) || undefined,
+          // Where it sat, so a finding about it can show it rather than the page
+          // it was somewhere on.
+          targetBox: boxOf(decision.action.target, perception) || undefined,
           malformed: decision.malformed || undefined });
 
       if (skipAction) {
@@ -801,4 +826,4 @@ class PersonaDirector {
   }
 }
 
-module.exports = { DEFAULT_MAX_STEPS, PersonaDirector, nameOf, observationFrom, outcomeEvent };
+module.exports = { DEFAULT_MAX_STEPS, PersonaDirector, boxOf, nameOf, observationFrom, outcomeEvent };
