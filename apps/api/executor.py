@@ -215,6 +215,25 @@ def _instrument_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, An
     return diagnostics
 
 
+def plural(count: int, word: str, many: str | None = None) -> str:
+    """`1 run`, `2 runs` -- not `1 run(s)`.
+
+    A report that writes "1 usability issue(s) were identified" is telling the
+    reader, in its own first sentence, that it was assembled rather than written.
+
+    Module level on purpose. This lived as a method on JobExecutor and fixed
+    exactly one of the eighteen places that needed it, which is the same mistake
+    in a different costume: a rule written where the problem was noticed rather
+    than where it applies.
+    """
+    return f"{count} {word if count == 1 else (many or word + 's')}"
+
+
+def verb(count: int, one: str, many: str) -> str:
+    """`1 finding was discarded`, `2 findings were discarded`."""
+    return one if count == 1 else many
+
+
 def _coverage_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
     """How much of each run the instruments actually saw.
 
@@ -247,7 +266,7 @@ def _coverage_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, Any]
                          f"so no eyesight finding could be made on those steps"
                          + (f" -- {why}" if why else "") + ".")
         if undrawn:
-            parts.append(f"{undrawn} action(s) drew no conclusion at all, because the page could not "
+            parts.append(f"{plural(undrawn, 'action')} drew no conclusion at all, because the page could not "
                          f"be seen the same way before and after them. Comparing across two different "
                          f"kinds of looking invents gaps, so nothing was concluded rather than "
                          f"something guessed.")
@@ -257,8 +276,9 @@ def _coverage_diagnostics(journeys: list[dict[str, Any]]) -> list[dict[str, Any]
             "summary": " ".join(parts),
             "recommendation": ("Read an absent eyesight finding on those steps as unknown rather than "
                                "absent. Re-running is cheap and the lost steps are usually transient."),
-            "evidence": f"{looked}/{steps} steps perceived, {len(lost)} walk(s) unusable, "
-                        f"{undrawn} comparison(s) skipped",
+            "evidence": (f"{looked}/{steps} steps perceived, "
+                         f"{plural(len(lost), 'walk')} unusable"
+                         + (f", {plural(undrawn, 'comparison')} skipped" if undrawn else "")),
             "source": "coverage", "runId": journey.get("runId"),
             "personaId": journey.get("profileId")})
     return diagnostics
@@ -438,7 +458,7 @@ class JobExecutor:
                 missing = unresolvable_citations(result, available)
                 if missing:
                     result.setdefault("limitations", []).append(
-                        f"{len(missing)} capture(s) cited in this report were not kept as artifacts in "
+                        f"{plural(len(missing), 'capture')} cited in this report {verb(len(missing), 'was', 'were')} not kept as artifacts in "
                         f"this session, so they cannot be opened from it: {', '.join(missing[:6])}"
                         + ("..." if len(missing) > 6 else "")
                         + ". The finding still stands on its measurement; only the pointer to the "
@@ -626,7 +646,7 @@ class JobExecutor:
                 )
             if repeated_captures:
                 limitations.append(
-                    f"{len(repeated_captures)} full-page capture(s) came back as one viewport band repeated "
+                    f"{plural(len(repeated_captures), 'full-page capture')} came back as one viewport band repeated "
                     "down a very tall image -- what a stitched screenshot produces when the page pins its "
                     "layout to the viewport. They were trimmed to the single band that is a faithful "
                     "screenshot before anything was asked about them, so findings from those captures "
@@ -682,12 +702,13 @@ class JobExecutor:
             quoted = "; ".join(f"{item['title']!r} (quoted {', '.join(repr(q) for q in item['quotes'])})"
                                for item in unverified)
             limitations.append(
-                f"{len(unverified)} finding(s) were discarded because they quoted on-page text that the "
+                f"{plural(len(unverified), 'finding')} {verb(len(unverified), 'was', 'were')} discarded because it quoted on-page text that the "
                 f"run's own element snapshots do not contain: {quoted}. Claims about literal visible text "
                 "are checked against journeytest-core's snapshots before they are reported.")
         if run_diagnostics:
             limitations.append(
-                f"{len(run_diagnostics)} run diagnostic(s) were recorded (the test harness itself failing, "
+                f"{plural(len(run_diagnostics), 'run diagnostic')} "
+                f"{verb(len(run_diagnostics), 'was', 'were')} recorded (the test harness itself failing, "
                 "not the product): see run_diagnostics. They are excluded from the usability findings.")
         thoughts_by_persona = {persona.get("id"): self._persona_thoughts(journey)
                                for journey, persona in zip(journeys, personas) if persona.get("id")}
@@ -900,7 +921,7 @@ class JobExecutor:
                  if str(finding.get("severity")) in JobExecutor._NOT_A_PROBLEM]
         blocking = [finding for finding in real
                     if str(finding.get("severity")) in {"critical", "high"}]
-        parts = [f"{len(personas)} synthetic user(s) attempted {len(tasks)} task(s) "
+        parts = [f"{plural(len(personas), 'synthetic user')} attempted {plural(len(tasks), 'task')} "
                  f"against {url or 'the target site'}."]
         # How far the runs actually got, before any count of what they found. A
         # live report opened "1 synthetic user(s) attempted 2 task(s) ... 10
@@ -915,10 +936,10 @@ class JobExecutor:
             steps = sum(1 for journey in cut_short for event in journey.get("timeline") or []
                         if event.get("type") == "persona.expectation")
             parts.append(
-                f"{len(cut_short)} of those run(s) stopped early and did not finish the tasks"
-                + (f" -- one got {steps} action(s) in" if len(cut_short) == 1 and steps else "")
+                f"{len(cut_short)} of those runs stopped early and did not finish the tasks"
+                + (f" -- one got {plural(steps, 'action')} in" if len(cut_short) == 1 and steps else "")
                 + ", so what follows is what was seen before that, not a full review.")
-        parts.append(f"{len(real)} usability issue(s) were identified"
+        parts.append(f"{plural(len(real), 'usability issue')} {verb(len(real), 'was', 'were')} identified"
                      + (f", {len(blocking)} of them high-severity or blocking." if blocking else "."))
 
         # The single thing to fix first, named rather than counted.
@@ -929,19 +950,19 @@ class JobExecutor:
         unreadable = [f for f in real if f.get("source") == "perception.notPerceived"]
         missed = [f for f in real if f.get("source") == "perception.missed"]
         if unreadable:
-            parts.append(f"{len(unreadable)} element(s) are present in the page but not legible "
+            parts.append(f"{plural(len(unreadable), 'element')} {verb(len(unreadable), 'is', 'are')} present in the page but not legible "
                          "once these users' eyesight is applied to what was actually drawn.")
         if missed:
-            parts.append(f"{len(missed)} thing(s) a user came for were readable and on screen, "
+            parts.append(f"{plural(len(missed), 'thing')} a visitor came for {verb(len(missed), 'was', 'were')} readable and on screen, "
                          "and were never looked at -- a prominence problem rather than a wording one.")
         if noted:
             # Said, and deliberately not counted: the page is compliant in these
             # places and one unusual profile had trouble, which is worth knowing
             # and is not a defect.
-            parts.append(f"{len(noted)} further observation(s) apply to one unusual profile each "
+            parts.append(f"{plural(len(noted), 'further observation')} {verb(len(noted), 'applies', 'apply')} to one unusual profile each "
                          "rather than to the site.")
         if preserve:
-            parts.append(f"{len(preserve)} design decision(s) are working and should be preserved.")
+            parts.append(f"{plural(len(preserve), 'design decision')} {verb(len(preserve), 'is', 'are')} working and should be preserved.")
         return " ".join(parts)
 
     @staticmethod
@@ -1243,7 +1264,7 @@ class JobExecutor:
             seen = [(event.get("data") or {}).get("legible") or [] for event in captures]
             if seen and all(len(items) == len(set(items)) for items in seen if items):
                 return ("the element walk recorded every element exactly once on all "
-                        f"{len(captures)} capture(s) of this run, so nothing on the page was "
+                        f"{plural(len(captures), 'capture')} of this run, so nothing on the page was "
                         "rendered more than once")
         # Nothing is missing that this person read off the page. The persona
         # commits to what it can see before every action, and the verdict quotes
@@ -1368,8 +1389,8 @@ class JobExecutor:
             if not impact:
                 continue
             finding["evidence"] = (
-                f"synthesized from {finding.get('observations', 1)} observation(s) across "
-                f"{finding.get('affectedPersonas', 1)} persona(s); estimated impact: "
+                f"synthesized from {plural(finding.get('observations', 1), 'observation')} across "
+                f"{plural(finding.get('affectedPersonas', 1), 'person', 'people')}; estimated impact: "
                 f"frustration {impact['frustration']:.2f}, confusion {impact['confusion']:.2f}, "
                 f"trust erosion {impact['trust']:.2f}")
 
@@ -1576,14 +1597,7 @@ class JobExecutor:
         target = str((action or {}).get("target") or (action or {}).get("content") or "").strip()
         return target or str((action or {}).get("type") or "the page").lower()
 
-    @staticmethod
-    def _plural(count: int, word: str, plural: str | None = None) -> str:
-        """`1 run`, `2 runs` -- not `1 run(s)`.
-
-        A report that writes "1 usability issue(s) were identified" is telling the
-        reader it was assembled rather than written, in its own first sentence.
-        """
-        return f"{count} {word if count == 1 else (plural or word + 's')}"
+    _plural = staticmethod(plural)
 
     @staticmethod
     def _patience_in_words(cost: float) -> str:
@@ -1950,7 +1964,7 @@ class JobExecutor:
                                    "text to assistive technology that a sighted visitor never sees."),
                 "evidence": (f"no ink in a {int((item.get('box') or {}).get('width', 0))}x"
                              f"{int((item.get('box') or {}).get('height', 0))} region the tree says "
-                             f"holds text, on {group['steps']} step(s)"),
+                             f"holds text, on {plural(group['steps'], 'step')}"),
                 "evidenceScreenshot": group["seenImage"],
                 "evidenceIsAsTheySawIt": bool(group["seenImage"]),
                 "elementBox": item.get("box"), "elementName": item.get("name") or "",
@@ -2021,7 +2035,7 @@ class JobExecutor:
             "recommendation": recommendation,
             "evidence": (f"contrast {ratio}:1 (needs {required}:1); internal "
                          f"{item.get('internalContrast')}, edge {item.get('edgeContrast')}, "
-                         f"seen on {group['steps']} step(s) by {len(personas) or 1} persona(s)"),
+                         f"seen on {plural(group['steps'], 'step')} by {plural(len(personas) or 1, 'person', 'people')}"),
             # The page as they saw it, not a clean capture: a clean one beside
             # "they could not read this" invites the reader to disagree, correctly.
             "evidenceScreenshot": group["seenImage"],
@@ -2058,7 +2072,7 @@ class JobExecutor:
                                "is a prominence problem, not a wording one. The element is present and "
                                "readable, so adding copy about it elsewhere will not help."),
             "evidence": (f"goal match {item.get('goalAffinity')}, never fixated across "
-                         f"{group['steps']} step(s) and {len(personas) or 1} persona(s)"),
+                         f"{plural(group['steps'], 'step')} and {plural(len(personas) or 1, 'person', 'people')}"),
             "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,
             "elementBox": item.get("box"), "observation": "",
             "personaEvidence": group["reasoning"],
@@ -3201,7 +3215,7 @@ class JobExecutor:
             summary_parts = [representative.get("summary", "")]
             if affected > 1:
                 summary_parts.append(f"Seen across {affected} of the tested personas "
-                                      f"({root_cause['affectedIterations'].__len__()} run(s)).")
+                                      f"({plural(len(root_cause['affectedIterations']), 'run')}).")
             if susceptible_traits:
                 summary_parts.append(f"More pronounced for personas with distinctive {', '.join(susceptible_traits)}.")
             finding = {
@@ -3410,7 +3424,7 @@ class JobExecutor:
         findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
         preserve_items = "".join(
             f'<li><strong>{escape(str(item.get("title", "")))}</strong>'
-            + (f' <span style="opacity:.6">(noted by {item["observedByPersonas"]} persona(s))</span>'
+            + (f' <span style="opacity:.6">(noted by {plural(item["observedByPersonas"], "person", "people")})</span>'
                if item.get("observedByPersonas") else "")
             + f'<br>{escape(str(item.get("description") or ""))}</li>'
             for item in (report.get("elements_to_preserve") or []))
@@ -3421,7 +3435,7 @@ class JobExecutor:
         priority_rows = "".join(
             f'<li><strong>{position}. {escape(str(entry.get("title") or ""))}</strong> '
             f'<span style="opacity:.6">({escape(str(entry.get("severity") or ""))}'
-            + (f', {entry["affectedPersonas"]} persona(s)' if entry.get("affectedPersonas") else "") + ')</span></li>'
+            + (f', {plural(entry["affectedPersonas"], "person", "people")}' if entry.get("affectedPersonas") else "") + ')</span></li>'
             for position, entry in enumerate(impact.get("priorityOrder") or [], start=1))
         impact_section = (f'<section><h2>What to fix first</h2><ol>{priority_rows}</ol></section>'
                           if priority_rows else "")
@@ -3465,7 +3479,7 @@ class JobExecutor:
             f'<h1>{escape(url) or "UX analysis"}</h1>'
             f'<p class="summary">{escape(report.get("executive_summary") or "")}</p>'
             f'<p class="stamp">{"Observed" if observed else "Inferred"} evidence &middot; '
-            f'{escape(str(impact.get("personasTested", len(report.get("synthetic_users") or []))))} synthetic user(s)</p></section>')
+            f'{escape(plural(impact.get("personasTested", len(report.get("synthetic_users") or [])), "synthetic user"))}</p></section>')
 
         contents = [("01", "Introduction"), ("02", "User issues")]
         if preserve:
@@ -3489,8 +3503,13 @@ class JobExecutor:
             f'<section class="slide"><h2>How this review was made</h2>'
             f'<p class="summary">{escape(method)}</p>'
             f'<h3>Tasks attempted</h3><ul>{task_items}</ul>'
-            + (f'<p class="affected">{escape(str(len(findings)))} issue(s) found'
+            + (f'<p class="affected">{escape(plural(len(findings), "issue"))} found'
                + (f" &mdash; {escape(counts_line)}" if counts_line else "") + '</p>' if findings else "")
+            # What the run could and could not see, on the slide where somebody
+            # weighing an absent finding would look for it. The diagnostics were
+            # reaching the JSON and a limitations line that says "see
+            # run_diagnostics" -- which a reader of the deck cannot do.
+            + cls._coverage_note(report)
             + '</section>')
 
         # --- 02 Issues: a numbered sub-divider then the finding itself ---
@@ -3516,7 +3535,7 @@ class JobExecutor:
                     f'The {escape(str(len(shown)))} seen by the most synthetic users follow.</p></section>')
             for item in shown:
                 seen = item.get("observedByPersonas") or 0
-                seen_line = (f'<p class="affected">Noted by {seen} of the tested persona(s)</p>' if seen else "")
+                seen_line = (f'<p class="affected">Noted by {seen} of the {plural(seen, "person", "people")} tested</p>' if seen else "")
                 slides.append(
                     f'<section class="slide preserve"><span class="badge keep">KEEP</span>'
                     f'<h2>{escape(item.get("title", "Works well"))}</h2>{seen_line}'
@@ -3647,6 +3666,25 @@ show(0);
 </body></html>"""
 
     @staticmethod
+    def _coverage_note(report: dict[str, Any]) -> str:
+        """One line on how much of the run the instruments actually saw.
+
+        An absent finding and an unmeasured one look identical on a slide. A
+        reader who knows the eyes resolved ten steps of twelve can weigh that
+        silence; a reader who does not will read it as a clean bill of health.
+        The diagnostics were reaching the JSON and a limitations line that reads
+        "see run_diagnostics", which a reader of the deck cannot do.
+        """
+        coverage = [item for item in (report.get("run_diagnostics") or [])
+                    if item.get("source") == "coverage"]
+        if not coverage:
+            return ""
+        worst = max(coverage, key=lambda item: {"high": 2, "medium": 1}.get(item.get("severity"), 0))
+        return (f'<p class="affected" style="opacity:.75">Coverage: '
+                f'{escape(str(worst.get("evidence") or ""))}. An eyesight finding absent from those '
+                f'steps is unknown rather than ruled out.</p>')
+
+    @staticmethod
     def _finding_slide(item: dict[str, Any], index: int, issue_label: str) -> str:
         """One issue, in the three-part shape a usability report uses: what the user
         hit, why it happens, and what to change -- beside the evidence for it."""
@@ -3662,7 +3700,7 @@ show(0);
                                                      if item.get("recommendation") else [])
         changes = "".join(f"<li>{escape(str(alt.get('proposedChange', '')))}</li>"
                           for alt in alternatives if alt.get("proposedChange"))
-        affected = (f'<p class="affected">Reproduced by {item["affectedPersonas"]} of the tested persona(s)</p>'
+        affected = (f'<p class="affected">Reproduced by {item["affectedPersonas"]} of the visitors tested</p>'
                     if item.get("affectedPersonas") else "")
         references = (item.get("grounding") or {}).get("references") or []
         grounding = ('<p class="grounding"><strong>Grounded in:</strong> ' + "; ".join(

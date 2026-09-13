@@ -517,7 +517,7 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     assert finding["title"] == "Ambiguous button label"
     assert finding["severity"] == "high"
     assert finding["affectedPersonas"] == 2
-    assert "2 observation(s) across 2 persona(s)" in finding["evidence"]
+    assert "2 observations across 2 people" in finding["evidence"]
     assert finding["recommendation"] == "Use 'Complete purchase'."
     assert finding["screenshotCrop"].startswith("data:image/png;base64,")
     # Real knowledge grounding (WCAG/Nielsen-Norman references) is computed per
@@ -843,13 +843,13 @@ def test_executive_summary_reports_what_was_found_not_what_was_prepared():
         [{"severity": "critical", "title": "Broken"}, {"severity": "low", "title": "Nit"}],
         [{"title": "Consistent buttons"}])
 
-    assert "2 usability issue(s) were identified" in summary
+    assert "2 usability issues were identified" in summary
     assert "1 of them high-severity or blocking" in summary
-    assert "1 design decision(s) are working" in summary
+    assert "1 design decision is working" in summary
 
     empty = JobExecutor._executive_summary("https://example.com", ["Buy"], [{"id": "p1"}],
                                            [{"title": "No pain points detected", "severity": "low"}], [])
-    assert "0 usability issue(s) were identified" in empty
+    assert "0 usability issues were identified" in empty
 
 
 def test_persona_thoughts_fall_back_to_verdict_prose_when_provider_hides_reasoning():
@@ -1982,7 +1982,7 @@ def test_the_same_element_across_every_step_and_run_is_one_finding():
         _perception_journey("r2", "b", TYPICAL_EYES, [FAILS_WCAG], steps=20),
     ])
     assert len(findings) == 1
-    assert "40 step(s)" in findings[0]["evidence"]
+    assert "40 steps" in findings[0]["evidence"]
     assert findings[0]["affectedPersonas"] == 2
 
 
@@ -2029,14 +2029,14 @@ def test_the_summary_names_the_worst_finding_rather_than_only_counting():
     # The two classes a reader would not know to look for are called out by name.
     assert "not legible once these users' eyesight is applied" in summary
     assert "never looked at -- a prominence problem" in summary
-    assert "3 usability issue(s)" in summary and "2 of them high-severity" in summary
+    assert "3 usability issues" in summary and "2 of them high-severity" in summary
 
 
 def test_the_summary_of_a_clean_run_does_not_invent_a_worst_finding():
     summary = JobExecutor._executive_summary("https://example.test/", ["a"], [{"id": "fw"}],
                                              [{"title": "No pain points detected"}], [])
     assert "The most serious is" not in summary
-    assert "0 usability issue(s)" in summary
+    assert "0 usability issues" in summary
 
 
 def test_a_run_from_before_the_degraded_capture_existed_still_reports():
@@ -2861,7 +2861,7 @@ def test_with_no_measured_affect_there_is_no_ceiling_to_impose():
     # The evidence line is still written, so every finding states its impact the
     # same way whether or not there was anything to cap it against.
     assert "frustration 0.80" in findings[0]["evidence"]
-    assert "2 observation(s) across 1 persona(s)" in findings[0]["evidence"]
+    assert "2 observations across 1 person" in findings[0]["evidence"]
 
 
 def test_a_summary_says_when_the_runs_did_not_finish():
@@ -2881,10 +2881,10 @@ def test_a_summary_says_when_the_runs_did_not_finish():
         [{"id": "persona_1"}], findings, [], cut_short)
 
     assert "stopped early and did not finish the tasks" in summary
-    assert "got 1 action(s) in" in summary
+    assert "got 1 action in" in summary
     assert "not a full review" in summary
     # Said before the count of what was found, not after it.
-    assert summary.index("stopped early") < summary.index("usability issue(s)")
+    assert summary.index("stopped early") < summary.index("usability issue")
 
     # A clean run says nothing of the kind.
     clean = JobExecutor._executive_summary(
@@ -3089,7 +3089,7 @@ def test_a_run_that_saw_less_than_it_tried_to_says_so():
     assert entry["severity"] == "medium"
     assert "10 of 12 steps" in entry["summary"]
     assert "the perception service returned nothing (4×)" in entry["summary"]
-    assert "3 action(s) drew no conclusion" in entry["summary"]
+    assert "3 actions drew no conclusion" in entry["summary"]
     assert "unknown rather than absent" in entry["recommendation"]
 
     # A run that saw everything says nothing, and a run that lost most of it says more.
@@ -3099,3 +3099,56 @@ def test_a_run_that_saw_less_than_it_tried_to_says_so():
         [{"type": "persona.expectation"}] * 12 + [{"type": "persona.perception"}] * 4
         + [{"type": "persona.perception_fallback", "data": {"reason": "the page moved under the walk"}}] * 8}])
     assert bad["severity"] == "high"
+
+
+def test_no_reader_facing_string_writes_a_machine_plural():
+    """`_plural` was added as a method on JobExecutor and fixed exactly one of the
+    eighteen places that needed it -- the same mistake in a different costume: a rule
+    written where the problem was noticed rather than where it applies. Two more crept
+    into the coverage diagnostic while that fix was being written.
+
+    So the rule is checked over the whole module rather than at the sites someone
+    happened to look at. Docstrings and comments quoting the old behaviour are exempt;
+    they are the record of why this exists.
+    """
+    import ast
+    import inspect
+    import re
+
+    from apps.api import executor
+
+    source = inspect.getsource(executor)
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            text = ast.get_docstring(node)
+            if text:
+                docstrings.update(text.splitlines())
+
+    offenders = []
+    for number, line in enumerate(source.splitlines(), start=1):
+        bare = line.strip().strip('"')
+        if line.strip().startswith("#") or bare in docstrings or line in docstrings:
+            continue
+        if re.search(r"\w\(s\)", line):
+            offenders.append(f"{number}: {bare[:90]}")
+    assert not offenders, "machine plurals in reader-facing strings:\n" + "\n".join(offenders)
+
+
+def test_the_deck_says_how_much_of_the_run_it_could_see():
+    """An absent finding and an unmeasured one look identical on a slide. The coverage
+    diagnostic was reaching the JSON and a limitations line that reads "see
+    run_diagnostics" -- which a reader of the deck cannot do."""
+    from apps.api.executor import _coverage_diagnostics
+
+    diagnostics = _coverage_diagnostics([{"runId": "r1", "timeline":
+        [{"type": "persona.expectation"}] * 12 + [{"type": "persona.perception"}] * 10
+        + [{"type": "persona.perception_fallback",
+            "data": {"reason": "the perception service returned nothing"}}] * 4}])
+    note = JobExecutor._coverage_note({"run_diagnostics": diagnostics})
+
+    assert "10/12 steps perceived" in note
+    assert "unknown rather than ruled out" in note
+    # A run that saw everything says nothing, rather than printing a reassuring zero.
+    assert JobExecutor._coverage_note({"run_diagnostics": []}) == ""
