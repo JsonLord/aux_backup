@@ -43,12 +43,21 @@ def model_providers() -> list[tuple[str, str, str]]:
     primary_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
     primary_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
                    or os.getenv("BLABLADOR_BASE_URL") or DEFAULT_ROUTER)
+    # A deployment with only Blablador configured resolves its "primary" to the
+    # Blablador endpoint -- and must not then be handed the router's model id.
+    # "auto" is the router's word; Blablador serves named models and answers 404
+    # to it on every persona compile. The endpoint decides the model, not the
+    # variable the endpoint happened to arrive in.
+    on_the_spare = not (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL"))
+    primary_model = os.getenv("OPENAI_MODEL") or (
+        os.getenv("BLABLADOR_MODEL", "alias-large") if on_the_spare and os.getenv("BLABLADOR_BASE_URL")
+        else "auto")
     # Blablador is credentialed for reflection already, so its key and endpoint
     # can be reached through either name.
     spare_url = os.getenv("BLABLADOR_BASE_URL") or os.getenv("JOURNEY_REFLECT_BASE_URL", "")
     spare_key = os.getenv("BLABLADOR_API_KEY") or os.getenv("JOURNEY_REFLECT_API_KEY", "")
     candidates = [
-        (primary_url, primary_key, os.getenv("OPENAI_MODEL", "auto")),
+        (primary_url, primary_key, primary_model),
         # Generating and compiling a persona is a big, infrequent job, so the
         # spare runs a large model rather than the small one reflection uses --
         # alias-fast is chosen for reflection precisely because it is cheap and

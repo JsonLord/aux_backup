@@ -70,8 +70,11 @@ def test_a_blablador_only_deployment_does_not_ask_it_for_auto(monkeypatch):
 
     engine = DirectLLMSemanticEngine()
     assert engine.base_url == "https://blablador.test/v1"
-    assert engine.model != "auto"
-    assert engine.model == "alias-fast"
+    assert engine.model != "auto", "the guarantee this test exists for"
+    # Compiling a persona is a big, infrequent job, so it runs a large model.
+    # alias-fast is chosen for reflection because reflection is cheap and
+    # frequent, and writing a person is neither.
+    assert engine.model == "alias-large"
 
     # And a named model there is honoured.
     monkeypatch.setenv("BLABLADOR_MODEL", "alias-large")

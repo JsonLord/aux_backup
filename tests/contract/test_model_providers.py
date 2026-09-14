@@ -42,15 +42,30 @@ def test_generation_falls_back_to_a_large_model_then_a_larger_one(monkeypatch):
 
 def test_two_aliases_on_one_host_are_two_providers(monkeypatch):
     """Deduplicating on the endpoint alone would silently drop the second of them,
-    leaving a chain that looks like a fallback and has none."""
+    leaving a chain that looks like a fallback and has none.
+
+    A deployment with only Blablador configured also resolves its "primary" to the
+    Blablador endpoint -- and must not then be handed the router's model id.
+    "auto" is the router's word; Blablador serves named models and answers 404 to
+    it on every persona compile. The endpoint decides the model, not the variable
+    the endpoint happened to arrive in.
+    """
     monkeypatch.setenv("BLABLADOR_API_KEY", "k")
     monkeypatch.setenv("BLABLADOR_BASE_URL", "https://blablador.example/v1")
     monkeypatch.setenv("OPENAI_API_KEY", "k")
 
-    hosts = [url for url, _, _ in model_providers()]
-    models = [model for _, _, model in model_providers()]
-    assert hosts.count("https://blablador.example/v1") == 3, "primary resolves here too"
-    assert models == ["auto", "alias-large", "alias-huge"], "and each alias is its own provider"
+    chain = model_providers()
+    assert [url for url, _, _ in chain] == ["https://blablador.example/v1"] * 2
+    assert [model for _, _, model in chain] == ["alias-large", "alias-huge"]
+    assert "auto" not in [model for _, _, model in chain]
+
+
+def test_a_router_deployment_still_leads_with_auto(monkeypatch):
+    """The router requires the literal id "auto" and 400s on anything else."""
+    monkeypatch.setenv("OPENAI_API_KEY", "k1")
+    monkeypatch.setenv("OPENAI_COMPATIBLE_ENDPOINT", "https://router.example/v1")
+
+    assert model_providers()[0] == ("https://router.example/v1", "k1", "auto")
 
 
 def test_an_endpoint_with_no_key_is_not_a_provider(monkeypatch):
@@ -96,15 +111,35 @@ def test_the_real_cause_is_reported_when_it_is_one_level_down():
 
 
 def test_the_service_resolves_providers_in_exactly_one_place():
-    """The guard that would have caught cycle 28 before it was fired."""
+    """The guard that would have caught cycles 28 and 29 before they were fired.
+
+    Naming the modules by hand is what let this miss twice: the guard listed
+    generator, compiler and dspy_program, and the path that actually runs is
+    semantic.py -- PERSONA_COMPILER defaults to "native", so dspy never executes
+    at all. So it walks the package instead of a list somebody has to remember to
+    extend.
+    """
+    import importlib
     import inspect
+    import pkgutil
     import re
 
-    from services.persona_service import compiler, dspy_program, generator
+    import services.persona_service as package
+
+    modules = []
+    for info in pkgutil.iter_modules(package.__path__):
+        if info.name in {"providers", "main"}:
+            continue
+        modules.append(importlib.import_module(f"services.persona_service.{info.name}"))
+    assert any(module.__name__.endswith("semantic") for module in modules), \
+        "the module that actually compiles a persona must be covered"
 
     offenders = []
-    for module in (compiler, dspy_program, generator):
-        source = inspect.getsource(module)
+    for module in modules:
+        try:
+            source = inspect.getsource(module)
+        except OSError:  # pragma: no cover - namespace package
+            continue
         for number, line in enumerate(source.splitlines(), start=1):
             if line.strip().startswith("#") or '"""' in line:
                 continue
