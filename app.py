@@ -2687,6 +2687,25 @@ def configured_providers() -> list[dict[str, str]]:
     return providers
 
 
+def _upstream_detail(error: Exception) -> str:
+    """What the upstream service actually said, not just that it said something.
+
+    `requests` renders an HTTPError as "500 Server Error: Internal Server Error
+    for url: http://127.0.0.1:8090/v1/personas/compile" -- the status, the port,
+    and nothing about the cause. The service's own message is in the response
+    body, and every FastAPI service here puts it under "detail".
+    """
+    response = getattr(error, "response", None)
+    body = ""
+    if response is not None:
+        try:
+            payload = response.json()
+            body = str(payload.get("detail") or payload)
+        except ValueError:
+            body = (response.text or "").strip()
+    return f"{error}: {body[:600]}" if body else str(error)
+
+
 def build_model_provider_probe(ttl_s: float = PROVIDER_PROBE_TTL_S):
     """Whether the model endpoint answers, rather than whether a key is set.
 
@@ -2881,7 +2900,14 @@ if __name__ == "__main__":
             # rate-limiting or erroring, propagated as an HTTPError from
             # personas_client.compile()/generate()) instead of a bare "Internal
             # Server Error" with no detail.
-            raise HTTPException(502, f"persona generation/compilation failed: {error}")
+            #
+            # str() on an HTTPError is only "500 Server Error: Internal Server
+            # Error for url: ...": the upstream's own explanation is in the
+            # response body, and discarding it is what made three cycles fail
+            # with a message that named the port and nothing else. The comment
+            # above has always claimed this; now it is true.
+            raise HTTPException(502, f"persona generation/compilation failed: "
+                                     f"{_upstream_detail(error)}")
         session = session_client.create_session({"name": payload.get("name") or payload.get("theme") or example_persona,
                                                  "target_url": payload["url"], "source": "api"})
         persona_artifacts = [session_client.create_artifact(
