@@ -1449,3 +1449,66 @@ test("a box nobody measured is left undefined rather than guessed", () => {
   assert.equal(boxOf("e3", { notLookedAt: [{ selector: "e3", name: "x", box: { x: 5, y: 6, width: 7, height: 8 } }] }).width, 7,
     "legible but never fixated still has a place on the page");
 });
+
+test("a capture the service does not believe is not evidence about the page", async () => {
+  // Cycle 30 ended three journeys with "the page is unreadable" -- 104 regions
+  // measuring as flat colour with no ink in them at all, on a page two earlier
+  // cycles had read prices off. The perception service already said the capture
+  // could not be trusted; nobody asked, so the run took the empty view at face
+  // value and the persona reported the instrument's failure as the site's.
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "", eyes: {}, scan: {},
+        counts: { elements: 31, legible: 0, fixated: 0, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [], notLookedAt: [],
+        capture: { trustworthy: false, measured: 31, blankShare: 1.0,
+                   reason: "31 of 31 regions the tree says hold something had no ink in them at all" } };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, frames: () => [],
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing", box: { x: 0, y: 0, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const said = recorder.events.find((event) => event.type === "persona.perception_fallback");
+  assert.ok(said, "the step is recorded as a lost measurement");
+  assert.match(said.data.reason, /did not describe the page/);
+  assert.match(said.data.reason, /no ink in them at all/, "and carries the service's own reason");
+  assert.ok(!recorder.events.some((event) => event.type === "persona.perception"),
+    "it is not recorded as something this person saw");
+});
+
+test("a trustworthy capture with nothing legible is still the strongest finding", async () => {
+  // The distinction that matters: this person looked at a page that is really
+  // there and could read none of it. That is not a failed measurement.
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "", eyes: {}, scan: {},
+        counts: { elements: 7, legible: 0, fixated: 0, notPerceived: 7, notLookedAt: 0 },
+        notPerceived: [{ selector: "p@0,400", reason: "too little contrast to make anything out" }],
+        perceived: [], notLookedAt: [],
+        capture: { trustworthy: true, measured: 7, blankShare: 0.0, reason: "" } };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, frames: () => [],
+    walk: async () => ({
+      elements: [{ selector: "p@0,400", role: "paragraph", name: "x", box: { x: 0, y: 0, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.ok(looked, "the measurement is kept");
+  assert.equal(looked.data.counts.notPerceived, 7);
+  assert.ok(!recorder.events.some((event) => event.type === "persona.perception_fallback"));
+});

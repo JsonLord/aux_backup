@@ -714,6 +714,21 @@ class PersonaDirector {
       // the service could produce it and nobody ever asked.
       returnSeenImage: true,
     });
+    // A capture the service itself does not believe describes the page. It says
+    // so, and until now nobody asked: the run took the empty view at face value,
+    // told the persona it could see nothing, and the persona reported that the
+    // site was unreadable. Cycle 30 ended three journeys that way -- 104 regions
+    // measuring as flat colour with no ink in them at all, on a page two earlier
+    // cycles had read prices off.
+    //
+    // This is the distinction the empty-observation fix missed. Nothing legible
+    // on a capture we trust is the strongest finding this system makes. Nothing
+    // legible on a capture we do not trust is a failed measurement, and the only
+    // honest thing to do with it is put it down.
+    if (perception?.capture && perception.capture.trustworthy === false) {
+      return fellBack(`the capture did not describe the page: ${
+        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}`);
+    }
     // Absent, not empty. An empty observation is a person who looked and took
     // nothing in -- which is the strongest eyesight finding here, not a failure
     // -- and testing it for truthiness threw the whole measurement away: the
