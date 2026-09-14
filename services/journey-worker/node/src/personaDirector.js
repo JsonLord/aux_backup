@@ -293,6 +293,15 @@ class PersonaDirector {
       // does not state a cost, about a page three earlier runs read
       // "£200 / user / year" off. A view this person could not obtain is not
       // evidence of what is not on the page.
+      // A window pointing past the end of the page is the one cause of a blank
+      // capture this run can repair itself, and waiting does not repair it.
+      // Cycle 33 lost 22 captures to it: the persona scrolled down a tall page,
+      // the page re-rendered into a short one, and the position it had been left
+      // at no longer existed.
+      if (!seen.perception && seen.standing?.pastTheEnd && this.perception?.available) {
+        await this.returnToTheDocument(browser, seen.standing);
+        seen = await this.look(page, tasks);
+      }
       if (!seen.perception && this.perception?.available) {
         await this.sleep(LET_IT_COME_TO_REST_MS);
         seen = await this.look(page, tasks);
@@ -663,6 +672,22 @@ class PersonaDirector {
    * When it is not configured or not reachable the tree-based observation stands.
    * Perception is meant to make a run truer, not to make a run fail.
    */
+  /**
+   * Put the page back inside its own content.
+   *
+   * A viewport below the last pixel of the document photographs blank space,
+   * and cycle 33 lost 22 captures that way: the persona scrolled down a tall
+   * page, the page then re-rendered into a short one, and the position it had
+   * been left at no longer existed. Nothing is wrong with the page and nothing
+   * is wrong with the eyes -- the window is pointing past the end, and
+   * scrolling back is the whole repair.
+   */
+  async returnToTheDocument(browser, standing) {
+    const furthest = Math.max(0, (standing?.documentHeight || 0) - (standing?.viewportHeight || 0));
+    await browser.eval(`(() => { scrollTo(0, ${furthest}); return String(Math.round(scrollY)); })()`)
+      .catch(() => {});
+  }
+
   async look(page, tasks = []) {
     // Why it fell back, when it does. Every one of these paths used to return the
     // same silent object, so a run that lost half its comparisons looked exactly
@@ -670,8 +695,10 @@ class PersonaDirector {
     // reasons cost it six. An absence of measurement has to be distinguishable
     // from an absence of findings, and that applies to the walk as much as to the
     // service it feeds.
-    const fellBack = (why) => ({
-      observation: observationFrom(page.text, this.abilities), perception: null, why });
+    // `standing` travels with the fallback: where the page was when the capture
+    // was taken is what tells a caller whether it can repair the step itself.
+    const fellBack = (why, standing) => ({
+      observation: observationFrom(page.text, this.abilities), perception: null, why, standing });
     if (!this.perception?.available) return fellBack("no perception service configured");
     let seen;
     // Hold the page still for the walk and the capture. The reveal keeper scrolls
@@ -745,7 +772,7 @@ class PersonaDirector {
           + `${stood.painted ? "" : ", body not painted"})`
         : "";
       return fellBack(`the capture did not describe the page: ${
-        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`);
+        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`, stood);
     }
     // Absent, not empty. An empty observation is a person who looked and took
     // nothing in -- which is the strongest eyesight finding here, not a failure

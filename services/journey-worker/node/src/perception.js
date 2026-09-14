@@ -152,6 +152,10 @@ function batchResults(stdout) {
 // pixels or a scrollbar appearing.
 const STILL_ARRIVING_PX = 64;
 
+// A few pixels of rounding, rubber-banding and sub-pixel layout are not a
+// viewport below the content.
+const PAST_THE_END_SLACK = 8;
+
 const SCROLL_AFTER =
   "(() => JSON.stringify({y: Math.round(scrollY), h: Math.round(innerHeight),"
   + " doc: Math.round(document.documentElement.scrollHeight),"
@@ -258,9 +262,18 @@ function pageStanding(value) {
       if (!Number.isFinite(y)) return { y: NaN, known: false };
       return { y, known: true, viewportHeight: Number(parsed.h) || 0,
                documentHeight: Number(parsed.doc) || 0, painted: Boolean(parsed.painted),
-               // Past the end of its own document: the capture is of nothing,
-               // and the page is fine.
-               pastTheEnd: Number(parsed.doc) > 0 && y > Number(parsed.doc) };
+               // Below the end of its own content: the viewport starts past the
+               // last pixel the document has, so the capture is of nothing and
+               // the page is perfectly fine.
+               //
+               // The comparison is against the furthest a document can be
+               // scrolled -- its height less one viewport -- not against its
+               // height. Against the height it can never fire: a page 1465px
+               // tall in a 900px viewport stops scrolling at 565, and cycle 33
+               // photographed blank space at 800, 867 and 712 while this check
+               // reported everything in order.
+               pastTheEnd: Number(parsed.doc) > 0 && Number(parsed.h) > 0
+                 && y > Math.max(0, Number(parsed.doc) - Number(parsed.h)) + PAST_THE_END_SLACK };
     } catch { return { y: NaN, known: false }; }
   }
   return { y: NaN, known: false };

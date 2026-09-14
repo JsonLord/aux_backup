@@ -269,3 +269,25 @@ test("a page still building itself is not photographed as if it were finished", 
   const noPicture = await lookAtPage(runner(1465, 8620), { capture: false });
   assert.equal(noPicture.layoutCheck, "skipped");
 });
+
+test("past-the-end is measured against the furthest the page can scroll", () => {
+  // Against the document height it can never fire: a 1465px page in a 900px
+  // window stops scrolling at 565, and cycle 33 photographed blank space at
+  // 800, 867 and 712 while this check reported everything in order.
+  const at = (y, h, doc) => pageStanding(JSON.stringify({ y, h, doc, painted: true })).pastTheEnd;
+
+  assert.equal(at(800, 900, 1465), true, "235px below the last pixel of the document");
+  assert.equal(at(867, 900, 1444), true);
+  assert.equal(at(712, 900, 1444), true);
+
+  assert.equal(at(112, 900, 1465), false, "inside the page");
+  assert.equal(at(565, 900, 1465), false, "exactly at the bottom is still the page");
+  assert.equal(at(1560, 900, 8620), false, "a tall page scrolled a long way is fine");
+  assert.equal(at(0, 900, 400), false, "a page shorter than the window does not scroll at all");
+  // Rounding and rubber-banding are not a viewport below the content.
+  assert.equal(at(570, 900, 1465), false);
+  assert.equal(at(600, 900, 1465), true);
+  // Without both numbers there is no judgement to make, and none is claimed.
+  assert.equal(pageStanding(JSON.stringify({ y: 800, doc: 1465 })).pastTheEnd, false);
+  assert.equal(pageStanding("800").pastTheEnd, undefined);
+});

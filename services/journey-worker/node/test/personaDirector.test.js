@@ -1512,3 +1512,51 @@ test("a trustworthy capture with nothing legible is still the strongest finding"
   assert.equal(looked.data.counts.notPerceived, 7);
   assert.ok(!recorder.events.some((event) => event.type === "persona.perception_fallback"));
 });
+
+test("a window pointing past the end of the page is scrolled back, not spent blind", async () => {
+  // Cycle 33 lost 22 captures to this: the persona scrolled down a tall page,
+  // the page re-rendered into a short one, and the position it had been left at
+  // no longer existed -- so the capture was of blank space below the content.
+  // Nothing is wrong with the page and nothing is wrong with the eyes.
+  let looks = 0;
+  const scrolls = [];
+  const perception = {
+    available: true,
+    async perceive() {
+      looks += 1;
+      if (looks === 1) {
+        return { observation: "", eyes: {}, scan: {},
+          counts: { elements: 25, legible: 0, fixated: 0, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [], notLookedAt: [],
+          capture: { trustworthy: false, measured: 25, blankShare: 1,
+                     reason: "25 of 25 regions the tree says hold something had no ink in them" } };
+      }
+      return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+        capture: { trustworthy: true, measured: 1, reason: "" } };
+    },
+  };
+  const browser = fakeBrowser();
+  browser.eval = async (script) => { scrolls.push(script); return { stdout: "565" }; };
+
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception, frames: () => [],
+    // The walk reports a viewport starting below the last pixel of the document:
+    // 800 into a 1465px page shown through a 900px window stops at 565.
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing", box: { x: 0, y: 0, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 800,
+      standing: { y: 800, known: true, viewportHeight: 900, documentHeight: 1465,
+                  painted: true, pastTheEnd: true } }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, browser, recorder);
+
+  assert.ok(scrolls.some((script) => script.includes("scrollTo(0, 565)")),
+    "it scrolls back to the furthest position the document actually has");
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.ok(looked, "and the step is recovered rather than lost");
+  assert.ok(!recorder.events.some((event) => event.type === "persona.perception_fallback"));
+});
