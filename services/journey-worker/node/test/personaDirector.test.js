@@ -1560,3 +1560,46 @@ test("a window pointing past the end of the page is scrolled back, not spent bli
   assert.ok(looked, "and the step is recovered rather than lost");
   assert.ok(!recorder.events.some((event) => event.type === "persona.perception_fallback"));
 });
+
+test("a journey that never reached the page says so instead of reviewing it", async () => {
+  // Cycle 36 sent a persona to a tab with nothing in it: the tree was empty,
+  // the walk found no elements, and it spent all sixteen steps scrolling --
+  // 800, 800, 1000 -- reporting "the visible area appears empty" each time. The
+  // report called that inconclusive *about the site*, which is the same mistake
+  // as calling a blank capture an unreadable page.
+  let decisions = 0;
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: { available: false }, frames: () => [],
+    actor: async () => {
+      decisions += 1;
+      return { visible: "", expectation: "", action: { type: "SCROLL", target: "800" } };
+    },
+  });
+  const browser = fakeBrowser();
+  browser.snapshot = async () => ({ stdout: "   \n  " });
+  const recorder = fakeRecorder();
+  const result = await run(director, browser, recorder);
+
+  assert.equal(decisions, 0, "a persona is not asked to browse a page that is not there");
+  const said = recorder.events.find((event) => event.type === "journey.page_never_arrived");
+  assert.ok(said, "and the run says why it stopped, in the record");
+  assert.equal(said.data.url, JOURNEY.app.baseUrl);
+  const ended = recorder.events.find((event) => event.type === "agent.end");
+  assert.equal(ended.data.type, "abandoned");
+  assert.match(ended.data.detail, /nothing was ever on the page/);
+  assert.ok(result, "the run still returns a verdict rather than throwing");
+});
+
+test("a page that did arrive is browsed as usual", async () => {
+  // The guard must not fire on a page that is simply quiet.
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: { available: false }, frames: () => [],
+    actor: scriptedActor([{ type: "DONE", content: "found it" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.ok(!recorder.events.some((event) => event.type === "journey.page_never_arrived"));
+  const ended = recorder.events.find((event) => event.type === "agent.end");
+  assert.equal(ended.data.type, "done");
+});

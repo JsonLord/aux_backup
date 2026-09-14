@@ -272,6 +272,22 @@ class PersonaDirector {
     lastUrl = await browser.getUrl().catch(() => journey.app.baseUrl);
     await this.capture(browser, context, "arrived");
 
+    // Did the page arrive at all? Cycle 36 sent a persona to a tab that had
+    // nothing in it: the accessibility tree was empty, the walk found no
+    // elements, and it spent all sixteen of its steps scrolling -- 800, 800,
+    // 1000 -- saying "the visible area appears empty" each time. The report
+    // then called that inconclusive *about the site*, which is the same mistake
+    // as calling a blank capture an unreadable page. A journey that never
+    // reached the product has nothing to say about it.
+    const arrival = await this.observe(browser);
+    if (!String(arrival.text || "").trim()) {
+      await recorder.record("journey.page_never_arrived",
+        "The page never arrived, so this run has nothing to say about it", {
+          url: journey.app.baseUrl, landedOn: lastUrl });
+      ending = { type: "abandoned", detail: `nothing was ever on the page at ${journey.app.baseUrl}` };
+    }
+    pending = ending ? null : arrival;
+
     let reportedGateFailure = false;
     let reportedPerceptionFailure = false;
     while (steps < this.maxSteps && !ending) {
