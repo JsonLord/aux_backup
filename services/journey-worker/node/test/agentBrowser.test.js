@@ -3,7 +3,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { activeSessionName, runAgentBrowser, setActiveSession } = require("../src/agentBrowser");
+const { activeSessionName, runAgentBrowser, setActiveSession,
+  RETRYABLE} = require("../src/agentBrowser");
 const { sessionNameFor } = require("../src/journeytest");
 
 test.afterEach(() => setActiveSession(""));
@@ -63,4 +64,23 @@ test("two runs of one job get different browser sessions", () => {
 test("a session name is safe to pass as a command-line argument", () => {
   const name = sessionNameFor("../../etc/passwd; rm -rf /");
   assert.match(name, /^aux-[A-Za-z0-9._-]+$/);
+});
+
+test("a command agent-browser asks to have retried is retried", async () => {
+  // Cycle 34 ended a three-persona run on a daemon race: two commands arrived
+  // together, each wanting the daemon started with its own configuration, and
+  // the loser was told "Retry the command so agent-browser can restart it with
+  // the requested configuration". Nothing retried.
+  assert.ok(RETRYABLE.test(
+    "✗ A daemon for session 'aux-job_2e30' started concurrently with different daemon "
+    + "configuration. Retry the command so agent-browser can restart it with the requested "
+    + "configuration."));
+
+  // And only those. A click that found no element, a page that would not load
+  // and a timeout are answers: running the same command again spends the time
+  // to receive the same answer.
+  for (const answer of ["element not found: e17", "Command failed: timeout", "net::ERR_NAME_NOT_RESOLVED",
+                        "No such session", "page crashed"]) {
+    assert.ok(!RETRYABLE.test(answer), `"${answer}" is an answer, not a request to try again`);
+  }
 });

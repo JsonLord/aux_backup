@@ -44,8 +44,16 @@ function agentBrowserCommand() {
     || path.join(__dirname, "..", "node_modules", ".bin", "agent-browser");
 }
 
-/** Run agent-browser. `input` is written to stdin and never appears in argv. */
-function runAgentBrowser(args, { input, timeoutMs = COMMAND_TIMEOUT_MS, session } = {}) {
+// agent-browser failures that say, in so many words, to try again. The daemon
+// race is a real one: two commands arriving together each want the daemon
+// started with their own configuration, one wins, and the loser is told to
+// retry so the daemon can be restarted the way it asked for. Cycle 34 ended a
+// three-persona run on it -- the tool asked for a retry and nothing retried.
+const RETRYABLE = /retry the command|started concurrently with different daemon configuration/i;
+const DAEMON_RETRIES = 3;
+const DAEMON_BACKOFF_MS = 750;
+
+function runOnce(args, { input, timeoutMs = COMMAND_TIMEOUT_MS, session } = {}) {
   // `--session` is a global option and has to precede the subcommand.
   const name = session === undefined ? activeSession : String(session || "");
   const argv = name ? ["--session", name, ...args] : args;
@@ -60,6 +68,23 @@ function runAgentBrowser(args, { input, timeoutMs = COMMAND_TIMEOUT_MS, session 
       }));
     if (input !== undefined) child.stdin.end(input);
   });
+}
+
+/**
+ * Run agent-browser, retrying the failures it asks to have retried.
+ *
+ * Only those: a click that found no element, a page that would not load and a
+ * timeout are answers, and running the same command again spends the time to
+ * receive the same answer. The daemon race is different -- it is a statement
+ * that the command was never carried out.
+ */
+async function runAgentBrowser(args, options = {}) {
+  let result = await runOnce(args, options);
+  for (let attempt = 1; attempt <= DAEMON_RETRIES && !result.ok && RETRYABLE.test(result.stderr); attempt += 1) {
+    await new Promise((resolve) => setTimeout(resolve, DAEMON_BACKOFF_MS * attempt));
+    result = await runOnce(args, options);
+  }
+  return result;
 }
 
 /** Run a batch of commands, given as [[command, ...args], ...]. */
@@ -77,5 +102,5 @@ async function evaluateInPage(expression, options = {}) {
   return { ok: true, value: text };
 }
 
-module.exports = { COMMAND_TIMEOUT_MS, activeSessionName, agentBrowserCommand, batch, evaluateInPage,
+module.exports = { COMMAND_TIMEOUT_MS, RETRYABLE, activeSessionName, agentBrowserCommand, batch, evaluateInPage,
   runAgentBrowser, setActiveSession };
