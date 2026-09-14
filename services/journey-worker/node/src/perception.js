@@ -135,7 +135,15 @@ function batchResults(stdout) {
 // everything around it are the same flat colour", because the crops had landed on
 // blank page. The reveal keeper was the scroller, and it is held now -- this is
 // how we know, rather than assume, that nothing else moved.
-const SCROLL_AFTER = "(() => String(Math.round(scrollY)))()";
+// Where the page was standing when the capture was taken, and how much page
+// there is. A blank capture and a capture of blank page are the same pixels and
+// different bugs: the first is a renderer that painted nothing, the second is a
+// viewport parked past the end of the document. Cycle 31 rejected 22 captures
+// for having no ink in them and the record could not say which.
+const SCROLL_AFTER =
+  "(() => JSON.stringify({y: Math.round(scrollY), h: Math.round(innerHeight),"
+  + " doc: Math.round(document.documentElement.scrollHeight),"
+  + " painted: document.body ? document.body.getBoundingClientRect().height > 0 : false}))()";
 
 async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const file = capture ? path.join(os.tmpdir(), `perception-${process.pid}-${Date.now()}.png`) : "";
@@ -168,7 +176,8 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     unlink(file).catch(() => {});
   }
   const before = Number(walked.scrollY) || 0;
-  const settled = scrollNumber(scrollValue(after));
+  const standing = pageStanding(scrollValue(after));
+  const settled = standing.y;
   // Three states, not two. The hold on the reveal keeper is the fix; this
   // read-back is corroboration. A read-back we cannot parse has lost the
   // corroboration, not the fix -- treating "unknown" as "moved" would let one
@@ -187,10 +196,43 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     // Whether the boxes and the pixels are describing the same page.
     moved,
     scrolledTo: known ? settled : null,
+    // Where the page was standing when the capture was taken. A blank capture
+    // and a capture of blank page are the same pixels and different bugs.
+    standing: standing.known ? standing : undefined,
     // "same" | "moved" | "unavailable" -- said out loud, because a guard that
     // cannot run is not a guard that passed.
     scrollCheck: !capture ? "skipped" : known ? (moved ? "moved" : "same") : "unavailable",
   };
+}
+
+/**
+ * Where the page stood, from the read-back.
+ *
+ * The read-back used to be a bare number. It now carries the viewport height and
+ * the document height with it, because those are what tell a renderer that
+ * painted nothing apart from a viewport parked past the end of the page -- the
+ * same blank pixels, two different bugs, and cycle 31 rejected 22 captures
+ * without being able to say which.
+ *
+ * The bare-number form is still accepted: the guard this feeds predates the
+ * extra fields and must not depend on them.
+ */
+function pageStanding(value) {
+  const plain = scrollNumber(value);
+  if (Number.isFinite(plain)) return { y: plain, known: true };
+  if (typeof value === "string" && value.trim().startsWith("{")) {
+    try {
+      const parsed = JSON.parse(value.trim());
+      const y = scrollNumber(String(parsed.y));
+      if (!Number.isFinite(y)) return { y: NaN, known: false };
+      return { y, known: true, viewportHeight: Number(parsed.h) || 0,
+               documentHeight: Number(parsed.doc) || 0, painted: Boolean(parsed.painted),
+               // Past the end of its own document: the capture is of nothing,
+               // and the page is fine.
+               pastTheEnd: Number(parsed.doc) > 0 && y > Number(parsed.doc) };
+    } catch { return { y: NaN, known: false }; }
+  }
+  return { y: NaN, known: false };
 }
 
 /**
@@ -277,4 +319,4 @@ class PerceptionClient {
 }
 
 module.exports = { PerceptionClient, SCROLL_AFTER, WALK, batchResults, linkRefs, lookAtPage,
-  motionFramesFrom, scrollNumber, scrollValue };
+  motionFramesFrom, pageStanding, scrollNumber, scrollValue };

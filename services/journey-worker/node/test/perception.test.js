@@ -12,7 +12,7 @@ const assert = require("node:assert/strict");
 const {
   PerceptionClient, batchResults, linkRefs, lookAtPage, motionFramesFrom, scrollNumber,
   scrollValue,
-} = require("../src/perception");
+  pageStanding} = require("../src/perception");
 
 /** agent-browser's batch envelope, as `batch --json` really returns it. */
 function envelope({ refs = {}, walked = {}, snapshot = "- heading \"Hi\" [ref=e1]" } = {}) {
@@ -203,4 +203,29 @@ test("a read-back of nothing is not a read-back of zero", () => {
   assert.equal(scrollNumber(" 2400 "), 2400);
   assert.equal(scrollNumber("-12"), -12);
   assert.equal(scrollNumber(2400), 2400);
+});
+
+test("the read-back says where the page stood, and still answers the old question", () => {
+  // A renderer that painted nothing and a viewport parked past the end of the
+  // document produce the same blank pixels and want different fixes. Cycle 31
+  // rejected 22 captures for having no ink in them and could say which.
+  const parked = pageStanding('{"y":9000,"h":900,"doc":4000,"painted":true}');
+  assert.equal(parked.y, 9000);
+  assert.equal(parked.pastTheEnd, true, "below its own document: the page is fine, the capture is of nothing");
+  assert.equal(parked.painted, true);
+
+  const inside = pageStanding('{"y":200,"h":900,"doc":4000,"painted":true}');
+  assert.equal(inside.pastTheEnd, false);
+
+  const unpainted = pageStanding('{"y":0,"h":900,"doc":0,"painted":false}');
+  assert.equal(unpainted.painted, false, "nothing laid out at all is the other bug");
+
+  // The scroll-stability guard predates these fields and must not depend on
+  // them: a bare number is still a complete answer.
+  assert.deepEqual(pageStanding("1200"), { y: 1200, known: true });
+  // And an unreadable read-back stays unknown rather than passing as "at the top",
+  // which is the distinction the guard exists for.
+  for (const bad of ["", "  ", "{oops", "null", undefined]) {
+    assert.equal(pageStanding(bad).known, false, `"${bad}" must not read as a position`);
+  }
 });

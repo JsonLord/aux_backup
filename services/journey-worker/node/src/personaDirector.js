@@ -726,8 +726,17 @@ class PersonaDirector {
     // legible on a capture we do not trust is a failed measurement, and the only
     // honest thing to do with it is put it down.
     if (perception?.capture && perception.capture.trustworthy === false) {
+      // Where the page was standing, when we know. A renderer that painted
+      // nothing and a viewport parked past the end of the document produce the
+      // same blank pixels and want different fixes, and the reason alone cannot
+      // tell them apart.
+      const stood = seen.standing;
+      const where = stood
+        ? ` (page at ${stood.y} of ${stood.documentHeight}px${stood.pastTheEnd ? ", past the end" : ""}`
+          + `${stood.painted ? "" : ", body not painted"})`
+        : "";
       return fellBack(`the capture did not describe the page: ${
-        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}`);
+        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`);
     }
     // Absent, not empty. An empty observation is a person who looked and took
     // nothing in -- which is the strongest eyesight finding here, not a failure
