@@ -67,7 +67,13 @@ const WALK = `(() => {
     if (direct.length >= 2) push(node, "text");
   });
   return JSON.stringify({ viewport: { width: innerWidth, height: innerHeight },
-    scrollY: Math.round(scrollY), elements: out.slice(0, 600) });
+    scrollY: Math.round(scrollY),
+    // How much page there was when the boxes were taken. Compared against the
+    // same number read after the screenshot: a document that grew between the
+    // two was still being built, and the picture is of a page that no longer
+    // exists.
+    documentHeight: Math.round(document.documentElement.scrollHeight),
+    elements: out.slice(0, 600) });
 })()`;
 
 /** The role a snapshot ref carries, mapped onto what the walk reports. */
@@ -140,6 +146,12 @@ function batchResults(stdout) {
 // different bugs: the first is a renderer that painted nothing, the second is a
 // viewport parked past the end of the document. Cycle 31 rejected 22 captures
 // for having no ink in them and the record could not say which.
+// A document whose height changes by more than this between the boxes and the
+// picture was still being built. Small enough to catch a page that is still
+// laying itself out, large enough to ignore a lazy image settling by a few
+// pixels or a scrollbar appearing.
+const STILL_ARRIVING_PX = 64;
+
 const SCROLL_AFTER =
   "(() => JSON.stringify({y: Math.round(scrollY), h: Math.round(innerHeight),"
   + " doc: Math.round(document.documentElement.scrollHeight),"
@@ -185,7 +197,20 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   // which is a worse failure than the one being guarded against and a much
   // quieter one.
   const known = Number.isFinite(settled);
-  const moved = capture && known && settled !== before;
+  const scrolled = capture && known && settled !== before;
+  // A page still growing is a page still arriving. Cycle 32 refused 31 captures
+  // for having no ink in them, and the standing said why: the document measured
+  // 1465px where the same page elsewhere measures 8620px. Nothing was parked
+  // past the end and the body had laid out -- the picture was simply taken
+  // while the page was still building itself, so the tree already listed
+  // elements that had not been painted yet.
+  //
+  // This is the layout twin of the scroll-stability guard, and for the same
+  // reason: boxes and pixels have to describe one state of the page.
+  const grewBy = capture && standing.known && standing.documentHeight && walked.documentHeight
+    ? Math.abs(standing.documentHeight - Number(walked.documentHeight)) : 0;
+  const grew = grewBy > STILL_ARRIVING_PX;
+  const moved = scrolled || grew;
   return {
     elements: linkRefs(walked.elements || [], snapshot.refs || {}),
     refs: snapshot.refs || {},
@@ -201,7 +226,13 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     standing: standing.known ? standing : undefined,
     // "same" | "moved" | "unavailable" -- said out loud, because a guard that
     // cannot run is not a guard that passed.
-    scrollCheck: !capture ? "skipped" : known ? (moved ? "moved" : "same") : "unavailable",
+    scrollCheck: !capture ? "skipped" : known ? (scrolled ? "moved" : "same") : "unavailable",
+    // "settled" | "growing" | "unavailable" -- said out loud, because a guard
+    // that cannot run is not a guard that passed.
+    layoutCheck: !capture ? "skipped"
+      : (standing.known && standing.documentHeight && walked.documentHeight)
+        ? (grew ? "growing" : "settled") : "unavailable",
+    grewBy,
   };
 }
 

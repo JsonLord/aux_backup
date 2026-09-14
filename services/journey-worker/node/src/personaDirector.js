@@ -698,7 +698,16 @@ class PersonaDirector {
     // navigation landing mid-batch. Boxes from one scroll position against pixels
     // from another measure nothing, and the failure mode is not a gap in the
     // report but a confident false finding. Fall back to the tree for this step.
-    if (seen.moved) return fellBack("the page moved under the walk");
+    // Two ways the boxes and the pixels can describe different pages: it
+    // scrolled between them, or it was still building itself. Said apart,
+    // because a scroll settles on its own and a page still arriving wants
+    // waiting for.
+    if (seen.moved) {
+      return fellBack(seen.layoutCheck === "growing"
+        ? `the page was still building itself under the walk (it grew ${seen.grewBy}px between `
+          + "the boxes and the picture)"
+        : "the page moved under the walk");
+    }
     const perception = await this.perception.perceive({
       screenshotBase64: seen.screenshotBase64,
       elements: seen.elements,

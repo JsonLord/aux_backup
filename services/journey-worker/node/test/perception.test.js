@@ -229,3 +229,43 @@ test("the read-back says where the page stood, and still answers the old questio
     assert.equal(pageStanding(bad).known, false, `"${bad}" must not read as a position`);
   }
 });
+
+test("a page still building itself is not photographed as if it were finished", async () => {
+  // Cycle 32 refused 31 captures for having no ink in them, and the standing
+  // said why: the document measured 1465px where the same page elsewhere
+  // measures 8620px. Nothing was parked past the end and the body had laid out
+  // -- the picture was taken while the page was still building, so the tree
+  // already listed elements that had not been painted yet.
+  const walkResult = (documentHeight) => JSON.stringify({
+    viewport: { width: 1280, height: 900 }, scrollY: 112, documentHeight,
+    elements: [{ selector: "e1", role: "link", name: "Pricing",
+                 box: { x: 0, y: 0, width: 60, height: 20 } }] });
+
+  const runner = (docAtWalk, docAfter) => async () => ({
+    ok: true,
+    stdout: JSON.stringify([
+      { command: ["snapshot"], result: { snapshot: "", refs: {} } },
+      { command: ["eval"], result: walkResult(docAtWalk) },
+      { command: ["screenshot"], result: {} },
+      { command: ["eval"], result: JSON.stringify({ y: 112, h: 900, doc: docAfter, painted: true }) },
+    ]) });
+
+  const stillArriving = await lookAtPage(runner(1465, 8620));
+  assert.equal(stillArriving.layoutCheck, "growing");
+  assert.equal(stillArriving.moved, true, "the boxes and the pixels are of different pages");
+  assert.ok(stillArriving.grewBy > 7000);
+
+  const settled = await lookAtPage(runner(8620, 8620));
+  assert.equal(settled.layoutCheck, "settled");
+  assert.equal(settled.moved, false);
+
+  // A lazy image settling, or a scrollbar appearing, is not a page arriving.
+  const nudged = await lookAtPage(runner(8620, 8648));
+  assert.equal(nudged.layoutCheck, "settled");
+  assert.equal(nudged.moved, false);
+
+  // A walk with no picture has no second read to compare against, and says so
+  // rather than reporting a guard it could not run as one that passed.
+  const noPicture = await lookAtPage(runner(1465, 8620), { capture: false });
+  assert.equal(noPicture.layoutCheck, "skipped");
+});
