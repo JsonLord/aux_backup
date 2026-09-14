@@ -18,7 +18,7 @@ import shutil
 from datetime import datetime
 from apps.gradio.api_client import ControlPlaneClient, PersonaRuntimeClient, normalize_personas
 from apps.gradio.auth import request_identity, workspaces_from_profile
-from apps.gradio import credentials_panel, live_control
+from apps.gradio import credentials_panel, live_control, model_settings_panel
 from apps.gradio.github_backup import (GitHubAuthError, confirm_backup_repo, push_session_to_github,
                                         validate_and_list_repos)
 
@@ -1318,6 +1318,19 @@ log_choices_kinds = ("journey.log", "persona.profile")
 _CREDENTIAL_STORE = None
 
 
+_MODEL_SETTINGS_STORE = None
+
+
+def _model_settings_store():
+    """Opened lazily, like the credential store, so importing never touches the DB."""
+    global _MODEL_SETTINGS_STORE
+    if _MODEL_SETTINGS_STORE is None:
+        from apps.api.model_settings import ModelSettingsStore
+
+        _MODEL_SETTINGS_STORE = ModelSettingsStore()
+    return _MODEL_SETTINGS_STORE
+
+
 def _credential_store():
     """Opened lazily so importing this module never touches the database."""
     global _CREDENTIAL_STORE
@@ -1345,6 +1358,7 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS,
         # gate them.
         workspace_selector = gr.Dropdown(label="Workspace", choices=[], interactive=True, allow_custom_value=True)
         credentials_panel.render(_credential_store(), workspace_selector)
+        model_settings_panel.render(_model_settings_store(), workspace_selector)
     login_status = gr.Markdown("Sign in with Hugging Face to load your personal and organization workspaces.")
 
     # Connecting GitHub belongs with signing in, not buried in the backup tab: it is
@@ -2687,6 +2701,28 @@ def configured_providers() -> list[dict[str, str]]:
     return providers
 
 
+def _refuse_unless_provisioned(authorization, workspace_id, example_persona) -> None:
+    """Stop a run that has no model to spend, with something to do about it.
+
+    Three callers may use the credentials baked into this deployment: anyone
+    running a bundled example persona, the Space's own owner, and the admin API
+    token (apps/api/model_settings.py). Everybody else configures a provider in
+    Settings -> Models, and until they have, the honest answer is no.
+    """
+    from apps.api.auth import IdentityProvider
+    from apps.api.model_settings import may_use_built_in_providers, why_not_built_in
+
+    try:
+        auth = IdentityProvider().resolve(authorization, workspace_id, "local")
+    except Exception:  # noqa: BLE001 - an unreadable identity is simply not the owner
+        auth = {}
+    if may_use_built_in_providers(auth, example_persona=example_persona):
+        return
+    if _model_settings_store().chain(auth.get("workspace_id") or workspace_id or "local", "acting"):
+        return
+    raise HTTPException(402, why_not_built_in(auth))
+
+
 def _upstream_detail(error: Exception) -> str:
     """What the upstream service actually said, not just that it said something.
 
@@ -2878,6 +2914,12 @@ if __name__ == "__main__":
                                workspace_id: str | None = Header(None, alias="X-Workspace-ID")):
         session_client, personas_client = api_clients(authorization, workspace_id)
         example_persona = payload.get("example_persona")
+        # Whose model call this is. The Space ships with provider credentials in
+        # its environment and every run has been spending them, whoever asked --
+        # fine for somebody trying a bundled example, wrong for a stranger's
+        # hundred-step journey against their own site. Checked here rather than
+        # deeper down because a refusal is only useful before the work starts.
+        _refuse_unless_provisioned(authorization, workspace_id, example_persona)
         try:
             if example_persona:
                 # Skip live TinyTroupe generation and use a bundled example persona
