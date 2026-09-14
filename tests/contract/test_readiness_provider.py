@@ -104,3 +104,65 @@ def test_no_key_configured_says_so_rather_than_reporting_a_dead_endpoint(readine
 
     assert result["status"] == "unconfigured"
     assert "OPENAI_API_KEY" in result["error"]
+
+
+def test_readiness_says_what_else_could_have_served_the_run(readiness_probe, monkeypatch):
+    """The probe asked the primary and stopped, which answers "can this run work?"
+    but not "is there anything else it could have used?". Four cycles were lost to a
+    provider being unroutable while a second one sat configured and unasked."""
+    monkeypatch.setenv("OPENAI_COMPATIBLE_ENDPOINT", "https://router.example/v1")
+    monkeypatch.setenv("BLABLADOR_BASE_URL", "https://fallback.example/v1")
+    monkeypatch.setenv("BLABLADOR_API_KEY", "another-key")
+    monkeypatch.delenv("JOURNEY_REFLECT_BASE_URL", raising=False)
+
+    class Answered:
+        def raise_for_status(self):
+            return None
+
+    def only_the_fallback_answers(url, **kwargs):
+        if url.startswith("https://fallback.example"):
+            return Answered()
+        raise requests.ConnectionError("Name or service not known")
+
+    monkeypatch.setattr(requests, "get", only_the_fallback_answers)
+    result = readiness_probe.build_model_provider_probe()()
+
+    assert result["status"] == "unreachable", "the run still uses the primary"
+    assert result["anyReachable"] is True, "but something could serve it"
+    assert [item["name"] for item in result["alternatives"]] == ["blablador"]
+    assert result["alternatives"][0]["status"] == "ok"
+    assert result["alternatives"][0]["endpoint"] == "https://fallback.example"
+
+
+def test_one_endpoint_configured_twice_is_asked_once(readiness_probe, monkeypatch):
+    """The same URL under two variable names is one provider, not a fallback."""
+    monkeypatch.setenv("OPENAI_COMPATIBLE_ENDPOINT", "https://router.example/v1")
+    monkeypatch.setenv("BLABLADOR_BASE_URL", "https://router.example/v1")
+    monkeypatch.setenv("BLABLADOR_API_KEY", "same-endpoint")
+    monkeypatch.delenv("JOURNEY_REFLECT_BASE_URL", raising=False)
+
+    asked = []
+
+    def count(url, **kwargs):
+        asked.append(url)
+        raise requests.ConnectionError("down")
+
+    monkeypatch.setattr(requests, "get", count)
+    result = readiness_probe.build_model_provider_probe()()
+
+    assert len(asked) == 1
+    assert result["alternatives"] == []
+    assert result["anyReachable"] is False
+
+
+def test_a_provider_with_no_key_is_not_offered_as_a_fallback(readiness_probe, monkeypatch):
+    monkeypatch.setenv("OPENAI_COMPATIBLE_ENDPOINT", "https://router.example/v1")
+    monkeypatch.setenv("BLABLADOR_BASE_URL", "https://fallback.example/v1")
+    monkeypatch.delenv("BLABLADOR_API_KEY", raising=False)
+    monkeypatch.delenv("JOURNEY_REFLECT_BASE_URL", raising=False)
+
+    monkeypatch.setattr(requests, "get",
+                        lambda url, **kw: (_ for _ in ()).throw(requests.ConnectionError("down")))
+    result = readiness_probe.build_model_provider_probe()()
+
+    assert result["alternatives"] == [], "an endpoint nothing can authenticate against is not a fallback"

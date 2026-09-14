@@ -2657,6 +2657,36 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS,
 PROVIDER_PROBE_TTL_S = 30.0
 
 
+def configured_providers() -> list[dict[str, str]]:
+    """Every model endpoint this deployment has credentials for, in preference order.
+
+    The probe asked the primary and stopped, which answered "can this run work?"
+    but not "is there anything else it could have used?". A deployment that
+    configures a fallback and never reaches for it is configured for nothing.
+
+    The reflect provider is listed because it is a real, separately-credentialed
+    endpoint that the run already uses for judging -- if the acting endpoint is
+    gone and this one answers, the run has somewhere to go.
+    """
+    primary_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
+    primary_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
+                   or os.getenv("BLABLADOR_BASE_URL")
+                   or "https://debian-devil.tail3f341b.ts.net/v1")
+    candidates = [("primary", primary_url, primary_key),
+                  ("reflect", os.getenv("JOURNEY_REFLECT_BASE_URL", ""),
+                   os.getenv("JOURNEY_REFLECT_API_KEY", "")),
+                  ("blablador", os.getenv("BLABLADOR_BASE_URL", ""),
+                   os.getenv("BLABLADOR_API_KEY", ""))]
+    providers, seen = [], set()
+    for name, url, key in candidates:
+        url = (url or "").rstrip("/")
+        if not url or not key or url in seen:
+            continue
+        seen.add(url)
+        providers.append({"name": name, "baseUrl": url, "apiKey": key})
+    return providers
+
+
 def build_model_provider_probe(ttl_s: float = PROVIDER_PROBE_TTL_S):
     """Whether the model endpoint answers, rather than whether a key is set.
 
@@ -2681,27 +2711,37 @@ def build_model_provider_probe(ttl_s: float = PROVIDER_PROBE_TTL_S):
         now = time.monotonic()
         if held["result"] is not None and now - held["at"] < ttl_s:
             return held["result"]
-        api_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
-        base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
-                    or os.getenv("BLABLADOR_BASE_URL")
-                    or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
-        # Scheme and host only. A base URL can carry a key in a query string, and
-        # readiness is the most public thing this service serves.
-        split = urlsplit(base_url)
-        where = f"{split.scheme}://{split.netloc}" if split.netloc else "(not configured)"
-        if not api_key:
-            result = {"status": "unconfigured", "endpoint": where,
-                      "error": "no OPENAI_API_KEY or BLABLADOR_API_KEY in the environment"}
-        else:
+        providers = configured_providers()
+        if not providers:
+            result = {"status": "unconfigured", "endpoint": "(not configured)",
+                      "error": "no OPENAI_API_KEY or BLABLADOR_API_KEY in the environment",
+                      "alternatives": []}
+            held.update(at=now, result=result)
+            return result
+
+        checked = []
+        for provider in providers:
+            # Scheme and host only. A base URL can carry a key in a query string,
+            # and readiness is the most public thing this service serves.
+            split = urlsplit(provider["baseUrl"])
+            where = f"{split.scheme}://{split.netloc}" if split.netloc else "(not configured)"
             try:
-                response = requests.get(f"{base_url}/models",
-                                        headers={"authorization": f"Bearer {api_key}"}, timeout=8)
+                response = requests.get(f"{provider['baseUrl']}/models",
+                                        headers={"authorization": f"Bearer {provider['apiKey']}"},
+                                        timeout=8)
                 response.raise_for_status()
-                result = {"status": "ok", "endpoint": where}
+                checked.append({"name": provider["name"], "status": "ok", "endpoint": where})
             except requests.RequestException as error:
                 # str() on a requests failure carries the URL but never the
                 # Authorization header, so this cannot leak the key.
-                result = {"status": "unreachable", "endpoint": where, "error": str(error)[:300]}
+                checked.append({"name": provider["name"], "status": "unreachable",
+                                "endpoint": where, "error": str(error)[:300]})
+
+        # The run uses the first one, so that is the headline -- but a reader
+        # deciding whether to wait or to switch needs to know what else answered.
+        head = checked[0]
+        result = {**head, "alternatives": checked[1:],
+                  "anyReachable": any(item["status"] == "ok" for item in checked)}
         held.update(at=now, result=result)
         return result
 
