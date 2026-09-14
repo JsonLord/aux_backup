@@ -521,6 +521,36 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
   // endpoint and the key travel with the model rather than being assumed shared.
   const judgeKey = reflectApiKey || apiKey;
   const judgeUrl = reflectBaseUrl || baseUrl;
+
+  // Where to go when the acting endpoint stops existing. The primary is reached
+  // over a Tailscale funnel and when that link drops the name stops resolving
+  // from the Space at all -- five cycles were lost to it while the reflect
+  // endpoint sat reachable and credentialed, asked for nothing but reflections.
+  // A model, an endpoint and a key are one setting: fall back to all three or to
+  // none, because an alias without its token is a 401 on every call.
+  const spare = (reflectBaseUrl && reflectApiKey && reflectBaseUrl !== baseUrl)
+    ? { model: judge, apiKey: judgeKey, baseUrl: judgeUrl } : null;
+  let actingOn = { model, apiKey, baseUrl };
+  let movedTo = "";
+
+  /**
+   * One completion, on whichever endpoint is still answering.
+   *
+   * Only a request that never reached a server moves us: a 400 or a refusal is
+   * the provider answering, and asking a different one the same bad question
+   * spends a second budget on the same failure. Once moved, we stay moved --
+   * re-testing a dead endpoint every step would cost the run a minute a time.
+   */
+  async function completeSomewhere(ask) {
+    try {
+      return await complete({ ...ask, ...actingOn });
+    } catch (error) {
+      if (!spare || movedTo || !unreachable(error)) throw error;
+      movedTo = spare.baseUrl;
+      actingOn = spare;
+      return complete({ ...ask, ...actingOn });
+    }
+  }
   async function decide(input, { notLikeYou = "" } = {}) {
     const { system, user } = buildPrompt({ ...input, notLikeYou });
 
@@ -528,7 +558,7 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
     for (let attempt = 0; attempt < attempts; attempt += 1) {
       const ask = attempt === 0 ? user
         : `${user}\n\nYour last reply could not be read as one of the listed actions. Reply with JSON only.`;
-      lastText = await complete({ system, user: ask, model, apiKey, baseUrl });
+      lastText = await completeSomewhere({ system, user: ask });
       const decision = parseDecision(lastText);
       if (decision) return decision;
     }
@@ -545,6 +575,10 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
   };
   decide.reflectModel = judge;
   decide.reflectBaseUrl = judgeUrl;
+  // What the run actually decided on, which is not always what it was configured
+  // with. A report that says the primary model produced a journey the fallback
+  // produced is wrong about the one thing it must not be wrong about.
+  decide.actingOn = () => ({ ...actingOn, movedTo: movedTo || undefined });
 
   /**
    * Score one proposed action against the persona, for the adherence gate.

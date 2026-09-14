@@ -13,7 +13,8 @@ const {
   describeTarget,
   unreachable,
   UNREACHABLE_ATTEMPTS,
-  describeFailure} = require("../src/personaActor");
+  describeFailure,
+  llmActor} = require("../src/personaActor");
 
 test("a decision cut off mid-sentence keeps what the person actually said", async () => {
   // Discarding it costs the run a turn and produces the "malformed" fallback --
@@ -239,4 +240,76 @@ test("the failure a run reports carries the cause with it", async () => {
   } finally {
     global.fetch = originalFetch;
   }
+});
+
+/** The shape the director hands the actor on every step. */
+const ASK = (over = {}) => ({
+  profile: { persona: { name: "Friedrich Wolf" }, behavior: {}, abilities: {} },
+  tasks: ["Find the price."], observation: "[e1] link Pricing",
+  constraints: "", affect: "You are calm.", history: [], ...over });
+
+test("a run whose endpoint disappears moves to one that answers", async () => {
+  // Five cycles were lost to the primary being unroutable while the reflect
+  // endpoint sat reachable and credentialed, asked for nothing but reflections.
+  const asked = [];
+  const actor = llmActor({
+    model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1",
+    reflectModel: "alias-fast", reflectApiKey: "k2", reflectBaseUrl: "https://fallback.example/v1",
+    complete: async ({ baseUrl, model }) => {
+      asked.push(`${baseUrl}|${model}`);
+      if (baseUrl === "https://router.example/v1") throw new TypeError("fetch failed");
+      return JSON.stringify({ visible: "a link", expectation: "prices",
+        action: { type: "CLICK", target: "e1" } });
+    },
+  });
+  const decision = await actor(ASK({ observation: "[e1] link Pricing" }));
+
+  assert.equal(decision.action.type, "CLICK", "the run continues rather than ending");
+  assert.deepEqual(asked, ["https://router.example/v1|auto", "https://fallback.example/v1|alias-fast"],
+    "the model travels with the endpoint -- an alias without its token is a 401");
+  assert.equal(actor.actingOn().movedTo, "https://fallback.example/v1",
+    "and the run can say which endpoint actually decided it");
+});
+
+test("a provider that answered unhappily is not swapped out", async () => {
+  // A 400 is the provider answering. Asking a different one the same bad question
+  // spends a second budget on the same failure.
+  const asked = [];
+  const actor = llmActor({
+    model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1",
+    reflectModel: "alias-fast", reflectApiKey: "k2", reflectBaseUrl: "https://fallback.example/v1",
+    attempts: 1,
+    complete: async ({ baseUrl }) => {
+      asked.push(baseUrl);
+      throw Object.assign(new Error("HTTP 400: model_not_found"), { status: 400 });
+    },
+  });
+  await assert.rejects(actor(ASK()), /model_not_found/);
+  assert.deepEqual(asked, ["https://router.example/v1"]);
+});
+
+test("once moved, the run stays moved", async () => {
+  // Re-testing a dead endpoint every step would cost the run a minute a time.
+  let primaryTries = 0;
+  const actor = llmActor({
+    model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1",
+    reflectModel: "alias-fast", reflectApiKey: "k2", reflectBaseUrl: "https://fallback.example/v1",
+    complete: async ({ baseUrl }) => {
+      if (baseUrl === "https://router.example/v1") { primaryTries += 1; throw new TypeError("fetch failed"); }
+      return JSON.stringify({ visible: "", expectation: "", action: { type: "READ", target: "e1" } });
+    },
+  });
+  await actor(ASK());
+  await actor(ASK());
+  await actor(ASK());
+  assert.equal(primaryTries, 1, "the dead endpoint is asked once, not once a step");
+});
+
+test("with no second endpoint configured nothing changes", async () => {
+  const actor = llmActor({
+    model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1",
+    complete: async () => { throw new TypeError("fetch failed"); },
+  });
+  await assert.rejects(actor(ASK()), /fetch failed/);
+  assert.equal(actor.actingOn().movedTo, undefined);
 });
