@@ -6,7 +6,8 @@ const fs = require("node:fs");
 const os = require("node:os");
 const path = require("node:path");
 const { CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
-  resolveSessionState, stepBudget, testerContract } = require("../src/journeytest");
+  resolveSessionState, stepBudget, testerContract,
+  retryingDaemonRaces} = require("../src/journeytest");
 
 test("maps AUX run input to pinned JourneyTest contracts", () => {
   const profile = {
@@ -210,4 +211,51 @@ test("an operator-pinned action budget wins outright", () => {
   for (const bad of ["", "   ", "lots", "0", "-5"]) {
     assert.equal(stepBudget(["a", "b"], { JOURNEY_MAX_STEPS: bad }), 16, `bad value ${bad}`);
   }
+});
+
+test("the library's driver retries the one failure agent-browser asks to have retried", async () => {
+  // Cycles 34 and 35 both ended before the first step, on `record start`, with
+  // a message asking to be retried. Our own commands go through agentBrowser.js,
+  // which retries; the driver the library builds spawns the binary itself, so
+  // it did not.
+  const race = () => new Error(
+    "Command failed: agent-browser-container.sh --session aux-job record start video.webm\n"
+    + "✗ A daemon for session 'aux-job' started concurrently with different daemon configuration. "
+    + "Retry the command so agent-browser can restart it with the requested configuration.");
+
+  let tries = 0;
+  const driver = retryingDaemonRaces({
+    async startRecording() {
+      tries += 1;
+      if (tries < 3) throw race();
+      return "recording";
+    },
+  }, { sleep: async () => {} });
+
+  assert.equal(await driver.startRecording("video.webm"), "recording");
+  assert.equal(tries, 3, "it waits the race out rather than ending the run");
+
+  // Every method, not just the recording one: the race is about which command
+  // reaches the daemon first, which is not a property of the command.
+  let opens = 0;
+  const onOpen = retryingDaemonRaces({
+    async open() { opens += 1; if (opens < 2) throw race(); return "opened"; },
+  }, { sleep: async () => {} });
+  assert.equal(await onOpen.open("https://example.test"), "opened");
+
+  // And only the race. An answer is not retried, however unwelcome.
+  let asked = 0;
+  const answered = retryingDaemonRaces({
+    async click() { asked += 1; throw new Error("element not found: e17"); },
+  }, { sleep: async () => {} });
+  await assert.rejects(answered.click("e17"), /element not found/);
+  assert.equal(asked, 1, "asking again spends the time to hear the same answer");
+
+  // A driver that never stops racing still gives up rather than hanging the run.
+  let forever = 0;
+  const stuck = retryingDaemonRaces({
+    async startRecording() { forever += 1; throw race(); },
+  }, { attempts: 2, sleep: async () => {} });
+  await assert.rejects(stuck.startRecording(), /Retry the command/);
+  assert.equal(forever, 3, "the first try plus its two retries");
 });

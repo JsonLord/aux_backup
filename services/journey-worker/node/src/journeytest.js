@@ -4,7 +4,7 @@ const crypto = require("node:crypto");
 const fs = require("node:fs");
 const path = require("node:path");
 
-const { setActiveSession } = require("./agentBrowser");
+const { RETRYABLE, setActiveSession } = require("./agentBrowser");
 const { llmActor } = require("./personaActor");
 const { PersonaDirector } = require("./personaDirector");
 const { startRunCapture, takeRunReasoning } = require("./reasoningCapture");
@@ -218,6 +218,48 @@ function stepBudget(tasks = [], env = process.env) {
  * @param {Record<string, string | undefined>} [env]
  * @returns {"persona" | "pi"}
  */
+/**
+ * The library's driver, with the one failure agent-browser asks to have retried.
+ *
+ * Two commands arriving together each want the daemon started with their own
+ * configuration; one wins, and the loser is told "Retry the command so
+ * agent-browser can restart it with the requested configuration". Our own
+ * commands go through agentBrowser.js, which does. The driver the library
+ * builds spawns the binary itself, so it did not -- and cycles 34 and 35 both
+ * ended before the first step, on `record start`, with a message asking to be
+ * retried.
+ *
+ * Every method is wrapped rather than just the recording one: the race is about
+ * which command happens to reach the daemon first, and that is not a property
+ * of the command.
+ */
+function retryingDaemonRaces(driver, { attempts = 3, waitMs = 750,
+  sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms)) } = {}) {
+  if (!driver || typeof driver !== "object") return driver;
+  return new Proxy(driver, {
+    get(target, property, receiver) {
+      const value = Reflect.get(target, property, receiver);
+      if (typeof value !== "function") return value;
+      return async function retried(...args) {
+        let lastError;
+        for (let attempt = 0; attempt <= attempts; attempt += 1) {
+          try {
+            return await value.apply(target, args);
+          } catch (error) {
+            lastError = error;
+            // Only the race. A click that found no element and a page that
+            // would not load are answers, and asking again spends the time to
+            // hear the same one.
+            if (!RETRYABLE.test(String(error?.message || error)) || attempt === attempts) throw error;
+            await sleep(waitMs * (attempt + 1));
+          }
+        }
+        throw lastError;
+      };
+    },
+  });
+}
+
 function directorKind(env = process.env) {
   return String(env.JOURNEY_DIRECTOR || "persona").trim() === "pi" ? "pi" : "persona";
 }
@@ -237,9 +279,10 @@ async function runWithJourneyTest(input) {
   const apiKey = process.env.OPENAI_API_KEY || process.env.BLABLADOR_API_KEY;
   if (!apiKey) throw new Error("OPENAI_API_KEY or BLABLADOR_API_KEY is required for live JourneyTest execution");
   const registry = core.createDefaultJourneyTestFactoryRegistry();
-  const driver = process.env.AGENT_BROWSER_COMMAND && typeof core.AgentBrowserDriver === "function"
-    ? new core.AgentBrowserDriver({ command: process.env.AGENT_BROWSER_COMMAND })
-    : registry.browserDrivers.create("agent-browser", {});
+  const driver = retryingDaemonRaces(
+    process.env.AGENT_BROWSER_COMMAND && typeof core.AgentBrowserDriver === "function"
+      ? new core.AgentBrowserDriver({ command: process.env.AGENT_BROWSER_COMMAND })
+      : registry.browserDrivers.create("agent-browser", {}));
   const baseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAI_COMPATIBLE_ENDPOINT;
   const knownModel = registry.directors.create.bind(registry.directors);
   // The competent-agent director, built only when a run actually asks for it.
@@ -376,6 +419,7 @@ async function runWithJourneyTest(input) {
     reasoning: takeRunReasoning(captureId) };
 }
 
-module.exports = { CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
+module.exports = {
+  retryingDaemonRaces, CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
   loadJourneyTest, resolveSessionState, runWithJourneyTest, sessionNameFor, stepBudget,
   testerContract };
