@@ -513,6 +513,7 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
  * because a model id only means something against the endpoint it is served from.
  */
 function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflectBaseUrl,
+  fallbackModel, fallbackApiKey, fallbackBaseUrl,
   complete = completion, attempts = 2 } = {}) {
   const judge = reflectModel || model;
   // The smaller model can live somewhere else entirely. Reflecting and scoring
@@ -528,8 +529,10 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
   // endpoint sat reachable and credentialed, asked for nothing but reflections.
   // A model, an endpoint and a key are one setting: fall back to all three or to
   // none, because an alias without its token is a 401 on every call.
-  const spare = (reflectBaseUrl && reflectApiKey && reflectBaseUrl !== baseUrl)
-    ? { model: judge, apiKey: judgeKey, baseUrl: judgeUrl } : null;
+  const spare = (fallbackBaseUrl && fallbackApiKey && fallbackModel && fallbackBaseUrl !== baseUrl)
+    ? { model: fallbackModel, apiKey: fallbackApiKey, baseUrl: fallbackBaseUrl }
+    : (reflectBaseUrl && reflectApiKey && reflectBaseUrl !== baseUrl)
+      ? { model: judge, apiKey: judgeKey, baseUrl: judgeUrl } : null;
   let actingOn = { model, apiKey, baseUrl };
   let movedTo = "";
 

@@ -12,36 +12,10 @@ from typing import Any
 from uuid import uuid4
 
 from .compiler import PersonaCompiler, default_abilities
+from .providers import require_providers, unreachable, why
 from .compiler import TRAITS
 from .models import BehaviorProfile
 from .semantic import MockSemanticEngine
-
-
-# A request that never reached a server: DNS, a dropped link, a provider
-# restarting. Distinct from a provider that answered unhappily -- asking a
-# different endpoint the same bad question only spends a second budget on the
-# same failure.
-_UNREACHABLE = re.compile(
-    r"name resolution|nameresolution|failed to resolve|name or service not known"
-    r"|network is unreachable|connection refused|connection reset|connection aborted"
-    r"|max retries exceeded|temporary failure in name resolution|timed out|timeout"
-    r"|econnrefused|econnreset|enotfound|eai_again|etimedout|ehostunreach|enetunreach",
-    re.I)
-
-
-def _why(error: BaseException | None) -> str:
-    """The real cause, when it is hiding one level down under __cause__."""
-    parts, current, depth = [], error, 0
-    while current is not None and depth < 4:
-        text = str(current) or type(current).__name__
-        if text and text not in parts:
-            parts.append(text)
-        current, depth = getattr(current, "__cause__", None), depth + 1
-    return " <- ".join(parts)[:300]
-
-
-def _unreachable(error: BaseException | None) -> bool:
-    return bool(error) and bool(_UNREACHABLE.search(_why(error)))
 
 
 class TinyTroupeGenerator:
@@ -75,9 +49,9 @@ class TinyTroupeGenerator:
                 self._configure_openai_compatible(tinytroupe.config_manager, clients, index)
                 people, last_error = self._generate_people_with_retry(
                     factory_type, theme, customer_profile, seed, count)
-                if people or not _unreachable(last_error):
+                if people or not unreachable(last_error):
                     break
-                print(f"[persona] {base_url} could not be reached ({_why(last_error)}); "
+                print(f"[persona] {base_url} could not be reached ({why(last_error)}); "
                       f"trying the next configured provider", flush=True)
             if not people and count > 0:
                 if not allow_offline_fallback:
@@ -119,27 +93,7 @@ class TinyTroupeGenerator:
         while Blablador sat configured, reachable, and asked for nothing but
         reflections.
         """
-        primary_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
-        primary_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
-                       or os.getenv("BLABLADOR_BASE_URL")
-                       or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
-        candidates = [
-            (primary_url, primary_key, os.getenv("OPENAI_MODEL", "auto")),
-            (os.getenv("JOURNEY_REFLECT_BASE_URL", "").rstrip("/"),
-             os.getenv("JOURNEY_REFLECT_API_KEY", ""),
-             os.getenv("JOURNEY_REFLECT_MODEL", "")),
-            (os.getenv("BLABLADOR_BASE_URL", "").rstrip("/"),
-             os.getenv("BLABLADOR_API_KEY", ""), os.getenv("BLABLADOR_MODEL", "alias-fast")),
-        ]
-        chosen, seen = [], set()
-        for url, key, model in candidates:
-            if not url or not key or not model or url in seen:
-                continue
-            seen.add(url)
-            chosen.append((url, key, model))
-        if not chosen:
-            raise RuntimeError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for TinyTroupe")
-        return chosen
+        return require_providers()
 
     @classmethod
     def _openai_compatible_settings(cls, index: int = 0):

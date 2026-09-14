@@ -295,6 +295,14 @@ async function runWithJourneyTest(input) {
         reflectBaseUrl: process.env.JOURNEY_REFLECT_BASE_URL
           || process.env.BLABLADOR_BASE_URL || undefined,
         reflectApiKey: process.env.JOURNEY_REFLECT_API_KEY
+          || process.env.BLABLADOR_API_KEY || undefined,
+        // Where to act from when the primary endpoint stops resolving. Deliberately
+        // not the reflect model: alias-fast is small because reflection is frequent
+        // and cheap, and deciding what a person does next is neither.
+        fallbackModel: process.env.JOURNEY_FALLBACK_MODEL || undefined,
+        fallbackBaseUrl: process.env.JOURNEY_FALLBACK_BASE_URL
+          || process.env.BLABLADOR_BASE_URL || undefined,
+        fallbackApiKey: process.env.JOURNEY_FALLBACK_API_KEY
           || process.env.BLABLADOR_API_KEY || undefined }),
       maxSteps: stepBudget(input.tasks),
     });

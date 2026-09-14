@@ -62,6 +62,14 @@ if [ -n "${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY:-}}" ]; then
   export JOURNEY_REFLECT_MODEL="${JOURNEY_REFLECT_MODEL:-alias-fast}"
   export JOURNEY_REFLECT_BASE_URL="${JOURNEY_REFLECT_BASE_URL:-${BLABLADOR_BASE_URL}}"
   export JOURNEY_REFLECT_API_KEY="${JOURNEY_REFLECT_API_KEY:-${BLABLADOR_API_KEY}}"
+  # Where the acting loop goes when the primary endpoint stops resolving. Not the
+  # reflect model: alias-fast is chosen for reflection because it is cheap and
+  # frequent, and deciding what a person does next is neither. Persona generation
+  # and compilation walk the same chain (services/persona_service/providers.py),
+  # continuing to alias-huge if alias-large is also unavailable.
+  export JOURNEY_FALLBACK_MODEL="${JOURNEY_FALLBACK_MODEL:-alias-large}"
+  export JOURNEY_FALLBACK_BASE_URL="${JOURNEY_FALLBACK_BASE_URL:-${BLABLADOR_BASE_URL}}"
+  export JOURNEY_FALLBACK_API_KEY="${JOURNEY_FALLBACK_API_KEY:-${BLABLADOR_API_KEY}}"
 else
   echo "[start-live] No Blablador token configured; reflection and persona-adherence" \
        "will run on ${OPENAI_MODEL} against the primary endpoint. Set BLABLADOR_API_KEY" \

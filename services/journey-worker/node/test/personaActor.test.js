@@ -313,3 +313,24 @@ test("with no second endpoint configured nothing changes", async () => {
   await assert.rejects(actor(ASK()), /fetch failed/);
   assert.equal(actor.actingOn().movedTo, undefined);
 });
+
+test("the acting loop falls back to a large model, not the reflection one", async () => {
+  // alias-fast is small because reflection is frequent and cheap. Deciding what a
+  // person does next is neither, so the acting fallback is configured separately.
+  const asked = [];
+  const actor = llmActor({
+    model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1",
+    reflectModel: "alias-fast", reflectApiKey: "k2", reflectBaseUrl: "https://blablador.example/v1",
+    fallbackModel: "alias-large", fallbackApiKey: "k2", fallbackBaseUrl: "https://blablador.example/v1",
+    complete: async ({ baseUrl, model }) => {
+      asked.push(model);
+      if (baseUrl === "https://router.example/v1") throw new TypeError("fetch failed");
+      return JSON.stringify({ visible: "", expectation: "", action: { type: "READ", target: "e1" } });
+    },
+  });
+  await actor(ASK());
+
+  assert.deepEqual(asked, ["auto", "alias-large"]);
+  // Reflection keeps its own small model; the fallback did not take it over.
+  assert.equal(actor.reflectModel, "alias-fast");
+});
