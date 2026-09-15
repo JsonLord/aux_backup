@@ -10,7 +10,7 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  PerceptionClient, batchResults, linkRefs, lookAtPage, motionFramesFrom, scrollNumber,
+  PerceptionClient, WALK, batchResults, linkRefs, lookAtPage, motionFramesFrom, scrollNumber,
   scrollValue,
   pageStanding} = require("../src/perception");
 
@@ -120,12 +120,12 @@ test("an HTTP error is a failure, not a body to believe", async () => {
  * puts the eval's value under a nested `result`; `after` of undefined omits the
  * read-back entirely, which is what a build that does not answer looks like.
  */
-function capturedAt(scrollBefore, after) {
+function capturedAt(scrollBefore, after, frame) {
   const results = [
     { command: ["snapshot"], error: null, success: true,
       result: { refs: { e1: { name: "Home", role: "link" } }, snapshot: "- link \"Home\" [ref=e1]" } },
     { command: ["eval"], error: null, success: true,
-      result: { result: JSON.stringify({ viewport: { width: 1280, height: 577 }, scrollY: scrollBefore,
+      result: { result: JSON.stringify({ frame, viewport: { width: 1280, height: 577 }, scrollY: scrollBefore,
         elements: [{ kind: "control", tag: "a", role: "", name: "Home", x: 483, y: 20,
           width: 43, height: 24, fontPx: 15, fontWeight: 400 }] }) } },
     { command: ["screenshot"], error: null, success: true, result: {} },
@@ -293,4 +293,27 @@ test("past-the-end is measured against the furthest the page can scroll", () => 
   // Without both numbers there is no judgement to make, and none is claimed.
   assert.equal(pageStanding(JSON.stringify({ y: 800, doc: 1465 })).pastTheEnd, false);
   assert.equal(pageStanding("800").pastTheEnd, undefined);
+});
+
+test("the page is asked for a frame before it is photographed", () => {
+  // A picture is of what the compositor last painted, not of what the DOM says
+  // exists. Cycle 40 kept four captures of 738,560 pixels of a single colour --
+  // pure white, at scrollY 600 and 888, on a page whose plan cards had
+  // photographed perfectly at 112 a few steps earlier.
+  assert.match(WALK, /requestAnimationFrame\(\s*\n?\s*\(\) => requestAnimationFrame/,
+    "one frame only says a frame is coming; the second runs after it is committed");
+  // Bounded: a throttled or hidden page can stop producing frames altogether,
+  // and a capture that waits forever is worse than one taken early.
+  assert.match(WALK, /no frame within 1000ms/, "the wait has to give up and say so");
+  assert.match(WALK, /no requestAnimationFrame/, "a page without frames has to say that too");
+  // And the verdict travels, because a guard nobody can read is not a guard.
+  assert.match(WALK, /JSON\.stringify\(\{ frame,/);
+});
+
+test("the walk reports whether the page had painted", async () => {
+  assert.equal((await lookAtPage(async () => capturedAt(0, "0", "painted"))).paintCheck, "painted");
+  // A page that never produced one says so rather than passing quietly.
+  assert.equal((await lookAtPage(async () => capturedAt(0, "0", "no frame within 1000ms"))).paintCheck,
+    "no frame within 1000ms");
+  assert.equal((await lookAtPage(async () => capturedAt(0, "0"))).paintCheck, "unavailable");
 });

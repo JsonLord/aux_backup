@@ -32,7 +32,29 @@ const REQUEST_TIMEOUT_MS = 20000;
 // this exists rather than a list of refs: agent-browser gives a ref to a button
 // and a link, and none at all to a paragraph -- and low-contrast body copy is
 // the single most common thing a person cannot read.
-const WALK = `(() => {
+const WALK = `(async () => {
+  // Wait for the page to produce a frame before anything reads it.
+  //
+  // A picture is of what the compositor last painted, not of what the DOM says
+  // exists. Scroll a page and photograph it before the next frame is committed
+  // and the capture is of a surface nothing has drawn into yet -- which is white,
+  // on a white page, and indistinguishable from a viewport with nothing in it.
+  // Cycle 40 kept four such captures: 738,560 pixels of a single colour at
+  // scrollY 600 and 888, on a page whose plan cards had photographed perfectly at
+  // 112 a few steps earlier.
+  //
+  // Two nested frames, because one only says a frame is coming: the callback of
+  // the second runs after the first has been committed. Bounded, because a
+  // throttled or hidden page can stop producing frames altogether and a capture
+  // that waits forever is worse than a capture taken early -- and said out loud,
+  // because a guard that could not run is not a guard that passed.
+  const frame = typeof requestAnimationFrame === "function"
+    ? await Promise.race([
+        new Promise((resolve) => requestAnimationFrame(
+          () => requestAnimationFrame(() => resolve("painted")))),
+        new Promise((resolve) => setTimeout(() => resolve("no frame within 1000ms"), 1000)),
+      ])
+    : "no requestAnimationFrame";
   const INTERACTIVE = "a,button,input,select,textarea,summary,[role],[onclick],[tabindex]";
   const out = [];
   const seen = new Set();
@@ -66,7 +88,7 @@ const WALK = `(() => {
       .map((child) => child.textContent.trim()).join(" ").trim();
     if (direct.length >= 2) push(node, "text");
   });
-  return JSON.stringify({ viewport: { width: innerWidth, height: innerHeight },
+  return JSON.stringify({ frame, viewport: { width: innerWidth, height: innerHeight },
     scrollY: Math.round(scrollY),
     // How much page there was when the boxes were taken. Compared against the
     // same number read after the screenshot: a document that grew between the
@@ -265,6 +287,9 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     // Carried raw: this is evidence, and the reader of a refusal is better served
     // by what the page said than by this file's opinion of it.
     beneath: beneath === undefined ? undefined : scrollValue(beneath),
+    // "painted" | "no frame within 1000ms" | "no requestAnimationFrame" -- whether
+    // the page had drawn a frame when the picture was taken.
+    paintCheck: walked.frame || "unavailable",
     // "same" | "moved" | "unavailable" -- said out loud, because a guard that
     // cannot run is not a guard that passed.
     scrollCheck: !capture ? "skipped" : known ? (scrolled ? "moved" : "same") : "unavailable",

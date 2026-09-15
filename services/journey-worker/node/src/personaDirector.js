@@ -365,7 +365,7 @@ class PersonaDirector {
             // batch as the picture. Text where the image is white means the page
             // painted and the capture missed it; nothing under any of the three
             // sample points means the window really is on empty page.
-            beneath: seen.beneath });
+            beneath: seen.beneath, paint: seen.paintCheck });
       }
       if (perception) {
         const seenImage = await this.keepSeenImage(context, perception, steps);
@@ -519,7 +519,7 @@ class PersonaDirector {
             { reason: afterSeen.why, step: steps, afterActing: true,
               attempts: afterSeen.captureAttempts,
               capture: await this.keepRefusedCapture(context, afterSeen.refused, steps),
-              beneath: afterSeen.beneath });
+              beneath: afterSeen.beneath, paint: afterSeen.paintCheck });
         }
         pending = after;
         // Only worth carrying if it is worth more than looking again. A walk taken
@@ -754,9 +754,9 @@ class PersonaDirector {
     // service it feeds.
     // `standing` travels with the fallback: where the page was when the capture
     // was taken is what tells a caller whether it can repair the step itself.
-    const fellBack = (why, standing, attempts, refused, beneath) => ({
+    const fellBack = (why, standing, attempts, refused, beneath, paintCheck) => ({
       observation: observationFrom(page.text, this.abilities), perception: null, why, standing,
-      captureAttempts: attempts, refused, beneath });
+      captureAttempts: attempts, refused, beneath, paintCheck });
     if (!this.perception?.available) return fellBack("no perception service configured", undefined, 0);
     let unresolved = { why: "the page was never measured", standing: undefined };
     let spent = 0;
@@ -781,7 +781,7 @@ class PersonaDirector {
     // be measured three times over" are different claims about a page -- and so
     // is "it was measured once and the answer was where the window is".
     return fellBack(spent > 1 ? `${unresolved.why} -- still, after ${spent} attempts` : unresolved.why,
-      unresolved.standing, spent, unresolved.refused, unresolved.beneath);
+      unresolved.standing, spent, unresolved.refused, unresolved.beneath, unresolved.paintCheck);
   }
 
   /** One attempt at a measurement: either a reading, or the reason there is none. */
@@ -790,8 +790,8 @@ class PersonaDirector {
     // behind is the one picture nobody has ever looked at -- five cycles were
     // spent reasoning about why these fail, from logs, while the image that
     // would have answered it was decoded, judged and thrown away every time.
-    const again = (why, standing, refused, beneath) =>
-      ({ again: true, why, standing, refused, beneath });
+    const again = (why, standing, refused, beneath, paintCheck) =>
+      ({ again: true, why, standing, refused, beneath, paintCheck });
     let seen;
     // Hold the page still for the walk and the capture. The reveal keeper scrolls
     // the whole document every 1500ms and a perception pass takes longer than
@@ -884,7 +884,7 @@ class PersonaDirector {
         : "";
       return again(`the capture did not describe the page: ${
         String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`,
-        stood, seen.screenshotBase64, seen.beneath);
+        stood, seen.screenshotBase64, seen.beneath, seen.paintCheck);
     }
     // Absent, not empty. An empty observation is a person who looked and took
     // nothing in -- which is the strongest eyesight finding here, not a failure
