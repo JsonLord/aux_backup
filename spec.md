@@ -3570,17 +3570,31 @@ identically.
 The blank captures were not a limit of the hardware. Three defects made them,
 and the machine only decided how often each one fired.
 
-The measurement that ended the search was already in cycle 37's log. Every
-capture the perception service refused carried the page's standing with it, and
-every one of them read `page at 112 of 1444px` or `of 1465px`. The same page, in
-the same cycle, measures **8620px**. A document at a sixth of its height is not a
-renderer that painted nothing and not a window parked past the end; it is a page
-that has not finished showing itself. Sections that reveal on scroll sit in the
-DOM at `opacity: 0` until an observer fires, so the walk finds boxes where there
-is no ink, and the service -- correctly, and for four cycles -- refused to stand
-behind the capture.
+**This section's original diagnosis was wrong, and the way it was wrong is worth
+more than the fix was.** It claimed that every refused capture was taken while
+the document measured 1444-1465px against a real height of 8620px, and concluded
+the page had not finished revealing itself. The 1465 was real. The 8620 was
+`durationMs: 348620` -- a grep for "8620" landing on a millisecond count in the
+same file. A number was read off the record, matched against a number
+half-remembered from a source comment about a different site, and turned into a
+root cause. Cycle 39 then ran the fix and refused **68** captures where cycle 37
+refused 64.
 
-Three separate things had to be true for that to keep happening:
+Reading the record beats theorising, which §55.6c earned. But reading the record
+is not grepping it for a number that suits the theory, and the check that would
+have caught this -- what is that string actually in? -- costs one command.
+
+What is true: taoshq.com's landing page measures 8620px, its pricing page 1465px,
+and both numbers are honest. What went unlooked-at for five cycles was the
+evidence the run had been writing to disk the whole time. Opening one screenshot
+showed a full-page capture of the pricing page as **the same viewport tiled two
+and a half times**, and the landing page as its hero tiled six -- `--full`
+stitching that repeats the current view instead of scrolling it. That is a real
+defect, it is in every report's evidence, and no amount of reasoning about
+document heights was going to find it.
+
+The three changes below stand on their own merits; none of them was the blank
+captures, and the record should not pretend otherwise.
 
 - **`look()` never settled the page.** `capture()` has run the reveal pass before
   photographing since stage 0a. `look()` walks the page and takes a picture for
@@ -3606,12 +3620,20 @@ the daemon *race* and not this, which is the same mistake as cycle 34's, one
 message along. A tool saying it does not know why it failed is not a verdict on
 anything the run asked for.
 
-**The lesson.** Four cycles were spent on hypotheses about the renderer, the
-scroll position and the machine, while the record printed the document height
-next to every failure. Before theorising about why a measurement is wrong, read
-the numbers the measurement already carries. The instrumentation added in §55.6c
-paid for itself here -- and then went unread for three cycles, which is its own
-finding: an instrument nobody looks at is not instrumentation.
+**The lessons.**
 
-And the second: *a load-dependent failure is not evidence of a capacity limit.*
-Contention widens races. It does not create them, and the race is the bug.
+*Look at the artifact.* Five cycles of hypotheses about renderers, scroll
+positions and machine capacity, and every one of those runs wrote its pictures to
+disk. The first time one was opened, it showed a defect no chain of reasoning
+about numbers would have reached, in about a minute. When a system produces
+evidence, the evidence is the cheapest instrument it has, and reading the log
+instead is still reading about the thing rather than looking at it.
+
+*A number is not evidence until you know what it is a number of.* "8620" appeared
+in the log and in a source comment, and both sightings were about something else.
+The theory supplied the meaning. One command -- print what surrounds the match --
+would have ended it, and the theory was three paragraphs old by then.
+
+*A load-dependent failure is not evidence of a capacity limit.* Contention widens
+races; it does not create them, and the race is the bug. That one held up: the
+`already` race was real, and cheap to fix, and it was still not this.

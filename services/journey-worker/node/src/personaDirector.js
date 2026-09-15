@@ -356,9 +356,11 @@ class PersonaDirector {
       if (!perception && seen.why && this.perception?.available) {
         await recorder.record("persona.perception_fallback",
           `Looked, and could not use what came back: ${seen.why}`,
-          // How many times it was asked. §55.6e: the instrumentation that
-          // explains a failure is worth nothing unless the failure carries it.
-          { reason: seen.why, step: steps, attempts: seen.captureAttempts });
+          // How many times it was asked, and what it was looking at. §55.6e:
+          // the instrumentation that explains a failure is worth nothing unless
+          // the failure carries it, and a picture beats a count.
+          { reason: seen.why, step: steps, attempts: seen.captureAttempts,
+            capture: await this.keepRefusedCapture(context, seen.refused, steps) });
       }
       if (perception) {
         const seenImage = await this.keepSeenImage(context, perception, steps);
@@ -510,7 +512,8 @@ class PersonaDirector {
           await recorder.record("persona.perception_fallback",
             `Looked after acting, twice, and could not use what came back: ${afterSeen.why}`,
             { reason: afterSeen.why, step: steps, afterActing: true,
-              attempts: afterSeen.captureAttempts });
+              attempts: afterSeen.captureAttempts,
+              capture: await this.keepRefusedCapture(context, afterSeen.refused, steps) });
         }
         pending = after;
         // Only worth carrying if it is worth more than looking again. A walk taken
@@ -745,9 +748,9 @@ class PersonaDirector {
     // service it feeds.
     // `standing` travels with the fallback: where the page was when the capture
     // was taken is what tells a caller whether it can repair the step itself.
-    const fellBack = (why, standing, attempts) => ({
+    const fellBack = (why, standing, attempts, refused) => ({
       observation: observationFrom(page.text, this.abilities), perception: null, why, standing,
-      captureAttempts: attempts });
+      captureAttempts: attempts, refused });
     if (!this.perception?.available) return fellBack("no perception service configured", undefined, 0);
     let unresolved = { why: "the page was never measured", standing: undefined };
     let spent = 0;
@@ -772,12 +775,16 @@ class PersonaDirector {
     // be measured three times over" are different claims about a page -- and so
     // is "it was measured once and the answer was where the window is".
     return fellBack(spent > 1 ? `${unresolved.why} -- still, after ${spent} attempts` : unresolved.why,
-      unresolved.standing, spent);
+      unresolved.standing, spent, unresolved.refused);
   }
 
   /** One attempt at a measurement: either a reading, or the reason there is none. */
   async lookOnce(page, tasks = []) {
-    const again = (why, standing) => ({ again: true, why, standing });
+    // The pixels travel with the refusal. A capture the service will not stand
+    // behind is the one picture nobody has ever looked at -- five cycles were
+    // spent reasoning about why these fail, from logs, while the image that
+    // would have answered it was decoded, judged and thrown away every time.
+    const again = (why, standing, refused) => ({ again: true, why, standing, refused });
     let seen;
     // Hold the page still for the walk and the capture. The reveal keeper scrolls
     // the whole document every 1500ms and a perception pass takes longer than
@@ -869,7 +876,8 @@ class PersonaDirector {
           + `${stood.painted ? "" : ", body not painted"})`
         : "";
       return again(`the capture did not describe the page: ${
-        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`, stood);
+        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`,
+        stood, seen.screenshotBase64);
     }
     // Absent, not empty. An empty observation is a person who looked and took
     // nothing in -- which is the strongest eyesight finding here, not a failure
@@ -898,6 +906,30 @@ class PersonaDirector {
    * step of a forty-step run is a lot of bytes to store for a picture nothing
    * will cite.
    */
+  /**
+   * Keep the capture the perception service would not stand behind.
+   *
+   * Every other picture this run writes is one it believes. This is the only one
+   * that is evidence *about the measurement* rather than about the page, and it
+   * is the one that was never kept: five cycles of hypotheses about renderers,
+   * scroll positions and machine capacity were argued from log lines while the
+   * image that settles them was decoded, judged and dropped on every step.
+   *
+   * Written under the step it belongs to and the reason it was refused, so the
+   * picture and the verdict on it can be read side by side.
+   */
+  async keepRefusedCapture(context, base64, step) {
+    const directory = context.artifacts?.screenshotsDir;
+    if (!directory || !base64) return null;
+    const target = path.join(directory, `${String(step).padStart(3, "0")}-capture-refused.png`);
+    try {
+      await writeFile(target, Buffer.from(base64, "base64"));
+    } catch {
+      return null;      // evidence that cannot be written is not worth ending a run over
+    }
+    return target;
+  }
+
   async keepSeenImage(context, perception, step) {
     const directory = context.artifacts?.screenshotsDir;
     if (!directory || !perception?.seenImageBase64) return null;

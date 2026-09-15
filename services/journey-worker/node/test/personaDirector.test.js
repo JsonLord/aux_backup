@@ -1715,3 +1715,42 @@ test("a page that will not resolve says how many times it was asked", async () =
   assert.match(String(fell.data?.reason || ""), /after 3 attempts/,
     "and has to say it was asked more than once");
 });
+
+test("the capture the service would not stand behind is kept, not dropped", async () => {
+  // Every other picture a run writes is one it believes. This is the only one
+  // that is evidence about the measurement rather than about the page, and it
+  // was the one thrown away -- so five cycles of hypotheses about renderers,
+  // scroll positions and machine capacity were argued from log lines while the
+  // image that settles them was decoded, judged and dropped every step.
+  const fs = require("node:fs/promises");
+  const os = require("node:os");
+  const shots = await fs.mkdtemp(require("node:path").join(os.tmpdir(), "refused-"));
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    perception: {
+      available: true,
+      async perceive() {
+        return { observation: "", eyes: {}, scan: {},
+          counts: { elements: 25, legible: 0, fixated: 0, notPerceived: 25, notLookedAt: 0 },
+          notPerceived: [], perceived: [], notLookedAt: [],
+          capture: { trustworthy: false, measured: 25, blankShare: 1,
+                     reason: "25 of 25 regions the tree says hold something had no ink in them" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 0, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 900 },
+      // A one-pixel PNG stands in for the picture nobody ever looked at.
+      screenshotBase64: "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQDwAEhQGAhKmMIQAAAABJRU5ErkJggg==",
+      refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder, shots);
+
+  const fell = recorder.events.find((event) => event.type === "persona.perception_fallback");
+  assert.ok(fell?.data?.capture, "the refusal has to say where the picture it refused was kept");
+  const written = await fs.readFile(fell.data.capture);
+  assert.ok(written.length > 0, "and the picture has to be there");
+});
