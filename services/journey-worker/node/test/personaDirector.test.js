@@ -1603,3 +1603,115 @@ test("a page that did arrive is browsed as usual", async () => {
   const ended = recorder.events.find((event) => event.type === "agent.end");
   assert.equal(ended.data.type, "done");
 });
+
+test("the perception walk waits for the page's reveals, the same as the camera does", async () => {
+  // Cycle 37 lost thirty-two steps to captures the perception service refused,
+  // and the record said why in a number nobody read: every one of them was taken
+  // while the document measured 1444-1465px, on a page that measures 8620px in
+  // the same cycle once it has revealed itself. capture() had settled the page
+  // before photographing it since the reveal pass existed. look() never did --
+  // so the walk found boxes for sections that had not faded in yet, and no ink
+  // where they were.
+  const order = [];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    perception: {
+      available: true,
+      async perceive() {
+        order.push("perceive");
+        return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+          counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+          capture: { trustworthy: true, measured: 1, reason: "" } };
+      },
+    },
+    walk: async () => {
+      order.push("walk");
+      return { elements: [{ selector: "e1", role: "link", name: "Pricing",
+                            box: { x: 0, y: 0, width: 9, height: 2 } }],
+        viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+        refs: {}, snapshot: "", scrollY: 0 };
+    },
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  director.settle = async () => { order.push("settle"); };
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  const walked = order.indexOf("walk");
+  assert.ok(walked > 0, "the run must have walked the page");
+  assert.equal(order[walked - 1], "settle",
+    "the boxes have to come from a page that has finished showing itself");
+});
+
+test("a capture the service will not stand behind is taken again, not published", async () => {
+  // A failed capture is not a fact about the page; it is the absence of one, and
+  // publishing it as one is how a working site came to be described as
+  // unreadable. Nothing about the first attempt is an answer, so the page is
+  // asked again.
+  let looks = 0;
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    perception: {
+      available: true,
+      async perceive() {
+        looks += 1;
+        if (looks === 1) {
+          return { observation: "", eyes: {}, scan: {},
+            counts: { elements: 25, legible: 0, fixated: 0, notPerceived: 25, notLookedAt: 0 },
+            notPerceived: [], perceived: [], notLookedAt: [],
+            capture: { trustworthy: false, measured: 25, blankShare: 1,
+                       reason: "25 of 25 regions the tree says hold something had no ink in them" } };
+        }
+        return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+          counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+          capture: { trustworthy: true, measured: 1, reason: "" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 0, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+      refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.ok(looks >= 2, "the blank capture has to be taken again");
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.ok(looked, "and the second one is what the step reports");
+  assert.ok(!recorder.events.some((event) => event.type === "persona.perception_fallback"),
+    "a step that resolved on the second attempt is not a step that lost its measurement");
+});
+
+test("a page that will not resolve says how many times it was asked", async () => {
+  // "It could not be measured" and "it could not be measured three times over"
+  // are different claims about a page, and only the second one is this one.
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    perception: {
+      available: true,
+      async perceive() {
+        return { observation: "", eyes: {}, scan: {},
+          counts: { elements: 25, legible: 0, fixated: 0, notPerceived: 25, notLookedAt: 0 },
+          notPerceived: [], perceived: [], notLookedAt: [],
+          capture: { trustworthy: false, measured: 25, blankShare: 1,
+                     reason: "25 of 25 regions the tree says hold something had no ink in them" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 0, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+      refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const fell = recorder.events.find((event) => event.type === "persona.perception_fallback");
+  assert.ok(fell, "a page that never resolved still has to say so");
+  assert.match(String(fell.data?.reason || ""), /after 3 attempts/,
+    "and has to say it was asked more than once");
+});

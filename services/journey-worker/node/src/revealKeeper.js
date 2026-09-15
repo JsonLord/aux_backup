@@ -65,39 +65,56 @@ function enabled(env = process.env) {
  */
 function revealScript(settleMs = DEFAULT_SETTLE_MS, maxSteps = MAX_STEPS) {
   return `(async () => {
-  if (window.__auxRevealedFor === location.href) return "already";
-  window.__auxRevealedFor = location.href;
-  const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-  const root = document.documentElement;
-  // A page with scroll-behavior:smooth would animate every hop and turn this
-  // into a long, visible glide. Restored before returning.
-  const behavior = root.style.scrollBehavior;
-  root.style.scrollBehavior = "auto";
-  const startY = window.scrollY;
-  const step = Math.max(200, Math.round(window.innerHeight * 0.8));
-  let steps = 0;
-  let y = 0;
-  try {
-    while (y < root.scrollHeight && steps < ${maxSteps}) {
-      window.scrollTo(0, y);
+  // "already" has to mean a pass has finished, not that one has started.
+  //
+  // It meant the latter: the flag was written on entry, so anything asking for
+  // a reveal while the keeper's pass was still scrolling was told the document
+  // was done and went on to measure a page mid-reveal -- boxes for sections
+  // that had not faded in yet, and no ink where they were. The slower the
+  // machine the longer a pass takes and the wider that window, which is how an
+  // ordinary race came to look like a hardware limit.
+  //
+  // A caller that finds a pass in flight now waits for it, which is what it
+  // wanted in the first place.
+  if (window.__auxRevealPass && window.__auxRevealPass.href === location.href) {
+    await window.__auxRevealPass.promise.catch(() => {});
+    return "already";
+  }
+  const pass = (async () => {
+    const settle = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+    const root = document.documentElement;
+    // A page with scroll-behavior:smooth would animate every hop and turn this
+    // into a long, visible glide. Restored before returning.
+    const behavior = root.style.scrollBehavior;
+    root.style.scrollBehavior = "auto";
+    const startY = window.scrollY;
+    const step = Math.max(200, Math.round(window.innerHeight * 0.8));
+    let steps = 0;
+    let y = 0;
+    try {
+      while (y < root.scrollHeight && steps < ${maxSteps}) {
+        window.scrollTo(0, y);
+        await settle(${settleMs});
+        y += step;
+        steps += 1;
+      }
+      window.scrollTo(0, root.scrollHeight);
       await settle(${settleMs});
-      y += step;
-      steps += 1;
+    } finally {
+      window.scrollTo(0, startY);
+      root.style.scrollBehavior = behavior;
     }
-    window.scrollTo(0, root.scrollHeight);
-    await settle(${settleMs});
-  } finally {
-    window.scrollTo(0, startY);
-    root.style.scrollBehavior = behavior;
-  }
-  const revealable = document.querySelectorAll("[data-reveal],[data-aos],[data-animate],.reveal,.fade-in,.animate-on-scroll");
-  let hidden = 0;
-  for (const element of revealable) {
-    const style = getComputedStyle(element);
-    if (Number(style.opacity) < 0.05 || style.visibility === "hidden") hidden += 1;
-  }
-  return JSON.stringify({ steps: steps, height: root.scrollHeight,
-    revealable: revealable.length, stillHidden: hidden, restoredTo: startY });
+    const revealable = document.querySelectorAll("[data-reveal],[data-aos],[data-animate],.reveal,.fade-in,.animate-on-scroll");
+    let hidden = 0;
+    for (const element of revealable) {
+      const style = getComputedStyle(element);
+      if (Number(style.opacity) < 0.05 || style.visibility === "hidden") hidden += 1;
+    }
+    return JSON.stringify({ steps: steps, height: root.scrollHeight,
+      revealable: revealable.length, stillHidden: hidden, restoredTo: startY });
+  })();
+  window.__auxRevealPass = { href: location.href, promise: pass };
+  return await pass;
 })()`;
 }
 

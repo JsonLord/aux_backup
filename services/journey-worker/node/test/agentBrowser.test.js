@@ -76,6 +76,14 @@ test("a command agent-browser asks to have retried is retried", async () => {
     + "configuration. Retry the command so agent-browser can restart it with the requested "
     + "configuration."));
 
+  // A daemon that exits during startup "with no error output" is the same kind
+  // of non-answer: no command was carried out, and the tool is saying it does
+  // not know why either. Cycle 38 ended on the first command of the run this
+  // way -- `record start`, three seconds in, nothing retried.
+  assert.ok(RETRYABLE.test(
+    "\u2717 Daemon process exited during startup with no error output. "
+    + "Re-run with --debug for more details."));
+
   // And only those. A click that found no element, a page that would not load
   // and a timeout are answers: running the same command again spends the time
   // to receive the same answer.

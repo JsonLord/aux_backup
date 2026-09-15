@@ -36,6 +36,20 @@ const { BehaviorController } = require("./behavior");
 const { browsingFaculty } = require("./faculty");
 const { PersonaMemoryBank } = require("./memoryBank");
 const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
+
+// How many times a measurement of the page is worth attempting.
+//
+// Every reason look() falls back -- a walk that threw, a picture that did not
+// come back, a page that moved or grew under the walk, a capture the perception
+// service will not stand behind -- says one thing: there is no measurement of
+// this page yet. None of them is an answer *about* the page, which is exactly
+// the class where asking again gets a different and better answer. Cycle 37 lost
+// 32 steps to these and retried none of them.
+const CAPTURE_ATTEMPTS = 3;
+
+// Between attempts. A page that was still assembling itself wants time more than
+// it wants anything else, and on a two-core box it wants more of it.
+const CAPTURE_BACKOFF_MS = 600;
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
 const { holdRevealKeeper, releaseRevealKeeper, revealOnce } = require("./revealKeeper");
@@ -704,6 +718,15 @@ class PersonaDirector {
       .catch(() => {});
   }
 
+  /**
+   * What this person took in -- attempted until there is a measurement to report.
+   *
+   * A failed capture is not a fact about the page. It is the absence of a fact,
+   * and publishing it as one is how cycle 37 came to describe a working site as
+   * unreadable thirty-two times. So the page is asked again, having been given
+   * time to finish showing itself, and only a page that will not resolve after
+   * three attempts falls back to the tree.
+   */
   async look(page, tasks = []) {
     // Why it fell back, when it does. Every one of these paths used to return the
     // same silent object, so a run that lost half its comparisons looked exactly
@@ -713,9 +736,39 @@ class PersonaDirector {
     // service it feeds.
     // `standing` travels with the fallback: where the page was when the capture
     // was taken is what tells a caller whether it can repair the step itself.
-    const fellBack = (why, standing) => ({
-      observation: observationFrom(page.text, this.abilities), perception: null, why, standing });
-    if (!this.perception?.available) return fellBack("no perception service configured");
+    const fellBack = (why, standing, attempts) => ({
+      observation: observationFrom(page.text, this.abilities), perception: null, why, standing,
+      captureAttempts: attempts });
+    if (!this.perception?.available) return fellBack("no perception service configured", undefined, 0);
+    let unresolved = { why: "the page was never measured", standing: undefined };
+    let spent = 0;
+    for (let attempt = 1; attempt <= CAPTURE_ATTEMPTS; attempt += 1) {
+      spent = attempt;
+      if (attempt > 1) await this.sleep(CAPTURE_BACKOFF_MS * (attempt - 1));
+      const tried = await this.lookOnce(page, tasks);
+      // How many it took is part of the measurement: a step that needed three
+      // goes and a step that needed one are different reports on the same page.
+      if (!tried.again) return { ...tried.result, captureAttempts: attempt };
+      unresolved = tried;
+      // One failure is not an open question: a window parked below the last
+      // pixel of the document photographed blank space, and it will photograph
+      // the same blank space however many times it is asked. It is handed back
+      // at once, because the caller is the one holding the browser and the
+      // repair is to scroll back into the document -- and then to look again,
+      // which it does. Asking again from here would spend the attempts proving
+      // where the window is.
+      if (tried.standing?.pastTheEnd) break;
+    }
+    // Said with the count, because "it could not be measured" and "it could not
+    // be measured three times over" are different claims about a page -- and so
+    // is "it was measured once and the answer was where the window is".
+    return fellBack(spent > 1 ? `${unresolved.why} -- still, after ${spent} attempts` : unresolved.why,
+      unresolved.standing, spent);
+  }
+
+  /** One attempt at a measurement: either a reading, or the reason there is none. */
+  async lookOnce(page, tasks = []) {
+    const again = (why, standing) => ({ again: true, why, standing });
     let seen;
     // Hold the page still for the walk and the capture. The reveal keeper scrolls
     // the whole document every 1500ms and a perception pass takes longer than
@@ -725,16 +778,35 @@ class PersonaDirector {
     // acuity: the crops had landed on blank page.
     this.hold();
     try {
+      // Let the page finish showing itself before measuring it.
+      //
+      // capture() has done this since the reveal pass existed and look() never
+      // did, and that difference is the whole of cycle 37's blank captures. A
+      // site that reveals its sections on scroll keeps them in the DOM at
+      // opacity 0 until an IntersectionObserver fires, so the walk finds boxes
+      // where there is no ink and the perception service -- correctly -- refuses
+      // the capture. The record says it plainly: every untrustworthy capture in
+      // cycle 37 was taken while the document measured 1444-1465px, and the same
+      // page in the same cycle measures 8620px once it has revealed itself.
+      //
+      // The keeper runs a pass every 1500ms, which is no help to a measurement
+      // taken inside that window, and the busier the machine the more of a run's
+      // steps land inside it. That is why this looked like a limit of the
+      // hardware rather than a step this code never took.
+      //
+      // It costs one round trip on a document already revealed; the pass itself
+      // no-ops.
+      await this.settle();
       seen = await this.walk();
     } catch (error) {
       // A page walk can fail for reasons that have nothing to do with the run --
       // a navigation mid-batch, a browser still settling. The tree is still there.
-      return fellBack(`the walk failed: ${String(error?.message || error).slice(0, 120)}`);
+      return again(`the walk failed: ${String(error?.message || error).slice(0, 120)}`);
     } finally {
       this.release();
     }
     if (!seen?.elements?.length || !seen.screenshotBase64) {
-      return fellBack(seen?.elements?.length
+      return again(seen?.elements?.length
         ? "the walk came back without a picture" : "the walk found nothing on the page");
     }
     // Something moved the page anyway -- the page's own script, an animation, a
@@ -746,7 +818,7 @@ class PersonaDirector {
     // because a scroll settles on its own and a page still arriving wants
     // waiting for.
     if (seen.moved) {
-      return fellBack(seen.layoutCheck === "growing"
+      return again(seen.layoutCheck === "growing"
         ? `the page was still building itself under the walk (it grew ${seen.grewBy}px between `
           + "the boxes and the picture)"
         : "the page moved under the walk");
@@ -787,7 +859,7 @@ class PersonaDirector {
         ? ` (page at ${stood.y} of ${stood.documentHeight}px${stood.pastTheEnd ? ", past the end" : ""}`
           + `${stood.painted ? "" : ", body not painted"})`
         : "";
-      return fellBack(`the capture did not describe the page: ${
+      return again(`the capture did not describe the page: ${
         String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`, stood);
     }
     // Absent, not empty. An empty observation is a person who looked and took
@@ -795,13 +867,17 @@ class PersonaDirector {
     // -- and testing it for truthiness threw the whole measurement away: the
     // counts, the notPerceived list, every legibility finding on the capture.
     if (perception?.observation === undefined || perception?.observation === null) {
-      return fellBack(`the perception service returned nothing`
+      return again(`the perception service returned nothing`
         + (this.perception.lastError ? `: ${String(this.perception.lastError).slice(0, 120)}` : ""));
     }
+    // Absent and empty part company here. An empty observation is a measurement:
+    // someone looked at a capture we trust and took nothing in, which is the
+    // strongest eyesight finding this system makes. Asking again would only
+    // replace it with itself.
     if (!perception.observation) {
-      return { observation: "You cannot make out anything here.", perception };
+      return { again: false, result: { observation: "You cannot make out anything here.", perception } };
     }
-    return { observation: perception.observation, perception };
+    return { again: false, result: { observation: perception.observation, perception } };
   }
 
   /**

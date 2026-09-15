@@ -49,7 +49,13 @@ function agentBrowserCommand() {
 // started with their own configuration, one wins, and the loser is told to
 // retry so the daemon can be restarted the way it asked for. Cycle 34 ended a
 // three-persona run on it -- the tool asked for a retry and nothing retried.
-const RETRYABLE = /retry the command|started concurrently with different daemon configuration/i;
+//
+// A daemon that exits during startup "with no error output" belongs with them.
+// It is not a verdict on anything the run asked for: no command was carried
+// out, and the tool is saying it does not know why either -- which on a
+// two-core box with a browser and a video encoder already on it is what losing
+// a start looks like. Cycle 38 ended on the first command of the run this way.
+const RETRYABLE = /retry the command|started concurrently with different daemon configuration|daemon process exited during startup/i;
 const DAEMON_RETRIES = 3;
 const DAEMON_BACKOFF_MS = 750;
 

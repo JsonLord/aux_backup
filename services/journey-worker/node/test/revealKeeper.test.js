@@ -140,3 +140,18 @@ test("an unmatched release cannot leave the page permanently scrollable", () => 
   holdRevealKeeper();
   assert.equal(revealHolds(), 1);
 });
+
+test("a caller that arrives while a pass is running waits for it", () => {
+  // "already" used to be written on entry, so a second caller arriving while the
+  // keeper's pass was still scrolling was told the document was done -- and went
+  // on to measure a page mid-reveal. The slower the machine the longer a pass
+  // takes and the wider that window, which is how an ordinary race came to look
+  // like a limit of the hardware.
+  const script = revealScript(10, 5);
+  assert.match(script, /await window\.__auxRevealPass\.promise/,
+    "an in-flight pass has to be waited for, not reported as done");
+  // The record of the pass is written after the pass has been started, so
+  // "already" can never be true of a pass that has not begun.
+  assert.ok(script.indexOf("const pass = ") < script.indexOf("window.__auxRevealPass = "),
+    "the pass exists before anything can join it");
+});

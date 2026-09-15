@@ -3464,6 +3464,46 @@ It was hard to find because the record said nothing. Instrumentation that
 distinguishes causes is not overhead on the way to a fix; on this evidence it is
 most of the fix.
 
+### 55.6d Cycles 30 to 37: four hypotheses, three of them wrong
+
+Blank captures. The perception service kept refusing captures with no ink in
+them, and each cycle produced a confident explanation that the next cycle killed.
+
+| # | The theory | What the data said |
+|---|---|---|
+| 1 | The page was still building itself | Document height was identical before and after the walk. It was not growing. |
+| 2 | The viewport was parked past the end | True, but only for some -- and the check written for it compared against the document height instead of the furthest it can scroll, so it could never fire |
+| 3 | The renderer painted nothing | Partly. Captures at valid positions on laid-out pages still came back blank |
+| 4 | The Space cannot run three personas | Being tested |
+
+Two things are worth keeping from that.
+
+**The first is the shape of hypothesis 2.** `pastTheEnd` was added to catch exactly
+the failure that then happened twenty-two more times, and it sat there reporting
+everything in order. A 1465px page in a 900px window stops scrolling at 565;
+comparing `y > 1465` can never be true. This is the same trap as the absolute
+luminance epsilon in §55.1 -- *a guard whose threshold is in the wrong space* --
+and it is worth noticing that both looked right until somebody did the
+arithmetic.
+
+**The second is what finally located it**, which was not a theory at all. Printing
+one character per step:
+
+    run 1: ooo xxxxxxxxxxx
+    run 2: oo xxx oo xx oooo xx oooo
+    run 3: ooo xxxxxxxxxx oo xxx
+
+Every run starts seeing the page and then stops. Run 1 never recovers. That is
+not a flake and not a page property -- it is accumulation within a run, and it
+pointed at capacity rather than code in one glance, after three cycles of
+argument had not.
+
+The discipline that keeps paying: when a fix and a failure have not been shown to
+be the same code path, they usually are not. Cycle 34's daemon-race retry went
+into the command runner our own code uses; the recording that was failing is
+started by the library, through a driver it builds itself, and cycle 35 failed
+identically.
+
 ### 55.7 Trap shapes, for §53.4
 
 - **A flag whose default was never exercised.** §55.1. The mechanism was correct
@@ -3524,3 +3564,54 @@ most of the fix.
   The tell is always the same: the fix names the site rather than the rule. "The
   reflect prompt must not print refs" is a site. "Prose a reader sees never
   contains refs" is a rule, and a rule can be checked everywhere at once.
+
+### 55.6e Cycle 38: the number that was in the record all along
+
+The blank captures were not a limit of the hardware. Three defects made them,
+and the machine only decided how often each one fired.
+
+The measurement that ended the search was already in cycle 37's log. Every
+capture the perception service refused carried the page's standing with it, and
+every one of them read `page at 112 of 1444px` or `of 1465px`. The same page, in
+the same cycle, measures **8620px**. A document at a sixth of its height is not a
+renderer that painted nothing and not a window parked past the end; it is a page
+that has not finished showing itself. Sections that reveal on scroll sit in the
+DOM at `opacity: 0` until an observer fires, so the walk finds boxes where there
+is no ink, and the service -- correctly, and for four cycles -- refused to stand
+behind the capture.
+
+Three separate things had to be true for that to keep happening:
+
+- **`look()` never settled the page.** `capture()` has run the reveal pass before
+  photographing since stage 0a. `look()` walks the page and takes a picture for
+  the perception service, which is the same act, and it went straight to the
+  walk. One call, absent from one of the two places the rule applies -- the
+  commonest shape in this whole record, and §55.6d had just finished writing it
+  down.
+- **`already` meant "a pass has started".** The in-page script wrote
+  `__auxRevealedFor` on entry, so anything asking for a reveal while the keeper's
+  pass was still scrolling was told the document was done. The slower the box,
+  the longer a pass takes and the wider that window. This is the whole of the
+  correlation with three personas -- and it is what made the defect look like
+  capacity. A caller that finds a pass in flight now waits for it.
+- **Nothing was ever asked twice.** Every reason `look()` fell back says the same
+  thing: there is no measurement of this page yet. None of them is an answer
+  *about* the page, which is the exact class where asking again gets a better
+  one. Cycle 37 lost thirty-two steps to these and retried none.
+
+Cycle 38, fired as a single-persona control to tell capacity from code, never
+reached a step: it died three seconds in on `record start` with "Daemon process
+exited during startup with no error output". The retry added in cycle 35 matched
+the daemon *race* and not this, which is the same mistake as cycle 34's, one
+message along. A tool saying it does not know why it failed is not a verdict on
+anything the run asked for.
+
+**The lesson.** Four cycles were spent on hypotheses about the renderer, the
+scroll position and the machine, while the record printed the document height
+next to every failure. Before theorising about why a measurement is wrong, read
+the numbers the measurement already carries. The instrumentation added in §55.6c
+paid for itself here -- and then went unread for three cycles, which is its own
+finding: an instrument nobody looks at is not instrumentation.
+
+And the second: *a load-dependent failure is not evidence of a capacity limit.*
+Contention widens races. It does not create them, and the race is the bug.
