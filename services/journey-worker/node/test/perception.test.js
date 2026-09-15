@@ -180,8 +180,11 @@ test("the scroll read-back is asked for in the same batch as the capture", async
   let asked = null;
   await lookAtPage(async (commands) => { asked = commands; return capturedAt(0, "0"); });
 
-  assert.deepEqual(asked.map((item) => item[0]), ["snapshot", "eval", "screenshot", "eval"]);
-  // After the screenshot, or it answers a question nobody asked.
+  // The scroll read-back and the probe for what the DOM says is under the pixels
+  // both follow the capture, in the same batch: a question asked afterwards is a
+  // question about a different moment of the page.
+  assert.deepEqual(asked.map((item) => item[0]),
+    ["snapshot", "eval", "screenshot", "eval", "eval"]);
   assert.ok(asked.findIndex((item) => item[0] === "screenshot")
     < asked.length - 1, "the read-back must come after the capture");
 });

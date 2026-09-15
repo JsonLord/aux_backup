@@ -161,10 +161,41 @@ const SCROLL_AFTER =
   + " doc: Math.round(document.documentElement.scrollHeight),"
   + " painted: document.body ? document.body.getBoundingClientRect().height > 0 : false}))()";
 
+/**
+ * What the browser says is under the pixels, taken in the same batch as the
+ * picture.
+ *
+ * A capture that comes back white and a viewport with nothing in it are the same
+ * image and different faults, and nothing this run recorded could tell them
+ * apart: cycle 40 refused captures that were pure white at scrollY 600 and 888
+ * on a page whose cards had photographed perfectly at 112, and the record could
+ * only say the pixels had no ink in them.
+ *
+ * `elementFromPoint` answers the question the pixels cannot. Three points down
+ * the middle of the viewport, each reporting what the DOM believes is there and
+ * how much text it holds. Text where the picture is white means the page was
+ * painted and the capture missed it. Nothing at any of the three means the
+ * window really is looking at empty page, and the picture is honest.
+ */
+const WHAT_IS_UNDER_THE_PIXELS =
+  "(() => { const at = (fraction) => { const x = Math.round(innerWidth / 2),"
+  + " y = Math.round(innerHeight * fraction);"
+  + " const node = document.elementFromPoint(x, y);"
+  + " if (!node) return {at: fraction, found: null};"
+  + " const box = node.getBoundingClientRect();"
+  + " return {at: fraction, found: node.tagName,"
+  + "   text: String(node.innerText || node.textContent || '').trim().slice(0, 60),"
+  + "   box: [Math.round(box.x), Math.round(box.y), Math.round(box.width), Math.round(box.height)],"
+  + "   opacity: getComputedStyle(node).opacity, visibility: getComputedStyle(node).visibility}; };"
+  + " return JSON.stringify({points: [at(0.15), at(0.5), at(0.85)],"
+  + "   y: Math.round(scrollY), h: Math.round(innerHeight),"
+  + "   doc: Math.round(document.documentElement.scrollHeight)}); })()";
+
 async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const file = capture ? path.join(os.tmpdir(), `perception-${process.pid}-${Date.now()}.png`) : "";
   const commands = capture
-    ? [["snapshot"], ["eval", WALK], ["screenshot", file], ["eval", SCROLL_AFTER]]
+    ? [["snapshot"], ["eval", WALK], ["screenshot", file], ["eval", SCROLL_AFTER],
+       ["eval", WHAT_IS_UNDER_THE_PIXELS]]
     : [["snapshot"], ["eval", WALK]];
   const empty = { elements: [], refs: {}, viewport: null, scrollY: 0, snapshot: "",
     screenshotBase64: "", moved: false, scrollCheck: "skipped" };
@@ -176,6 +207,8 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const evaluated = evaluations[0]?.result;
   // The second eval, when there is one, is the scroll read-back.
   const after = capture && evaluations.length > 1 ? evaluations[1].result : undefined;
+  // The third eval, when there is one, is what the DOM says is under the pixels.
+  const beneath = capture && evaluations.length > 2 ? evaluations[2].result : undefined;
   let walked = { elements: [], viewport: null };
   try {
     walked = JSON.parse(typeof evaluated === "string" ? evaluated : evaluated?.result || "{}");
@@ -228,6 +261,10 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     // Where the page was standing when the capture was taken. A blank capture
     // and a capture of blank page are the same pixels and different bugs.
     standing: standing.known ? standing : undefined,
+    // And what the browser says is under those pixels, read in the same batch.
+    // Carried raw: this is evidence, and the reader of a refusal is better served
+    // by what the page said than by this file's opinion of it.
+    beneath: beneath === undefined ? undefined : scrollValue(beneath),
     // "same" | "moved" | "unavailable" -- said out loud, because a guard that
     // cannot run is not a guard that passed.
     scrollCheck: !capture ? "skipped" : known ? (scrolled ? "moved" : "same") : "unavailable",
