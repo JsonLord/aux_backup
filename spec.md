@@ -3637,3 +3637,45 @@ would have ended it, and the theory was three paragraphs old by then.
 *A load-dependent failure is not evidence of a capacity limit.* Contention widens
 races; it does not create them, and the race is the bug. That one held up: the
 `already` race was real, and cheap to fix, and it was still not this.
+
+
+### 55.6f Cycles 40 and 41: what was under the white pixels
+
+Four cycles of hypotheses ended in two commands: keep the capture the perception
+service refused, and ask the browser what it thinks is under it.
+
+**Cycle 40** kept the refusals, and they came in two kinds. At scrollY 112 the
+picture is the pricing page, legible, three plan cards and all. At 600 and 888 it
+is 738,560 pixels of a single colour -- pure white -- on the same page, in the
+same run, showing content that had photographed perfectly a few steps earlier.
+That split is what no log line could have shown: a capture that came back white
+and a viewport with nothing in it are the same image and different faults.
+
+**Cycle 41** settled which. The batch that takes the picture now also samples
+three points down the middle of the viewport with `elementFromPoint`, reporting
+the element, its text, its box, its opacity and its visibility. Across **48
+refusals, 48 had real content under every sample point** and none had nothing:
+the H1, the plan cards, the footer, and -- under captures refused for having no
+ink -- `£200 / user / year`, the price four cycles of reports had been unable to
+read. Opacity 1, visibility visible, boxes inside the viewport.
+
+So the page paints and the capture misses it. Not reveal animations, which would
+show opacity 0. Not a viewport past the end, which would find nothing. Not the
+machine, which would not paint the DOM correctly and then lie about the pixels. A
+picture is of what the compositor last painted, and a screenshot taken before the
+frame following a scroll is committed is of a surface nothing has drawn into --
+white, on a white page.
+
+The fix is a precondition, not a cure for a mystery: the walk waits for two
+nested animation frames before anything reads the page, bounded at a second and
+reported either way, because one frame only says a frame is coming and a page
+that has stopped producing them must not stall a run.
+
+**The lesson.** Cycles 30 to 39 produced five hypotheses and no evidence, because
+every one of them was argued from what the run *said* rather than from what it
+*had*. The two changes that ended it added no cleverness at all: they kept an
+artifact that was being thrown away, and asked a question of the page instead of
+of the log. When a measurement disagrees with itself, the next move is to
+instrument the disagreement, not to theorise across it -- and instrumenting it
+means capturing state at the moment of the failure, in the same breath as the
+failure, where nothing can drift between the two.
