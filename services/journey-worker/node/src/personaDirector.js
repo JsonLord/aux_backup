@@ -355,13 +355,21 @@ class PersonaDirector {
       // saying so every step would bury the runs where the walk really did fail.
       if (!perception && seen.why && this.perception?.available) {
         await recorder.record("persona.perception_fallback",
-          `Looked, and could not use what came back: ${seen.why}`, { reason: seen.why, step: steps });
+          `Looked, and could not use what came back: ${seen.why}`,
+          // How many times it was asked. §55.6e: the instrumentation that
+          // explains a failure is worth nothing unless the failure carries it.
+          { reason: seen.why, step: steps, attempts: seen.captureAttempts });
       }
       if (perception) {
         const seenImage = await this.keepSeenImage(context, perception, steps);
         await recorder.record("persona.perception",
           `looked at ${perception.counts.fixated} of ${perception.counts.elements} things`, {
             scan: perception.scan, eyes: perception.eyes, counts: perception.counts,
+            // How many attempts this measurement took. A step that resolved
+            // first time and a step that resolved on the third are the same
+            // reading of the page and different readings of the machine, and
+            // only this tells them apart.
+            attempts: seen.captureAttempts,
             // Present, and nothing legible where it lives. This is a defect in
             // the page, and no check against the DOM can find it.
             notPerceived: perception.notPerceived,
@@ -501,7 +509,8 @@ class PersonaDirector {
         if (!afterSeen.perception && afterSeen.why && perception) {
           await recorder.record("persona.perception_fallback",
             `Looked after acting, twice, and could not use what came back: ${afterSeen.why}`,
-            { reason: afterSeen.why, step: steps, afterActing: true });
+            { reason: afterSeen.why, step: steps, afterActing: true,
+              attempts: afterSeen.captureAttempts });
         }
         pending = after;
         // Only worth carrying if it is worth more than looking again. A walk taken
