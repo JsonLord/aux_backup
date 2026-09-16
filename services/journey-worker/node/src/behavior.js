@@ -82,6 +82,22 @@ function copingScores(profile, state, context = {}) {
   const pressure = clamp(context.timePressure ?? 0);
   const importance = clamp(context.taskImportance ?? 0.5);
   return {
+    // Getting on with it. Coping is what a person does when something has gone
+    // wrong, and every other entry here is a form of that -- so without this one
+    // the model had no way to express "that worked, next thing", and made a calm
+    // persona whose expectation had just been met retry the action that worked
+    // (60.3%), re-read the page (13.5%) or click the same thing two or three more
+    // times (9.3%). Coping is control flow in the director, so those were real
+    // wasted steps: a live run spent a quarter of its budget on them and clicked
+    // one link twice.
+    //
+    // It dominates while things are going well and collapses as they stop: the
+    // negative terms are weighted above the positive ones on purpose, so a person
+    // who is confused or frustrated reaches for a coping behaviour rather than
+    // ploughing on, which is the behaviour the rest of this table exists to model.
+    continue: 1.4 + state.perceivedProgress * 1.2 + profile.selfEfficacy * 0.5
+      - state.confusion * 1.6 - state.frustration * 1.6 - state.anger * 1.4
+      - state.consecutiveFailures * 0.5,
     retry: 0.2 + profile.persistence * 1.1 + profile.selfEfficacy * 0.7 - state.fatigue * 0.5,
     reread: 0.1 + profile.verificationTendency * 1.0 + state.confusion * 1.1,
     wait: 0.1 + profile.patience * 1.0 + state.perceivedProgress * 0.8 - pressure * 0.6,
@@ -104,7 +120,11 @@ function probabilities(scores) {
 function sampleCoping(profile, state, context, random) {
   const distribution = probabilities(copingScores(profile, state, context));
   let cursor = random();
-  let selected = "retry";
+  // If floating-point drift leaves the cursor above the sum of every probability,
+  // the loop ends on the last entry anyway; this is only the value used when the
+  // distribution is somehow empty. Getting on with it is the harmless default --
+  // "retry" meant a malformed distribution silently repeated the last action.
+  let selected = "continue";
   for (const [type, probability] of Object.entries(distribution)) {
     selected = type;
     cursor -= probability;

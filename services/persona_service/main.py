@@ -1,12 +1,14 @@
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from apps.api.auth import IdentityProvider
 
 from .compiler import PersonaCompiler
 from .generator import TinyTroupeGenerator
 from .github_pool import GitHubPersonaPoolClient, PersonaPoolConfig, select_pool_group
+from .providers import model_providers, unreachable, why
 from .models import (
     PersonaCompileRequest,
     PersonaGenerateRequest,
@@ -22,6 +24,28 @@ profiles = persona_store_from_environment()
 identity = IdentityProvider(membership_store=profiles if hasattr(profiles, "upsert_workspace_membership") else None)
 _pool_config = PersonaPoolConfig.from_env()
 pool_client = GitHubPersonaPoolClient(_pool_config) if _pool_config else None
+
+
+@app.exception_handler(Exception)
+async def say_what_went_wrong(request, error):
+    """Answer with the cause, not with the word "Internal".
+
+    An unhandled exception here becomes {"detail": "Internal Server Error"}, and
+    the caller renders that as "500 Server Error ... for url:
+    http://127.0.0.1:8090/v1/personas/compile" -- the status, the port, and
+    nothing about why. Three cycles were spent firing runs against that sentence.
+
+    The cause chain matters as much as the exception: a compilation that fails
+    because a name will not resolve says "Internal" at the top and EAI_AGAIN two
+    levels down, and only the second one tells anybody what to do.
+    """
+    print(f"[persona] {request.url.path} failed: {why(error)}", flush=True)
+    return JSONResponse(status_code=500, content={
+        "detail": f"{type(error).__name__}: {why(error)}",
+        "unreachable": unreachable(error),
+        "providersConfigured": [
+            {"endpoint": url, "model": model} for url, _, model in model_providers()],
+    })
 
 
 def require_write(auth):

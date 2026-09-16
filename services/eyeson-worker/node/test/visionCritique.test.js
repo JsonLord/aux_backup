@@ -1,18 +1,50 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
-  VisionUnavailableError } = require("../src/visionCritique");
+const { captureSize, critiqueScreenshot, toPainPoint, buildPrompt, parseFindings, parseCritique,
+  completeObjectsIn, visionMaxTokens, DEFAULT_VISION_MAX_TOKENS,
+  VisionUnavailableError,
+  unreachable,
+  UNREACHABLE_ATTEMPTS} = require("../src/visionCritique");
 const { aggregateCohort } = require("../src/aggregate");
 
-test("buildPrompt includes the real element list so findings can reference actual selectors", () => {
+test("buildPrompt lists the page's elements by index, and does not show the selector", () => {
+  // The reviewer is asked to point at a line number rather than to transcribe a
+  // selector. An index is a thing it cannot make plausible -- 3 is either in
+  // range or it is not -- while a selector it has never seen comes out as
+  // confident CSS for some other website. It cannot transcribe what it is not
+  // shown, so the selector is resolved from the index here instead.
   const { user } = buildPrompt({
     url: "https://example.com", task: "Find pricing",
     elements: [{ selector: "#buy-button", role: "button", text: "Buy now", boundingBox: { x: 10, y: 20, width: 80, height: 30 } }],
   });
-  assert.match(user, /#buy-button/);
+  assert.match(user, /^0\. kind=button text="Buy now"/m);
+  assert.match(user, /Cite one by its index number/);
   assert.match(user, /Buy now/);
   assert.match(user, /Find pricing/);
+  assert.doesNotMatch(user, /#buy-button/, "the selector is ours to resolve, not the model's to copy");
+  // One word meaning two things in one prompt is an invitation to conflate them:
+  // the reviewer is asked for a `role` of its own, so the element's own type is
+  // listed as `kind`.
+  assert.doesNotMatch(user, /role=button/);
+});
+
+test("a citation is a line number, and an out-of-range one is not a citation", () => {
+  const page = [{ selector: "e1" }, { selector: "e6" }, { selector: "span@316,533" }];
+  const cite = (elements) => parseCritique(JSON.stringify({ issues: [{
+    title: "T", description: "D", category: "usability", severity: "low", elements }], strengths: [],
+  }), { elements: page }).issues[0].elements.map((item) => item.elementSelector);
+
+  assert.deepEqual(cite([{ element: 1, role: "cause" }]), ["e6"]);
+  // A number written as a string is still a number.
+  assert.deepEqual(cite([{ element: "2", role: "cause" }]), ["span@316,533"]);
+  // Out of range is caught by arithmetic rather than by recognising bad CSS.
+  assert.deepEqual(cite([{ element: 97, role: "cause" }]), []);
+  assert.deepEqual(cite([{ element: -1, role: "cause" }]), []);
+  // A model that wrote the selector out anyway is not punished for it, as long as
+  // the selector is real.
+  assert.deepEqual(cite([{ elementSelector: "e1", role: "cause" }]), ["e1"]);
+  assert.deepEqual(cite([{ elementSelector: "a.btn.btn-primary", role: "cause" }]), []);
 });
 
 test("parseFindings tolerates a markdown-fenced JSON array, normalizes elements/impact/alternatives, and rejects malformed entries", () => {
@@ -230,6 +262,43 @@ test("a provider outage is reported as unavailable, not as an invalid request", 
   assert.match(failure.message, /vision critique failed after 1 attempts/);
 });
 
+test("a payload the endpoint will always reject is not retried", async (t) => {
+  // A live run spent three attempts and both backoffs on an HTTP 413 before
+  // reporting a 502: the same oversized body cannot become acceptable on a
+  // retry, and the retries hid the real cause behind "after 3 attempts".
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    return { ok: false, status: 413,
+      text: async () => '{"error":{"message":"request entity too large","type":"PayloadTooLargeError"}}' };
+  });
+
+  const failure = await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "t", elements: [],
+    options: { apiKey: "k", baseUrl: "https://router.invalid/v1", maxAttempts: 3, retryWaitMs: 1000 },
+  }).then(() => null, (error) => error);
+
+  assert.ok(failure instanceof VisionUnavailableError);
+  assert.equal(calls, 1, "413 must not be retried");
+  assert.match(failure.message, /vision critique failed after 1 attempts/);
+  assert.match(failure.message, /HTTP 413/);
+});
+
+test("a transient upstream failure is still retried", async (t) => {
+  let calls = 0;
+  t.mock.method(globalThis, "fetch", async () => {
+    calls += 1;
+    return { ok: false, status: 503, text: async () => "Service Unavailable" };
+  });
+
+  await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "t", elements: [],
+    options: { apiKey: "k", baseUrl: "https://router.invalid/v1", maxAttempts: 3, retryWaitMs: 0 },
+  }).then(() => null, (error) => error);
+
+  assert.equal(calls, 3, "5xx keeps its retry budget");
+});
+
 test("a missing credential is reported as not configured, not as an invalid request", async () => {
   const original = { key: process.env.OPENAI_API_KEY, blablador: process.env.BLABLADOR_API_KEY };
   delete process.env.OPENAI_API_KEY;
@@ -247,4 +316,197 @@ test("a missing credential is reported as not configured, not as an invalid requ
     if (original.key !== undefined) process.env.OPENAI_API_KEY = original.key;
     if (original.blablador !== undefined) process.env.BLABLADOR_API_KEY = original.blablador;
   }
+});
+
+test("a critique cut off at the completion budget keeps the findings it finished", () => {
+  // The exact failure from a live run: max_tokens reached mid-string inside the
+  // fourth finding, so JSON.parse rejected a body that already held three
+  // complete, usable observations. Every screenshot in that run failed this way
+  // and the report carried no vision findings at all.
+  const truncated = JSON.stringify({
+    issues: [
+      { title: "Pricing is never stated", description: "No plan names a price.",
+        severity: "high", category: "copy",
+        elements: [{ elementSelector: "section:nth-of-type(3)", role: "cause" }] },
+      { title: "Links have no accessible name", description: "Icon-only links carry no aria-label.",
+        severity: "medium", category: "accessibility", elements: [] },
+    ],
+  }).replace(/\}$/, "")
+    + ', {"title": "A third finding that was cut off mid-sen';
+
+  const parsed = parseCritique(truncated, { truncated: true });
+  assert.equal(parsed.truncated, true);
+  assert.equal(parsed.issues.length, 2);
+  assert.deepEqual(parsed.issues.map((issue) => issue.title),
+    ["Pricing is never stated", "Links have no accessible name"]);
+  // The finding that was cut off is dropped, not guessed at.
+  assert.ok(!parsed.issues.some((issue) => /cut off/.test(issue.title)));
+});
+
+test("braces inside a description are not mistaken for structure", () => {
+  const objects = completeObjectsIn('{"title":"Uses {placeholder} copy","description":"a } brace"}, {"title":"cut');
+  assert.equal(objects.length, 1);
+  assert.equal(objects[0].title, "Uses {placeholder} copy");
+});
+
+test("a cut-off critique with nothing complete says so, and says why", () => {
+  assert.throws(() => parseCritique('{"issues": [{"title": "only the very begin', { truncated: true }),
+    /cut off at the completion budget/);
+  // And a body that was never JSON keeps its own, different explanation.
+  assert.throws(() => parseCritique("I am sorry, I cannot analyse this image.", { truncated: false }),
+    /did not return JSON/);
+});
+
+test("the completion budget has room for a full critique and can be overridden", () => {
+  // 2500 was reached exactly, mid-finding, on a page with 52 detected elements.
+  delete process.env.EYESON_VISION_MAX_TOKENS;
+  assert.ok(visionMaxTokens() > 2500);
+  process.env.EYESON_VISION_MAX_TOKENS = "1200";
+  assert.equal(visionMaxTokens(), 1200);
+  delete process.env.EYESON_VISION_MAX_TOKENS;
+  process.env.EYESON_VISION_MAX_TOKENS = "not-a-number";
+  assert.equal(visionMaxTokens(), DEFAULT_VISION_MAX_TOKENS);
+  delete process.env.EYESON_VISION_MAX_TOKENS;
+});
+
+test("the prompt says what the element list is, and what the capture is", () => {
+  // The vision critique produced the two most serious findings in a live report
+  // and both were wrong: "the entire header and hero section repeats three times
+  // vertically ... looks highly broken" (critical) over a page that renders once,
+  // and "preventing users from seeing the actual price" (high) in the same report
+  // whose verdict quotes the price. An earlier run filed "Massive empty vertical
+  // sections ... a major rendering bug" over ordinary page whitespace in an
+  // 8620px stitched capture.
+  //
+  // It already received the element list and was already told not to invent
+  // elements. What it was never told is what the list *means*.
+  const complete = buildPrompt({
+    url: "https://example.test/", task: "find the price",
+    elements: [{ selector: "e1", role: "link", text: "Home", boundingBox: {} }],
+    capture: { width: 1280, height: 8620 },
+  });
+
+  assert.match(complete.user, /complete for this capture/);
+  assert.match(complete.user, /each exactly once/);
+  assert.match(complete.user, /1280x8620/);
+  assert.match(complete.user, /stitched full-page image/);
+  // The three claims the runs disproved, refused up front rather than caught after.
+  assert.match(complete.system, /Do not report empty space, tall gaps or a page's length as a\s+rendering bug/);
+  assert.match(complete.system, /a thing that is on the page twice is in the list twice/);
+  assert.match(complete.system, /never that it prevented, blocked or stopped anyone/);
+});
+
+test("a truncated element list is not described as an inventory", () => {
+  // "If something is not here, it is not on the page" is ground truth when the
+  // list is complete and a falsehood when it is the first sixty of ninety.
+  const many = Array.from({ length: 90 }, (_, index) => (
+    { selector: `e${index}`, role: "link", text: `Item ${index}`, boundingBox: {} }));
+  const sampled = buildPrompt({ url: "https://example.test/", task: "find it", elements: many });
+
+  assert.match(sampled.user, /first 60 of 90/);
+  assert.match(sampled.user, /sample rather than an inventory/);
+  assert.doesNotMatch(sampled.user, /complete for this capture/);
+});
+
+test("the capture's size is read from the capture", () => {
+  // A number travelling separately from the thing it describes is a number that
+  // can be wrong about it.
+  const png = Buffer.concat([
+    Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+    Buffer.from([0, 0, 0, 13]), Buffer.from("IHDR"),
+    (() => { const b = Buffer.alloc(8); b.writeUInt32BE(1280, 0); b.writeUInt32BE(577, 4); return b; })(),
+  ]);
+  assert.deepEqual(captureSize(png.toString("base64")), { width: 1280, height: 577 });
+  // Anything it cannot read says nothing rather than guessing.
+  assert.equal(captureSize("not an image"), null);
+  assert.equal(captureSize(""), null);
+});
+
+test("naming the elements a finding is about is the default, not the exception", () => {
+  // Across sixteen vision findings in four live reports, the elements array came
+  // back empty every single time -- including both of the critical findings that
+  // turned out to be wrong. The plumbing was never at fault: toPainPoint maps
+  // elementSelector through and aggregate groups on it. The model was simply
+  // taking the "empty array for a page-wide finding" branch every time, which
+  // leaves a reader nothing to look at and leaves the claim anchored to nothing
+  // that can be checked against a measurement.
+  const { system } = buildPrompt({
+    url: "https://example.test/", task: "find the price",
+    elements: [{ selector: "e1", role: "link", text: "Pricing", boundingBox: {} }],
+  });
+
+  assert.match(system, /name every element the finding is about/);
+  assert.match(system, /If you can say\s+where on the screen the problem is, say which elements/);
+  // And what an empty array is allowed to mean.
+  assert.match(system, /genuinely about the whole page/);
+  assert.match(system, /not that pointing at the elements would have taken a moment longer/);
+});
+
+test("a cited selector that is not on the page is not a citation", () => {
+  // Asking the reviewer to name the elements took citations from zero of sixteen
+  // to eight of ten -- and every selector in that first batch was invented.
+  // Against a Tailwind site whose element list is agent-browser refs ("e6",
+  // "span@316,533") it produced Bootstrap: a.btn.btn-primary.btn-lg.mr-3,
+  // h1.display-4.font-weight-bold.mb-3, div.col-md-6.text-center > p. Plausible
+  // CSS for some other website.
+  //
+  // An invented citation is worse than none: it reads as corroboration, and a
+  // reader has to go and look to find out it is not.
+  const body = JSON.stringify({
+    issues: [
+      { title: "Low contrast", description: "Pale text.", category: "accessibility",
+        severity: "high",
+        elements: [{ elementSelector: "e6", role: "cause" },
+                   { elementSelector: "a.btn.btn-primary.btn-lg.mr-3", role: "cause" },
+                   // The same selector arrived three times in one live finding,
+                   // which says nothing three times.
+                   { elementSelector: "e6", role: "cause" }] },
+      { title: "All invented", description: "Nothing real cited.", category: "usability",
+        severity: "high",
+        elements: [{ elementSelector: "h1.display-4.font-weight-bold.mb-3", role: "cause" }] },
+    ],
+    strengths: [{ title: "Clear hierarchy", description: "Good.",
+                  elements: [{ elementSelector: "div.col-md-6", role: "cause" },
+                             { elementSelector: "e1", role: "cause" }] }],
+  });
+
+  const parsed = parseCritique(body, { elements: [{ selector: "e6" }, { selector: "e1" }] });
+
+  assert.deepEqual(parsed.issues[0].elements.map((item) => item.elementSelector), ["e6"]);
+  // A finding whose every citation was invented is left citing nothing, which is
+  // what "unanchored" already means elsewhere in the report.
+  assert.deepEqual(parsed.issues[1].elements, []);
+  // Strengths are held to it too: praise pointing at nothing is praise for nothing.
+  assert.deepEqual(parsed.strengths[0].elements.map((item) => item.elementSelector), ["e1"]);
+});
+
+test("with no element list a named citation stands and an index resolves to nothing", () => {
+  // Nothing to check against is not the same as a citation that failed a check,
+  // and stripping every named citation on that basis would be the guard causing
+  // the harm it exists to prevent.
+  //
+  // An index is the exception, because it is not a name: it is a lookup into a
+  // list, and with no list there is nothing to look up. A live report carried
+  // `elementId: null` on twenty-four citations across seven findings for exactly
+  // this reason -- the screenshots had no paired DOM snapshot, so the element
+  // list was empty and the indices passed straight through unresolved.
+  const body = JSON.stringify({ issues: [{ title: "T", description: "D", category: "usability",
+    severity: "low", elements: [{ elementSelector: "whatever", role: "cause" },
+                                { element: 3, role: "cause" }] }], strengths: [] });
+
+  const withoutList = parseCritique(body).issues[0].elements;
+  assert.deepEqual(withoutList.map((item) => item.elementSelector), ["whatever"]);
+  assert.ok(withoutList.every((item) => item.elementSelector),
+    "a citation that resolves to nothing is not a citation");
+});
+
+test("the vision critique also waits out an endpoint that is gone", async () => {
+  // The same blip that ended two of three personas in cycle 20 took the whole
+  // vision critique with it, for the same reason: three quick tries and a linear
+  // wait. The report then said, truthfully, that it carried no vision findings --
+  // about an outage that lasted under a minute.
+  assert.ok(unreachable(new TypeError("fetch failed")));
+  assert.ok(unreachable(Object.assign(new Error("aborted"), { name: "AbortError" })));
+  assert.ok(!unreachable({ status: 413 }), "a payload too large is not a network problem");
+  assert.equal(UNREACHABLE_ATTEMPTS, 6);
 });
