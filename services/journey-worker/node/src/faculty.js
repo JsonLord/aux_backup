@@ -99,7 +99,8 @@ class BrowserTool extends Tool {
     ].join("\n");
   }
 
-  async processAction(action, { browser, recorder }) {
+  async processAction(action, { browser, recorder, boxes }) {
+    const context = { boxes };
     if (!this.actionTypes.includes(action.type)) return { handled: false };
     const result = { handled: true, failed: false, acted: false, url: "", error: "" };
     const target = String(action.target || "").trim();
@@ -117,7 +118,7 @@ class BrowserTool extends Tool {
           // against the element's own width and height -- only whether the
           // recorded position means anything.
           await browser.scrollIntoView(target).catch(() => {});
-          const aim = await this.aim(target, browser, recorder);
+          const aim = await this.aim(target, browser, recorder, context?.boxes);
           if (aim?.missed) {
             // The hand went outside the control. Nothing happens, which is
             // exactly what happens to a person who misses.
@@ -160,14 +161,27 @@ class BrowserTool extends Tool {
   }
 
   /** Where this person's hand actually went, and whether it landed. */
-  async aim(target, browser, recorder) {
-    let box;
-    try {
-      box = (await browser.getElementBox(target))?.details;
-    } catch {
+  async aim(target, browser, recorder, boxes) {
+    // The walk's own measurement first. The driver has no getElementBox: the call
+    // threw on every click of every run, the catch swallowed it, and aim()
+    // returned null before it recorded anything -- so the hand, the scatter and
+    // the miss were all modelled and none of them ever ran. 62 clicks in one
+    // live run, 62 silent nulls, no pointer event in the record at all.
+    let box = boxes?.[target];
+    if (!box || !box.width || !box.height) {
+      try {
+        box = (await browser.getElementBox(target))?.details;
+      } catch {
+        box = null;
+      }
+    }
+    if (!box || !box.width || !box.height) {
+      // Said out loud. A hand that could not be aimed is a measurement this run
+      // did not make, and it has to be distinguishable from a hand that landed.
+      await recorder?.record("persona.pointer", "could not tell where the control is",
+        { target, measured: false });
       return null;
     }
-    if (!box || !box.width || !box.height) return null;
     const aim = simulatePointer(box, this.abilities, this.seed);
     const missed = aim.x < box.x || aim.x > box.x + box.width
       || aim.y < box.y || aim.y > box.y + box.height;

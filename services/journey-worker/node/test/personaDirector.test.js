@@ -214,8 +214,18 @@ test("the record is see, expect, act, observe, reflect, feel -- in that order", 
 
   const order = recorder.events.map((event) => event.type)
     .filter((type) => type.startsWith("persona."));
-  assert.deepEqual(order.slice(0, 3),
-    ["persona.expectation", "persona.reflection", "persona.affect"]);
+  // Acting records too, now that it can: the hand is aimed between committing to
+  // an expectation and reflecting on what happened, which is the "act" this
+  // test's own title names. It recorded nothing before only because aim() was
+  // calling a driver method that does not exist and swallowing the failure.
+  assert.deepEqual(order.slice(0, 4),
+    ["persona.expectation", "persona.pointer", "persona.reflection", "persona.affect"]);
+
+  // And a hand that could not be aimed says so rather than passing for one that
+  // landed. This fake browser offers no boxes, so this is that case.
+  const pointer = recorder.events.find((event) => event.type === "persona.pointer");
+  assert.equal(pointer.data.measured, false);
+  assert.equal(pointer.data.target, "e1");
 
   const expectation = recorder.events.find((e) => e.type === "persona.expectation");
   assert.equal(expectation.data.visible, "A headline and a Pricing link.");

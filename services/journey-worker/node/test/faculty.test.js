@@ -129,3 +129,40 @@ test("the constraints reach the persona alongside the actions", () => {
   assert.match(faculty.actionsConstraintsPrompt(), /only CLICK or TYPE into something you can actually see/);
   assert.match(faculty.actionsConstraintsPrompt(), /Not finding it is GIVE_UP/);
 });
+
+test("the hand is aimed from the measurement the walk already made", async () => {
+  // The driver has no getElementBox. The call threw on every click of every run,
+  // the catch swallowed it, and aim() returned null before recording anything --
+  // so the hand, the scatter and the miss were all modelled and none of them ever
+  // ran: 62 clicks in one live run, 62 silent nulls, no pointer in the record.
+  // The walk measures every element on screen anyway.
+  const recorder = { events: [], async record(type, summary, data) {
+    this.events.push({ type, summary, data }); } };
+  const faculty = browsingFaculty({ abilities: {}, seed: 1 });
+  // Exactly as the real driver behaves: getElementBox is not there at all.
+  const browser = { scrollIntoView: async () => {}, click: async () => {},
+    getUrl: async () => "https://example.test/" };
+
+  const result = await faculty.processAction({ type: "CLICK", target: "e7" }, {
+    browser, recorder, boxes: { e7: { x: 100, y: 200, width: 120, height: 40 } } });
+
+  assert.equal(result.acted, true, "a click with a box behind it goes through");
+  const pointer = recorder.events.find((event) => event.type === "persona.pointer");
+  assert.ok(pointer, "and the hand is on the record");
+  assert.deepEqual(pointer.data.box, { x: 100, y: 200, width: 120, height: 40 });
+  assert.ok(pointer.data.aim, "with where it actually landed");
+});
+
+test("a hand that could not be aimed says so instead of returning nothing", async () => {
+  const recorder = { events: [], async record(type, summary, data) {
+    this.events.push({ type, summary, data }); } };
+  const faculty = browsingFaculty({ abilities: {}, seed: 1 });
+  const browser = { scrollIntoView: async () => {}, click: async () => {},
+    getUrl: async () => "https://example.test/" };
+
+  await faculty.processAction({ type: "CLICK", target: "e7" }, { browser, recorder, boxes: {} });
+
+  const pointer = recorder.events.find((event) => event.type === "persona.pointer");
+  assert.ok(pointer, "a measurement this run did not make is still a thing to record");
+  assert.equal(pointer.data.measured, false);
+});

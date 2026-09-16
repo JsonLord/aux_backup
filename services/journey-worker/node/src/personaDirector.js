@@ -160,10 +160,13 @@ function taskText(task) {
  * the selectors it uses are the same strings the actor targets -- so the run has
  * always known that "e18" is the "Monthly" button and never told anyone.
  */
+function seenElements(perception) {
+  return [...(perception?.perceived || []), ...(perception?.notLookedAt || [])];
+}
+
 function seenElement(target, perception) {
   if (!target || !perception) return null;
-  const items = [...(perception.perceived || []), ...(perception.notLookedAt || [])];
-  return items.find((item) => item && item.selector === target) || null;
+  return seenElements(perception).find((item) => item && item.selector === target) || null;
 }
 
 function nameOf(target, perception) {
@@ -496,7 +499,7 @@ class PersonaDirector {
         continue;
       }
 
-      const performed = await this.perform(decision.action, browser, context);
+      const performed = await this.perform(decision.action, browser, context, pendingSeen || seen);
       // Whether the page answered is observed, never assumed. Asserting that a
       // click changed something made every action a success, so frustration
       // stayed at 0.00 for a whole live run and the coping model never fired --
@@ -625,7 +628,7 @@ class PersonaDirector {
         skipAction = true;
       } else if (coping.type === "impulsive_retry") {
         for (let repeat = 1; repeat < (coping.repetitions || 2) && !ending; repeat += 1) {
-          const again = await this.perform(decision.action, browser, context);
+          const again = await this.perform(decision.action, browser, context, afterSeen || seen);
           history.push(`${decision.action.type} again${again.failed ? " (still nothing)" : ""}`);
           // The page moved after it was carried, so what was carried describes a
           // page that no longer exists. Drop it and let the next turn look.
@@ -931,7 +934,11 @@ class PersonaDirector {
         : "";
       return again(`the capture did not describe the page: ${
         String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`,
-        stood, seen.screenshotBase64, seen.beneath, seen.paintCheck);
+        // The picture that was refused is the one that was measured -- not
+        // whichever happened to be to hand. Cycle 44 kept the page screenshot
+        // beside refusals of the viewport frame, so the evidence of the failure
+        // was a picture of something else.
+        stood, shown || seen.screenshotBase64, seen.beneath, seen.paintCheck);
     }
     // Absent, not empty. An empty observation is a person who looked and took
     // nothing in -- which is the strongest eyesight finding here, not a failure
@@ -1009,8 +1016,19 @@ class PersonaDirector {
    * those declarations, and an action nothing claims comes back unhandled
    * instead of falling through to a silent no-op.
    */
-  perform(action, browser, context) {
-    return this.faculty.processAction(action, { browser, recorder: context.recorder, context });
+  perform(action, browser, context, seen) {
+    // The boxes this person's own walk measured, by ref. The faculty needs one to
+    // aim a hand at a control, and the only other way it had to ask was a driver
+    // method that does not exist: 62 clicks in one run, 62 silent nulls, and not
+    // a single pointer ever recorded. The walk measures every element on screen
+    // anyway, so the measurement was already in hand and simply never handed
+    // over.
+    const boxes = {};
+    for (const element of seenElements(seen?.perception)) {
+      if (element?.selector && element.box) boxes[element.selector] = element.box;
+    }
+    return this.faculty.processAction(action,
+      { browser, recorder: context.recorder, context, boxes });
   }
 
   /**
