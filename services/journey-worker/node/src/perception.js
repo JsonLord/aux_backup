@@ -397,11 +397,14 @@ function scrollValue(value) {
   return typeof current === "string" ? current.trim() : current;
 }
 
+/** One screencast frame as bare base64, or "" when there is nothing usable in it. */
+function frameImage(frame) {
+  return String(frame?.data || "").replace(/^data:image\/[a-z+]+;base64,/, "");
+}
+
 /** Frame payloads as the perception service wants them: bare base64, oldest first. */
 function motionFramesFrom(frames) {
-  return (frames || [])
-    .map((frame) => String(frame?.data || "").replace(/^data:image\/[a-z+]+;base64,/, ""))
-    .filter(Boolean);
+  return (frames || []).map(frameImage).filter(Boolean);
 }
 
 class PerceptionClient {
@@ -456,5 +459,5 @@ class PerceptionClient {
   }
 }
 
-module.exports = { PerceptionClient, SCROLL_AFTER, WALK, batchResults, intoCaptureSpace, linkRefs, lookAtPage,
+module.exports = { PerceptionClient, SCROLL_AFTER, WALK, batchResults, frameImage, intoCaptureSpace, linkRefs, lookAtPage,
   motionFramesFrom, pageStanding, scrollNumber, scrollValue };

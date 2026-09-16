@@ -1233,6 +1233,26 @@ class JobExecutor:
         r"|[£$€]\s*\d", re.I)
     # A sum of money as it appears on a page: a currency mark against a number.
     _A_PRICE = re.compile(r"[£$€]\s?\d[\d,.]*", re.U)
+    # A finding claiming the capture ran out before the content did.
+    _CLAIMS_CUT_OFF = re.compile(
+        r"\bcut off\b|\bcut-off\b|\bcropped\b|\btruncated\b|\bclipped\b"
+        r"|\bpartially (?:visible|shown|hidden)\b|\bruns? off the (?:screen|page|edge)\b", re.I)
+    # A finding claiming the type is below what a person can read.
+    _CLAIMS_TINY_TEXT = re.compile(
+        r"\btext is too small\b|\btoo small to read\b|\btiny (?:text|type|font)\b"
+        r"|\bfont size is too small\b|\billeg(?:ible|ibly) small\b|\bsmall(?:er)? than "
+        r"(?:\d+px|readable)\b", re.I)
+    # A finding claiming stretches of the page hold nothing.
+    _CLAIMS_EMPTY_SECTIONS = re.compile(
+        r"\bempty (?:section|sections|space|area|areas|region|regions|band|bands)\b"
+        r"|\bblank (?:section|sections|space|area|areas|region|regions)\b"
+        r"|\bmassive (?:empty|blank|white)\b|\blarge (?:empty|blank) (?:vertical )?(?:space|areas?)\b",
+        re.I)
+    # Below this, type genuinely is small enough that a reader can complain about
+    # it. Not a judgement about any particular pair of eyes -- the perception
+    # service makes those, per persona -- but the floor under which the claim is
+    # at least about something real.
+    _SMALL_TYPE_PX = 12.0
 
     @classmethod
     def _contradicted_by_the_run(cls, finding: dict[str, Any],
@@ -1248,7 +1268,7 @@ class JobExecutor:
         does state the pricing clearly. £200 per user per year for teams (or £100
         per user per year for individuals)".
 
-        Two of its claims are checkable against what the run itself recorded, and
+        Five of its claims are checkable against what the run itself recorded, and
         where they disagree the measurement wins -- not because a vision model is
         worthless, but because a confident, specific, wrong claim at critical
         severity is the most damaging thing this report can carry.
@@ -1280,6 +1300,33 @@ class JobExecutor:
                 shown = ", ".join(sorted(quoted)[:3])
                 return ("this run read a price off the page with the persona's own eyes "
                         f"({shown}), so the page does state a cost")
+        # Nothing is cut off if nothing ran past the edge of the capture. The
+        # perception service measures exactly this, per element, on every capture:
+        # a box that leaves the frame is clipped, and it says how many did.
+        if cls._CLAIMS_CUT_OFF.search(text):
+            measured = cls._captures_measured(journeys)
+            if measured and all(int(item.get("clipped") or 0) == 0 for item in measured):
+                return ("the run measured every element as falling inside the capture on all "
+                        f"{plural(len(measured), 'capture')} of this run, so nothing on the page "
+                        "was cut off")
+        # Type is not too small to read if the smallest type measured is not
+        # small. The walk reads the computed font size off every element it
+        # reports, so this is the page's own number, not an impression of one.
+        if cls._CLAIMS_TINY_TEXT.search(text):
+            sizes = [float(item.get("smallestFontPx") or 0) for item in cls._captures_measured(journeys)]
+            sizes = [size for size in sizes if size]
+            if sizes and min(sizes) >= cls._SMALL_TYPE_PX:
+                return ("the smallest type the run measured anywhere on this page is "
+                        f"{min(sizes):.0f}px, which is not too small to read")
+        # No stretch of the page is empty if nearly all of it resolved. A region
+        # the tree says holds something and the capture draws nothing into is
+        # counted on every capture, as a share of what was measured.
+        if cls._CLAIMS_EMPTY_SECTIONS.search(text):
+            shares = [float(item.get("blankShare") or 0.0) for item in cls._captures_measured(journeys)]
+            if shares and max(shares) <= 0.02:
+                return ("every region the run measured had something drawn in it, on all "
+                        f"{plural(len(shares), 'capture')} of this run, so no part of the page "
+                        "was blank")
         # Nothing was blocked if the run finished.
         if cls._CLAIMS_BLOCKING.search(text):
             finished = [journey for journey in journeys
@@ -1290,6 +1337,21 @@ class JobExecutor:
                 return ("the run completed the tasks it came to do"
                         + (f' -- "{said[:180]}"' if said else ""))
         return ""
+
+    @staticmethod
+    def _captures_measured(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """Every capture measurement this run recorded, as the service reported it.
+
+        One reader for three checks, because they are three questions about the
+        same thing: what the perception service measured on the pictures this run
+        actually took. A capture that carries no measurement is left out rather
+        than counted as a clean one -- a check that cannot run must not pass.
+        """
+        return [capture for journey in journeys
+                for event in journey.get("timeline") or []
+                if event.get("type") == "persona.perception"
+                for capture in [(event.get("data") or {}).get("capture") or {}]
+                if capture.get("measured")]
 
     @classmethod
     def _prices_the_run_read(cls, journeys: list[dict[str, Any]]) -> set[str]:

@@ -1754,3 +1754,68 @@ test("the capture the service would not stand behind is kept, not dropped", asyn
   const written = await fs.readFile(fell.data.capture);
   assert.ok(written.length > 0, "and the picture has to be there");
 });
+
+test("what the person is looking at is measured, not the top of the document", async () => {
+  // agent-browser's screenshot draws the page at its document position, so a
+  // page standing at 600 comes back showing document rows 0 to 577 -- none of
+  // which the person can see. Eleven of cycle 43's forty-five captures measured
+  // their elements and found none of them in frame. The screencast frame is the
+  // compositor's presented viewport, and it was already arriving on 44 of those
+  // 45 steps for the motion map.
+  const measured = [];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    frame: () => ({ data: "data:image/jpeg;base64,VIEWPORTFRAME" }),
+    perception: {
+      available: true,
+      async perceive(request) {
+        measured.push(request);
+        return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+          counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+          capture: { trustworthy: true, measured: 1, reason: "" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 40, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "PAGESCREENSHOT",
+      refs: {}, snapshot: "", scrollY: 600 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(measured[0].screenshotBase64, "VIEWPORTFRAME",
+    "the frame is what this person can see");
+  assert.equal(measured[0].elements[0].box.y, 40,
+    "a frame is the viewport, so its boxes are already where they belong");
+});
+
+test("with no frame the screenshot is used, and the boxes are moved to meet it", async () => {
+  const measured = [];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    frame: () => null,
+    perception: {
+      available: true,
+      async perceive(request) {
+        measured.push(request);
+        return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+          counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+          capture: { trustworthy: true, measured: 1, reason: "" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 40, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "PAGESCREENSHOT",
+      refs: {}, snapshot: "", scrollY: 600 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(measured[0].screenshotBase64, "PAGESCREENSHOT");
+  assert.equal(measured[0].elements[0].box.y, 640,
+    "the screenshot is the document, so 40 in the viewport is 640 in it");
+});

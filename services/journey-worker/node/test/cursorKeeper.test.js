@@ -4,8 +4,9 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 const fs = require("node:fs");
 const {
-  DEFAULT_INTERVAL_MS, OVERLAY_SCRIPT, cursorKeeperStatus, enabled, installOnce,
-  readCursorPosition, startCursorKeeper, stopCursorKeeper, __resetCursorKeeper,
+  DEFAULT_INTERVAL_MS, OVERLAY_SCRIPT, TRAVEL_STEPS, cursorKeeperStatus, enabled, installOnce,
+  pathBetween, readCursorPosition, startCursorKeeper, stopCursorKeeper, travelTo,
+  __resetCursorKeeper,
 } = require("../src/cursorKeeper");
 
 test.beforeEach(() => __resetCursorKeeper());
@@ -111,4 +112,40 @@ test("a pointer that has never been seen is reported as absent, not as a guess",
   // A page that cannot be reached at all is the same answer.
   const unreachable = async () => ({ ok: false, stdout: "", stderr: "no active page" });
   assert.equal(await readCursorPosition(unreachable, 1000), null);
+});
+
+test("a hand moves through the points between two places", () => {
+  const points = pathBetween({ x: 0, y: 0 }, { x: 100, y: 0 });
+  assert.equal(points.length, TRAVEL_STEPS, "it passes through every step of the way");
+  assert.deepEqual(points[points.length - 1], { x: 100, y: 0 }, "and arrives where it was sent");
+  // Not a straight line: a hand bows towards the side it came from.
+  assert.ok(points.some((point) => point.y !== 0), "a hand does not travel on a rail");
+  // Not a constant speed either: it accelerates away from rest and settles.
+  const first = Math.hypot(points[0].x, points[0].y);
+  const middle = Math.hypot(points[4].x - points[3].x, points[4].y - points[3].y);
+  assert.ok(middle > first, "it should be moving faster in the middle than at the start");
+  // Going nowhere is not a movement.
+  assert.deepEqual(pathBetween({ x: 7, y: 7 }, { x: 7, y: 7 }), []);
+});
+
+test("the pointer is sent down the stream when there is one, and into the page when not", async () => {
+  const sent = [];
+  const streamed = await travelTo({ x: 50, y: 40 },
+    { send: (payload) => { sent.push(payload); return { sent: true }; } });
+  assert.equal(streamed.moved, true);
+  assert.equal(streamed.through, "the viewport stream",
+    "the browser's own input pipeline is the only thing a CSS :hover rule listens to");
+  assert.equal(sent.length, TRAVEL_STEPS);
+  assert.ok(sent.every((item) => item.type === "input_mouse" && item.event === "mousemove"));
+
+  // No stream: the events are dispatched in the page, which still reaches every
+  // script listening for pointer movement.
+  const commands = [];
+  const inPage = await travelTo({ x: 90, y: 90 }, {
+    send: () => ({ sent: false }),
+    runner: async (batch) => { commands.push(batch); return { ok: true, stdout: "moved", stderr: "" }; },
+  });
+  assert.equal(inPage.through, "the page");
+  assert.equal(commands.length, 1, "one batch, not a round trip per point");
+  assert.match(String(commands[0][0][1]), /dispatchEvent\(new MouseEvent\('mousemove'/);
 });

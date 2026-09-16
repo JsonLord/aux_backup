@@ -742,3 +742,58 @@ def test_looking_and_taking_nothing_in_is_said_rather_than_returned_as_empty():
                              "counts": {"notLookedAt": 2}})
     assert seen.startswith("[e1] link Pricing")
     assert "2 other thing(s)" in seen
+
+
+def test_boxes_are_measured_in_the_capture_s_pixels_not_the_page_s():
+    """Boxes arrive in CSS pixels; a capture need not be at CSS scale. A screencast
+    frame is whatever size the compositor is presenting, and measuring a CSS-pixel
+    box against an image at another scale crops the wrong pixels -- silently, and
+    with the same symptom as every other misalignment."""
+    from PIL import Image, ImageDraw
+    import base64, io as _io
+
+    # Half-scale capture of a 1280x400 viewport: a black bar at CSS y 200..260
+    # lands at image y 100..130.
+    image = Image.new("RGB", (640, 200), (255, 255, 255))
+    ImageDraw.Draw(image).rectangle([50, 100, 250, 130], fill=(0, 0, 0))
+    buffer = _io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+
+    element = {"selector": "e1", "role": "heading", "name": "Pricing",
+               "fontPx": 32, "fontWeight": 700,
+               "box": {"x": 100, "y": 200, "width": 400, "height": 60}}
+
+    scaled = perceive(image_base64=encoded, elements=[element],
+                      viewport={"width": 1280, "height": 400})
+    assert scaled["capture"]["blankShare"] == 0.0, (
+        "at half scale the box has to be halved to land on the mark")
+
+    # Told the viewport is the image's own size, nothing is scaled and the crop
+    # falls off the bottom of a 200px image -- which is the bug this prevents.
+    unscaled = perceive(image_base64=encoded, elements=[element],
+                        viewport={"width": 640, "height": 200})
+    assert unscaled["counts"]["legible"] == 0
+
+
+def test_a_capture_reports_what_a_claim_about_the_page_can_be_checked_against():
+    """The vision critique reads the same picture and says "the cards are cut off"
+    and "the text is too small". Both are statements about something measured
+    here, and neither number used to leave this function."""
+    from PIL import Image
+    import base64, io as _io
+
+    image = Image.new("RGB", (400, 200), (255, 255, 255))
+    buffer = _io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+
+    result = perceive(image_base64=encoded, viewport={"width": 400, "height": 200}, elements=[
+        {"selector": "e1", "role": "heading", "name": "In frame", "fontPx": 24, "fontWeight": 700,
+         "box": {"x": 10, "y": 10, "width": 100, "height": 30}},
+        {"selector": "e2", "role": "", "name": "Off the edge", "fontPx": 11, "fontWeight": 400,
+         "box": {"x": 10, "y": 190, "width": 100, "height": 40}},
+    ])
+
+    assert result["capture"]["clipped"] == 1, "the one that leaves the frame is counted"
+    assert result["capture"]["smallestFontPx"] == 11.0, "and the page's own smallest type"

@@ -24,7 +24,9 @@
  * these clicks land on somebody's live site.
  */
 
+const { travelTo } = require("./cursorKeeper");
 const { simulatePointer } = require("./physical");
+const { sendViewportInput } = require("./viewportStream");
 
 /** How a tool answers for itself. Mirrors TinyTroupe's TinyTool. */
 class Tool {
@@ -169,8 +171,20 @@ class BrowserTool extends Tool {
     const aim = simulatePointer(box, this.abilities, this.seed);
     const missed = aim.x < box.x || aim.x > box.x + box.width
       || aim.y < box.y || aim.y > box.y + box.height;
+    // Get there by moving, not by appearing. A pointer that jumps from one
+    // control to the next crosses nothing on the way, so a menu that opens on
+    // hover never opens and a tooltip never shows -- and a review of a page
+    // whose navigation works that way would report navigation that does not
+    // work. The travel happens whether or not the aim is going to land: a hand
+    // that misses still moved.
+    const travelled = await travelTo(aim, { send: this.sendInput || sendViewportInput })
+      .catch(() => null);
     await recorder?.record("persona.pointer",
-      missed ? "the click landed outside the control" : "clicked", { target, box, aim, missed });
+      missed ? "the click landed outside the control" : "clicked",
+      { target, box, aim, missed,
+        // How it got there, so a reader can tell a run whose hover states fired
+        // from one whose did not.
+        travel: travelled || undefined });
     return { ...aim, missed };
   }
 }

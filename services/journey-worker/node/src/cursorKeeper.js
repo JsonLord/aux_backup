@@ -119,6 +119,83 @@ async function readCursorPosition(runner = batch, now = Date.now()) {
     stale: true, ageMs: Math.max(0, now - lastSeen.at) };
 }
 
+// How many positions a hand passes through on its way somewhere. Enough that a
+// page watching the pointer sees a movement rather than an appearance; few
+// enough that a forty-step run does not spend its time on mouse events.
+const TRAVEL_STEPS = 8;
+
+/**
+ * The positions a hand passes through between two points.
+ *
+ * Not a straight line and not a constant speed, because neither is what a hand
+ * does: the path bows slightly towards the side it came from and eases in and
+ * out of rest. The bow is proportional to the distance, so a short correction
+ * stays almost straight and a reach across the page arcs.
+ *
+ * This matters beyond looking right. A menu that opens on hover opens because
+ * the pointer crossed it; a tooltip appears because the pointer paused near it.
+ * A pointer that teleports from one control to the next never crosses anything,
+ * so a run could not see any of it -- and a review of a page whose navigation
+ * only opens on hover would report the navigation as not working.
+ */
+function pathBetween(from, to, steps = TRAVEL_STEPS) {
+  const start = { x: Number(from?.x) || 0, y: Number(from?.y) || 0 };
+  const end = { x: Number(to?.x) || 0, y: Number(to?.y) || 0 };
+  const spanX = end.x - start.x;
+  const spanY = end.y - start.y;
+  const distance = Math.hypot(spanX, spanY);
+  if (!distance) return [];
+  // Perpendicular to the direction of travel, a twelfth of the way out.
+  const bow = distance / 12;
+  const midX = (start.x + end.x) / 2 - (spanY / distance) * bow;
+  const midY = (start.y + end.y) / 2 + (spanX / distance) * bow;
+  const points = [];
+  for (let step = 1; step <= steps; step += 1) {
+    const linear = step / steps;
+    // Ease in and out, so the hand accelerates away from rest and settles.
+    const time = linear < 0.5 ? 2 * linear * linear : 1 - ((-2 * linear + 2) ** 2) / 2;
+    const rest = 1 - time;
+    points.push({
+      x: Math.round(rest * rest * start.x + 2 * rest * time * midX + time * time * end.x),
+      y: Math.round(rest * rest * start.y + 2 * rest * time * midY + time * time * end.y),
+    });
+  }
+  return points;
+}
+
+/**
+ * Move the pointer there, through every point in between.
+ *
+ * Sent down the viewport stream when it is connected, because that goes through
+ * the browser's own input pipeline and is therefore the only way a CSS `:hover`
+ * rule ever fires. When it is not, the events are dispatched in the page
+ * instead: that still reaches every script listening for pointer movement, which
+ * is most of what opens a menu, and it keeps the overlay honest about where the
+ * pointer is.
+ */
+async function travelTo(to, { runner = batch, send, steps = TRAVEL_STEPS, now = Date.now() } = {}) {
+  const from = lastSeen || { x: 0, y: 0 };
+  const points = pathBetween(from, to, steps);
+  if (!points.length) return { moved: false, points: 0, through: "nothing to do" };
+  const sender = send || (() => ({ sent: false }));
+  let through = "the page";
+  const streamed = points.every((point) =>
+    sender({ type: "input_mouse", event: "mousemove", x: point.x, y: point.y }).sent);
+  if (streamed) {
+    through = "the viewport stream";
+  } else {
+    // One batch, not one command per point: a round trip each would cost more
+    // than the movement is worth.
+    const script = points.map((point) => "window.dispatchEvent(new MouseEvent('mousemove', "
+      + `{clientX: ${point.x}, clientY: ${point.y}, bubbles: true}))`).join(";");
+    const result = await runner([["eval", `(() => { ${script}; return "moved"; })()`]]);
+    if (!result.ok) return { moved: false, points: points.length, through: "nothing: " + result.stderr };
+  }
+  const landed = points[points.length - 1];
+  lastSeen = { x: landed.x, y: landed.y, viewport: lastSeen?.viewport, at: now };
+  return { moved: true, points: points.length, through };
+}
+
 function startCursorKeeper({ intervalMs, env = process.env, runner = batch } = {}) {
   if (!enabled(env)) return { running: false, reason: "disabled" };
   if (timer) return { running: true, reason: "already-running" };
@@ -153,6 +230,7 @@ function __resetCursorKeeper() {
 }
 
 module.exports = {
+  pathBetween, travelTo, TRAVEL_STEPS,
   CURSOR_POSITION_PROBE, DEFAULT_INTERVAL_MS, OVERLAY_SCRIPT, cursorKeeperStatus, enabled,
   installOnce, readCursorPosition, startCursorKeeper, stopCursorKeeper, __resetCursorKeeper,
 };

@@ -3152,3 +3152,90 @@ def test_the_deck_says_how_much_of_the_run_it_could_see():
     assert "unknown rather than ruled out" in note
     # A run that saw everything says nothing, rather than printing a reassuring zero.
     assert JobExecutor._coverage_note({"run_diagnostics": []}) == ""
+
+
+def _run_that_measured(captures, summary="Completed what they came to do. It costs £200."):
+    """A run whose captures carry what the perception service measured on them."""
+    return {"runId": "run_1", "profileId": "persona_1",
+            "verdict": {"status": "passed", "summary": summary,
+                        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+            "timeline": [{"type": "persona.perception",
+                          "data": {"legible": ["e1", "e2"], "capture": capture}}
+                         for capture in captures]}
+
+
+def test_a_cut_off_claim_is_checked_against_what_ran_past_the_edge():
+    """"The pricing cards are cut off" is a statement about clipping, and the
+    perception service measures clipping per element on every capture. Until now
+    the only thing that answered it was whether the run happened to finish."""
+    clean = [{"measured": 20, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0},
+             {"measured": 18, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0}]
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Pricing cards are cut off",
+               "summary": "The cards are cut off at the bottom of the viewport."}
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_measured(clean)])
+
+    assert finding["severity"] == "medium"
+    assert "nothing on the page was cut off" in finding["summary"]
+
+    # And it stands when something really did run past the edge.
+    real = [{"measured": 20, "clipped": 3, "blankShare": 0.0, "smallestFontPx": 14.0}]
+    stands = {"source": "eyeson-vision-synthesis", "severity": "high",
+              "title": "Pricing cards are cut off",
+              "summary": "The cards are cut off at the bottom of the viewport."}
+    JobExecutor._temper_contradicted_findings([stands], [_run_that_measured(real)])
+    assert stands["severity"] == "high"
+
+
+def test_a_tiny_text_claim_is_checked_against_the_type_the_walk_measured():
+    """The walk reads the computed font size off every element it reports, so the
+    page's own number answers this rather than an impression of one."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Body text is too small to read",
+               "summary": "The text is too small to read comfortably."}
+    roomy = [{"measured": 20, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0}]
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_measured(roomy)])
+
+    assert finding["severity"] == "medium"
+    assert "14px" in finding["summary"]
+
+    # A page that really is set in 9px keeps the finding.
+    small = [{"measured": 20, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 9.0}]
+    stands = {"source": "eyeson-vision-synthesis", "severity": "high",
+              "title": "Body text is too small to read",
+              "summary": "The text is too small to read comfortably."}
+    JobExecutor._temper_contradicted_findings([stands], [_run_that_measured(small)])
+    assert stands["severity"] == "high"
+
+
+def test_an_empty_sections_claim_is_checked_against_the_blank_share():
+    """"Massive empty vertical sections ... a major rendering bug" was filed at
+    critical severity against our own capture. The share of regions with nothing
+    drawn in them is measured on every capture and answers it directly."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Massive empty sections",
+               "summary": "There are massive empty vertical sections down the page."}
+    drawn = [{"measured": 30, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0}]
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_measured(drawn)])
+
+    assert finding["severity"] == "medium"
+    assert "no part of the page was blank" in finding["summary"]
+
+
+def test_a_check_that_cannot_run_does_not_pass():
+    """A run whose captures carry no measurement must not read as a clean one --
+    the commonest way a guard comes to report that it ran when it did not."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Pricing cards are cut off",
+               "summary": "The cards are cut off at the bottom of the viewport."}
+    nothing = {"runId": "run_1", "profileId": "persona_1",
+               "verdict": {"status": "failed", "summary": "", "criteria": []},
+               "timeline": [{"type": "persona.perception", "data": {"legible": ["e1"]}}]}
+
+    JobExecutor._temper_contradicted_findings([finding], [nothing])
+
+    assert finding["severity"] == "high"
+    assert "not supported by this run" not in finding["summary"]

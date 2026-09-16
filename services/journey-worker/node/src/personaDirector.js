@@ -35,7 +35,8 @@ const { AdherenceGate } = require("./adherence");
 const { BehaviorController } = require("./behavior");
 const { browsingFaculty } = require("./faculty");
 const { PersonaMemoryBank } = require("./memoryBank");
-const { PerceptionClient, intoCaptureSpace, lookAtPage, motionFramesFrom } = require("./perception");
+const { PerceptionClient, frameImage, intoCaptureSpace, lookAtPage,
+  motionFramesFrom } = require("./perception");
 
 // How many times a measurement of the page is worth attempting.
 //
@@ -53,7 +54,7 @@ const CAPTURE_BACKOFF_MS = 600;
 const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
 const { holdRevealKeeper, releaseRevealKeeper, revealOnce } = require("./revealKeeper");
-const { recentFrames } = require("./viewportStream");
+const { latestFrame, recentFrames } = require("./viewportStream");
 
 const DEFAULT_MAX_STEPS = 40;
 
@@ -208,7 +209,7 @@ class PersonaDirector {
    */
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
     scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
-    frames = recentFrames, faculty, gate, memory } = {}) {
+    frames = recentFrames, frame = latestFrame, faculty, gate, memory } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -222,6 +223,7 @@ class PersonaDirector {
     this.perception = perception;
     this.walk = walk;
     this.frames = frames;
+    this.frame = frame;
     // What this person has already been told about themselves, kept across runs.
     // Every judged action goes in; recurring criticism is consolidated into
     // standing lessons that reach the next step through the faculty.
@@ -372,6 +374,17 @@ class PersonaDirector {
         await recorder.record("persona.perception",
           `looked at ${perception.counts.fixated} of ${perception.counts.elements} things`, {
             scan: perception.scan, eyes: perception.eyes, counts: perception.counts,
+            // Which picture this was measured on. The viewport frame is what the
+            // person is looking at; the page screenshot is the top of the
+            // document, which is the same thing only at the top of a page.
+            capturedFrom: seen.capturedFrom,
+            // What this capture measured that a claim about the page can be
+            // tested against: how much of it did not resolve, how many elements
+            // ran past its edge, and how small the smallest type on it is. The
+            // vision critique reads the same picture and says "the cards are cut
+            // off", "the text is too small" and "there are empty sections"; each
+            // of those is a statement about one of these numbers.
+            capture: perception.capture,
             // How many attempts this measurement took. A step that resolved
             // first time and a step that resolved on the third are the same
             // reading of the page and different readings of the machine, and
@@ -846,8 +859,23 @@ class PersonaDirector {
           + "the boxes and the picture)"
         : "the page moved under the walk");
     }
+    // Photograph what this person is looking at, not the top of the document.
+    //
+    // agent-browser's screenshot draws the page at its document position: a page
+    // standing at 112 comes back with 112 rows of blank above its content, and a
+    // page standing at 600 comes back showing document rows 0 to 577 -- none of
+    // which the person can see. Translating the boxes lines them up with that
+    // picture, and at 600 it lines them up with nothing: eleven of cycle 43's
+    // forty-five captures measured elements and found none of them in frame.
+    //
+    // The screencast frame is the compositor's presented viewport -- literally
+    // what a live viewer watching this run sees -- and it was already arriving,
+    // for the motion map, on 44 of those 45 steps. It is in viewport coordinates,
+    // because that is what a viewport is, so its boxes need no moving.
+    const presented = this.frame();
+    const shown = presented ? frameImage(presented) : "";
     const perception = await this.perception.perceive({
-      screenshotBase64: seen.screenshotBase64,
+      screenshotBase64: shown || seen.screenshotBase64,
       // In the capture's coordinates. The walk measures against the viewport,
       // because that is what getBoundingClientRect returns; the capture draws the
       // page at its document position inside a viewport-sized frame, so a page
@@ -864,7 +892,10 @@ class PersonaDirector {
       //
       // Translated here rather than in the walk: these boxes have other readers,
       // and the capture is the only image whose coordinates this is known to be.
-      elements: intoCaptureSpace(seen.elements, seen.scrollY),
+      // A frame is the viewport, so its boxes are already where they belong. The
+      // screenshot is the document, so theirs have to be moved by how far down it
+      // the viewport is standing.
+      elements: shown ? seen.elements : intoCaptureSpace(seen.elements, seen.scrollY),
       abilities: this.abilities,
       behavior: this.profile.behavior,
       motionFrames: motionFramesFrom(this.frames()),
@@ -914,10 +945,12 @@ class PersonaDirector {
     // someone looked at a capture we trust and took nothing in, which is the
     // strongest eyesight finding this system makes. Asking again would only
     // replace it with itself.
+    const capturedFrom = shown ? "viewport frame" : "page screenshot";
     if (!perception.observation) {
-      return { again: false, result: { observation: "You cannot make out anything here.", perception } };
+      return { again: false,
+        result: { observation: "You cannot make out anything here.", perception, capturedFrom } };
     }
-    return { again: false, result: { observation: perception.observation, perception } };
+    return { again: false, result: { observation: perception.observation, perception, capturedFrom } };
   }
 
   /**

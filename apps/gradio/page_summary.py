@@ -321,3 +321,38 @@ def tasks_that_invent_the_site(tasks: list[str], outline: dict) -> dict[str, lis
         if unfounded:
             found[task] = unfounded
     return found
+
+
+def places_on_the_page(outline: dict) -> list[str]:
+    """The names a task is allowed to use, taken off the page itself.
+
+    Navigation labels, headings and calls to action: the things a visitor can
+    point at and say "that one". Returned as a closed list, so a task can be
+    asked to pick from it rather than asked not to invent -- which is the
+    difference between a constraint and a request.
+
+    Instruction-shaped text is dropped here for the same reason it is dropped
+    from the prompt block: these strings came off somebody else's page.
+    """
+    if not outline:
+        return []
+    names: list[str] = []
+    seen: set[str] = set()
+
+    def offer(value) -> None:
+        text = " ".join(str(value or "").split())
+        if not text or len(text) > 80 or _INSTRUCTION_SHAPED.search(text):
+            return
+        key = text.casefold()
+        if key in seen:
+            return
+        seen.add(key)
+        names.append(text)
+
+    for item in outline.get("navigation") or []:
+        offer(item.get("text") if isinstance(item, dict) else item)
+    for item in outline.get("headings") or []:
+        offer(item)
+    for item in outline.get("buttons") or []:
+        offer(item)
+    return names

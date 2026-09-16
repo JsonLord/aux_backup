@@ -108,6 +108,18 @@ def _outside_capture(box: dict, width: int, height: int) -> bool:
             or top + float(box.get("height", 0)) > height)
 
 
+def _scaled(element: dict, scale: float) -> dict:
+    """One element's box, in the capture's pixels rather than the page's."""
+    box = element.get("box") or element.get("boundingBox") or {}
+    if not box:
+        return element
+    return {**element, "box": {**box,
+                               "x": float(box.get("x", 0)) * scale,
+                               "y": float(box.get("y", 0)) * scale,
+                               "width": float(box.get("width", 0)) * scale,
+                               "height": float(box.get("height", 0)) * scale}}
+
+
 def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None = None,
              behavior: dict | None = None, motion_frames: list[str] | None = None,
              viewport: dict | None = None, return_seen_image: bool = False,
@@ -136,8 +148,28 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
     size = (int((viewport or {}).get("width") or page.width),
             int((viewport or {}).get("height") or min(page.height, 900)))
 
+    # Boxes arrive in CSS pixels. A capture need not be: a screencast frame is
+    # whatever size the compositor is presenting, and measuring a CSS-pixel box
+    # against an image at another scale crops the wrong pixels -- silently, and
+    # with the same symptom as every other misalignment, a region reported to
+    # hold something and measuring flat.
+    #
+    # The viewport is the bridge: it is the same page in the same CSS pixels the
+    # boxes use, so the image's width over the viewport's width is the scale, and
+    # it is 1 whenever the capture is already at CSS scale.
+    scale = (page.width / size[0]) if size[0] else 1.0
+    if abs(scale - 1.0) > 0.01:
+        elements = [_scaled(element, scale) for element in elements]
+
     candidates: list[dict] = []
     not_perceived: list[dict] = []
+    # Measurements a claim about this page can be tested against. The vision
+    # critique reads the same capture and says things like "the cards are cut
+    # off", "the body text is too small to read" and "there are empty sections";
+    # each is a statement about something measured right here, and until now none
+    # of the three numbers left this function.
+    clipped_count = 0
+    smallest_font = 0.0
     for element in elements:
         box = element.get("box") or element.get("boundingBox") or {}
         if not box:
@@ -158,6 +190,10 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         # when it is legible; what it can never do is carry a claim about the
         # page, because the element was not the thing measured.
         clipped = _outside_capture(box, page.width, page.height)
+        clipped_count += 1 if clipped else 0
+        font_size = float(element.get("fontPx") or 0)
+        if font_size and (not smallest_font or font_size < smallest_font):
+            smallest_font = font_size
         # Size and acuity together, not contrast alone. Somebody with poor
         # eyesight reads a large headline on a page whose body copy is invisible
         # to them, and a flat contrast threshold cannot tell those apart.
@@ -244,6 +280,11 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
         # not. `illegibleShare` is reported either way so the judgement can be
         # checked rather than taken.
         "capture": {"trustworthy": trustworthy, "measured": measured,
+                    # What a claim about this page can be checked against: how
+                    # many elements ran past the edge of the capture, and how
+                    # small the smallest type on it actually is.
+                    "clipped": clipped_count,
+                    "smallestFontPx": round(smallest_font, 1),
                     "illegibleShare": round(illegible_share, 4),
                     "blankShare": round(blank_share, 4),
                     "unresolvedShare": round(unresolved_share, 4),

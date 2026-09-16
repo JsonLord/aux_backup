@@ -471,13 +471,28 @@ def generate_tasks(theme, customer_profile, url, outline=None):
     # Well-written tasks for a site that does not exist.
     if outline is None:
         outline = page_outline_for_tasks(url)
+    from apps.gradio.page_summary import places_on_the_page
+    # The names on this page, as a closed list. Asking a model not to invent is a
+    # request, and it was refused: against a real target the instruction alone
+    # still produced "Navigate to the 'Productivity for AEC' section" for a site
+    # whose navigation is Home / How it works / Install / Research / Pricing. So
+    # each task now has to name which of these it is about, chosen from the list,
+    # and a choice that is not on the list is not a task this function returns --
+    # a shape the answer cannot violate rather than an instruction it can ignore.
+    allowed = places_on_the_page(outline) if outline else []
     if outline:
         from apps.gradio.page_summary import outline_as_prompt_block
+        choices = "\n".join(f"      {index + 1}. {name}" for index, name in enumerate(allowed))
         page_block = ("\n" + outline_as_prompt_block(outline) + "\n\n"
                       "    Every task must refer to sections, links, buttons or content that appear above. "
                       "Do not invent navigation, product names, or page sections that are not listed. "
                       "If the page does not offer something the persona wants (pricing, contact, a demo), "
-                      "write the task as looking for it and finding out whether it is there.\n")
+                      "write the task as looking for it and finding out whether it is there.\n"
+                      + ("\n    These are the only places on this page a task may name:\n"
+                         + choices
+                         + "\n\n    Give each task a \"refersTo\" field holding one of those names, copied "
+                           "exactly. A task that goes looking for something this page may not have at all "
+                           "uses null instead. Any other value is rejected.\n" if allowed else ""))
     else:
         page_block = ("\n    The page could not be read before writing these tasks, so keep them "
                       "general: describe what the persona is trying to achieve rather than naming "
@@ -496,8 +511,8 @@ def generate_tasks(theme, customer_profile, url, outline=None):
 
     The tasks must be in sequential order and specific to the website {url}.
 
-    CRITICAL: Skip all internal monologue or thinking process. Return ONLY a JSON object with a "tasks" key containing a list of exactly 10 strings.
-    Example: {{"tasks": ["task 1", "task 2", ..., "task 10"]}}
+    CRITICAL: Skip all internal monologue or thinking process. Return ONLY a JSON object with a "tasks" key containing a list of exactly 10 entries.
+    Example: {{"tasks": [{{"task": "task 1", "refersTo": "Pricing"}}, {{"task": "task 2", "refersTo": null}}]}}
     Do not include any other text in your response.
     """
 
@@ -509,6 +524,37 @@ def generate_tasks(theme, customer_profile, url, outline=None):
     # Pricing, so a rejected batch now comes back with the invented names quoted
     # and one more attempt -- the same shape as the persona adherence gate.
     from apps.gradio.page_summary import tasks_that_invent_the_site
+
+    def chosen(entries):
+        """The task text from each entry, or None when one names a place off the list.
+
+        This is the constraint doing the work: the model picked from an
+        enumerated set, so checking the pick is a set membership test, not an
+        attempt to read the site's name out of a sentence. The prose scan below
+        still runs -- a task can name a place in its own words without putting it
+        in the field -- but it is the backstop now rather than the mechanism.
+        """
+        nonlocal correction
+        texts, wrong = [], []
+        for entry in entries or []:
+            if isinstance(entry, str):
+                texts.append(entry)
+                continue
+            if not isinstance(entry, dict):
+                continue
+            text = str(entry.get("task") or entry.get("text") or "").strip()
+            if not text:
+                continue
+            refers = entry.get("refersTo")
+            if refers is not None and allowed and str(refers).strip() not in allowed:
+                wrong.append(str(refers).strip())
+                continue
+            texts.append(text)
+        if wrong:
+            correction = ("\n    Your last attempt chose names that are not on the list: "
+                          + ", ".join(f'"{name}"' for name in sorted(set(wrong))[:6])
+                          + ". Copy one of the listed names exactly, or use null.\n")
+        return texts
 
     correction = ""
     # The least-invented batch seen so far. Ten real tasks with one invented
@@ -558,7 +604,7 @@ def generate_tasks(theme, customer_profile, url, outline=None):
                 if json_match:
                     try:
                         tasks_json = json.loads(json_match.group())
-                        tasks = tasks_json.get("tasks", [])
+                        tasks = chosen(tasks_json.get("tasks", []))
                         if tasks and isinstance(tasks, list) and len(tasks) >= 5:
                             accepted = accept(tasks[:10])
                             if accepted:
