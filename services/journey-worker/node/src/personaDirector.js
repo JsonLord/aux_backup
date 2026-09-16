@@ -770,20 +770,29 @@ class PersonaDirector {
     // service it feeds.
     // `standing` travels with the fallback: where the page was when the capture
     // was taken is what tells a caller whether it can repair the step itself.
+    let measured = [];
     const fellBack = (why, standing, attempts, refused, beneath, paintCheck) => ({
       observation: observationFrom(page.text, this.abilities), perception: null, why, standing,
-      captureAttempts: attempts, refused, beneath, paintCheck });
+      captureAttempts: attempts, refused, beneath, paintCheck, elements: measured });
     if (!this.perception?.available) return fellBack("no perception service configured", undefined, 0);
     let unresolved = { why: "the page was never measured", standing: undefined };
     let spent = 0;
     for (let attempt = 1; attempt <= CAPTURE_ATTEMPTS; attempt += 1) {
       spent = attempt;
       if (attempt > 1) await this.sleep(CAPTURE_BACKOFF_MS * (attempt - 1));
-      const tried = await this.lookOnce(page, tasks);
+      // Each source has its own way of being wrong, and they are not the same
+      // way. The frame is what the person is looking at, and it is whatever the
+      // compositor last emitted -- after a navigation that can be the blank first
+      // paint, with nothing since to replace it, and cycle 45 kept four such
+      // frames: 1280x577 of a single colour. The screenshot is never blank and is
+      // of the wrong part of the page once scrolled. So the second attempt asks
+      // the other one rather than asking the same one louder.
+      const tried = await this.lookOnce(page, tasks, { preferFrame: attempt !== 2 });
       // How many it took is part of the measurement: a step that needed three
       // goes and a step that needed one are different reports on the same page.
       if (!tried.again) return { ...tried.result, captureAttempts: attempt };
       unresolved = tried;
+      if (tried.elements?.length) measured = tried.elements;
       // One failure is not an open question: a window parked below the last
       // pixel of the document photographed blank space, and it will photograph
       // the same blank space however many times it is asked. It is handed back
@@ -801,13 +810,13 @@ class PersonaDirector {
   }
 
   /** One attempt at a measurement: either a reading, or the reason there is none. */
-  async lookOnce(page, tasks = []) {
+  async lookOnce(page, tasks = [], { preferFrame = true } = {}) {
     // The pixels travel with the refusal. A capture the service will not stand
     // behind is the one picture nobody has ever looked at -- five cycles were
     // spent reasoning about why these fail, from logs, while the image that
     // would have answered it was decoded, judged and thrown away every time.
     const again = (why, standing, refused, beneath, paintCheck) =>
-      ({ again: true, why, standing, refused, beneath, paintCheck });
+      ({ again: true, why, standing, refused, beneath, paintCheck, elements: seen?.elements });
     let seen;
     // Hold the page still for the walk and the capture. The reveal keeper scrolls
     // the whole document every 1500ms and a perception pass takes longer than
@@ -875,7 +884,7 @@ class PersonaDirector {
     // what a live viewer watching this run sees -- and it was already arriving,
     // for the motion map, on 44 of those 45 steps. It is in viewport coordinates,
     // because that is what a viewport is, so its boxes need no moving.
-    const presented = this.frame();
+    const presented = preferFrame ? this.frame() : null;
     const shown = presented ? frameImage(presented) : "";
     const perception = await this.perception.perceive({
       screenshotBase64: shown || seen.screenshotBase64,
@@ -953,11 +962,15 @@ class PersonaDirector {
     // strongest eyesight finding this system makes. Asking again would only
     // replace it with itself.
     const capturedFrom = shown ? "viewport frame" : "page screenshot";
+    // The boxes travel with the reading. They are what a hand is aimed from, and
+    // they are measured whether or not the picture of them can be trusted.
+    const measured = seen.elements;
     if (!perception.observation) {
-      return { again: false,
-        result: { observation: "You cannot make out anything here.", perception, capturedFrom } };
+      return { again: false, result: { observation: "You cannot make out anything here.",
+        perception, capturedFrom, elements: measured } };
     }
-    return { again: false, result: { observation: perception.observation, perception, capturedFrom } };
+    return { again: false, result: { observation: perception.observation, perception,
+      capturedFrom, elements: measured } };
   }
 
   /**
@@ -1024,7 +1037,12 @@ class PersonaDirector {
     // anyway, so the measurement was already in hand and simply never handed
     // over.
     const boxes = {};
-    for (const element of seenElements(seen?.perception)) {
+    // From the walk, not from perception. The walk measures every element on
+    // screen whether or not the capture of it can be trusted, and taking the
+    // boxes from perception meant that a refused capture also cost the hand its
+    // aim: 42 pointer events in cycle 45 and 34 of them with nothing to aim at,
+    // on a run with 72 refusals.
+    for (const element of seen?.elements || seenElements(seen?.perception)) {
       if (element?.selector && element.box) boxes[element.selector] = element.box;
     }
     return this.faculty.processAction(action,

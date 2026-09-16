@@ -1829,3 +1829,79 @@ test("with no frame the screenshot is used, and the boxes are moved to meet it",
   assert.equal(measured[0].elements[0].box.y, 640,
     "the screenshot is the document, so 40 in the viewport is 640 in it");
 });
+
+test("when one picture is refused the other one is asked, not the same one again", async () => {
+  // Each source is wrong in its own way. The frame is what the person is looking
+  // at and is whatever the compositor last emitted -- after a navigation that can
+  // be the blank first paint with nothing since to replace it, and cycle 45 kept
+  // four such frames, 1280x577 of a single colour. The screenshot is never blank
+  // and is of the wrong part of the page once scrolled.
+  const shown = [];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    frame: () => ({ data: "data:image/jpeg;base64,BLANKFRAME" }),
+    perception: {
+      available: true,
+      async perceive(request) {
+        shown.push(request.screenshotBase64);
+        if (request.screenshotBase64 === "BLANKFRAME") {
+          return { observation: "", eyes: {}, scan: {},
+            counts: { elements: 9, legible: 0, fixated: 0, notPerceived: 9, notLookedAt: 0 },
+            notPerceived: [], perceived: [], notLookedAt: [],
+            capture: { trustworthy: false, measured: 9, blankShare: 1,
+                       reason: "9 of 9 regions the tree says hold something had no ink in them" } };
+        }
+        return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+          counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+          capture: { trustworthy: true, measured: 1, reason: "" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 40, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "PAGESCREENSHOT",
+      refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.deepEqual(shown.slice(0, 2), ["BLANKFRAME", "PAGESCREENSHOT"],
+    "asking the same picture louder is not a second attempt");
+  const looked = recorder.events.find((event) => event.type === "persona.perception");
+  assert.equal(looked.data.capturedFrom, "page screenshot");
+});
+
+test("the hand is aimed even on a step whose capture was refused", async () => {
+  // The walk measures every element on screen whether or not the picture of it
+  // can be trusted. Taking the boxes from perception instead meant a refused
+  // capture also cost the hand its aim: cycle 45 recorded 42 pointer events and
+  // 34 of them had nothing to aim at, on a run with 72 refusals.
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [], frame: () => null,
+    perception: {
+      available: true,
+      async perceive() {
+        return { observation: "", eyes: {}, scan: {},
+          counts: { elements: 9, legible: 0, fixated: 0, notPerceived: 9, notLookedAt: 0 },
+          notPerceived: [], perceived: [], notLookedAt: [],
+          capture: { trustworthy: false, measured: 9, blankShare: 1,
+                     reason: "9 of 9 regions the tree says hold something had no ink in them" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 10, y: 40, width: 80, height: 24 } }],
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "PAGESCREENSHOT",
+      refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "CLICK", target: "e1" }, { type: "DONE", content: "done" }]),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const pointer = recorder.events.find((event) => event.type === "persona.pointer");
+  assert.ok(pointer, "the hand still had to go somewhere");
+  assert.deepEqual(pointer.data.box, { x: 10, y: 40, width: 80, height: 24 },
+    "and it is aimed from what the walk measured, not from a capture nobody trusts");
+});
