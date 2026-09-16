@@ -213,6 +213,38 @@ const WHAT_IS_UNDER_THE_PIXELS =
   + "   y: Math.round(scrollY), h: Math.round(innerHeight),"
   + "   doc: Math.round(document.documentElement.scrollHeight)}); })()";
 
+/**
+ * Put the boxes into the same coordinate space as the picture.
+ *
+ * The walk reports every box against the viewport, because that is what
+ * `getBoundingClientRect` measures. The capture does not: it draws the page at
+ * its document position inside a viewport-sized frame, so a page scrolled to 112
+ * comes back with 112 rows of blank above the content -- measured exactly, on a
+ * real refused capture: rows 0 to 111 are pure white and the first ink is at 112.
+ *
+ * So every crop was taken `scrollY` pixels too high, and the perception service
+ * was right every time it said the region had no ink in it. This is the whole of
+ * the blank captures, and it explains both kinds cycle 40 kept: at scrollY 112
+ * part of the page still overlaps its boxes and some regions resolve, while at
+ * 600 and 888 every box lands past the bottom of a 577px frame and the entire
+ * capture reads blank.
+ *
+ * It also explains why every run began clean and degraded from the first scroll,
+ * and why nothing aimed at reveals, frames or retries ever moved it: none of them
+ * was about coordinates.
+ *
+ * A box that lands past the bottom of the frame is genuinely not in the picture;
+ * the service already tells those apart from blank ones and drops them.
+ */
+function intoCaptureSpace(elements, scrollY) {
+  if (!scrollY) return elements || [];
+  return (elements || []).map((element) => {
+    const y = Number(element?.box?.y);
+    if (!Number.isFinite(y)) return element;
+    return { ...element, box: { ...element.box, y: Math.round(y + scrollY) } };
+  });
+}
+
 async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const file = capture ? path.join(os.tmpdir(), `perception-${process.pid}-${Date.now()}.png`) : "";
   const commands = capture
@@ -424,5 +456,5 @@ class PerceptionClient {
   }
 }
 
-module.exports = { PerceptionClient, SCROLL_AFTER, WALK, batchResults, linkRefs, lookAtPage,
+module.exports = { PerceptionClient, SCROLL_AFTER, WALK, batchResults, intoCaptureSpace, linkRefs, lookAtPage,
   motionFramesFrom, pageStanding, scrollNumber, scrollValue };

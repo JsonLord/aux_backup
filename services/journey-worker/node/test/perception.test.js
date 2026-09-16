@@ -10,7 +10,8 @@ const test = require("node:test");
 const assert = require("node:assert/strict");
 
 const {
-  PerceptionClient, WALK, batchResults, linkRefs, lookAtPage, motionFramesFrom, scrollNumber,
+  PerceptionClient, WALK, batchResults, intoCaptureSpace, linkRefs, lookAtPage, motionFramesFrom,
+  scrollNumber,
   scrollValue,
   pageStanding} = require("../src/perception");
 
@@ -316,4 +317,24 @@ test("the walk reports whether the page had painted", async () => {
   assert.equal((await lookAtPage(async () => capturedAt(0, "0", "no frame within 1000ms"))).paintCheck,
     "no frame within 1000ms");
   assert.equal((await lookAtPage(async () => capturedAt(0, "0"))).paintCheck, "unavailable");
+});
+
+test("the boxes are put into the capture's coordinates, not the viewport's", () => {
+  // The walk measures against the viewport, because that is what
+  // getBoundingClientRect returns. The capture draws the page at its document
+  // position inside a viewport-sized frame: a real refused capture taken at
+  // scrollY 112 has rows 0 to 111 pure white and its first ink at row 112. So
+  // every crop was taken scrollY pixels too high, and every "no ink in this
+  // region" was correct about a region nobody meant to measure.
+  const walked = [{ selector: "e1", box: { x: 320, y: 55, width: 640, height: 128 } },
+                  { selector: "e2", box: { x: 621, y: 489, width: 87, height: 23 } }];
+  assert.deepEqual(intoCaptureSpace(walked, 112).map((item) => item.box.y), [167, 601]);
+  // At the top of a page the two spaces are the same, which is why every run
+  // began clean and degraded from its first scroll.
+  assert.deepEqual(intoCaptureSpace(walked, 0), walked);
+  // Everything else about a box is left alone.
+  assert.equal(intoCaptureSpace(walked, 112)[0].box.x, 320);
+  assert.equal(intoCaptureSpace(walked, 112)[0].box.height, 128);
+  // A box the walk could not measure is passed through rather than invented.
+  assert.deepEqual(intoCaptureSpace([{ selector: "e3" }], 112), [{ selector: "e3" }]);
 });

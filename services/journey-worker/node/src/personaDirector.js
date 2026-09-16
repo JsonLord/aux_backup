@@ -35,7 +35,7 @@ const { AdherenceGate } = require("./adherence");
 const { BehaviorController } = require("./behavior");
 const { browsingFaculty } = require("./faculty");
 const { PersonaMemoryBank } = require("./memoryBank");
-const { PerceptionClient, lookAtPage, motionFramesFrom } = require("./perception");
+const { PerceptionClient, intoCaptureSpace, lookAtPage, motionFramesFrom } = require("./perception");
 
 // How many times a measurement of the page is worth attempting.
 //
@@ -848,7 +848,23 @@ class PersonaDirector {
     }
     const perception = await this.perception.perceive({
       screenshotBase64: seen.screenshotBase64,
-      elements: seen.elements,
+      // In the capture's coordinates. The walk measures against the viewport,
+      // because that is what getBoundingClientRect returns; the capture draws the
+      // page at its document position inside a viewport-sized frame, so a page
+      // standing at 112 comes back with 112 rows of blank above its content --
+      // measured exactly, on a kept refusal: rows 0 to 111 pure white, first ink
+      // at 112. Every crop was taken scrollY pixels too high, and the service was
+      // right every time it said the region had no ink in it.
+      //
+      // Both kinds of refusal cycle 40 kept follow from this: at 112 part of the
+      // page still overlaps its boxes and some regions resolve, while at 600 and
+      // 888 every box lands past the bottom of a 577px frame and the whole
+      // capture reads blank. So does the shape every run had -- clean at the top
+      // of a page, degrading from the first scroll and never recovering.
+      //
+      // Translated here rather than in the walk: these boxes have other readers,
+      // and the capture is the only image whose coordinates this is known to be.
+      elements: intoCaptureSpace(seen.elements, seen.scrollY),
       abilities: this.abilities,
       behavior: this.profile.behavior,
       motionFrames: motionFramesFrom(this.frames()),

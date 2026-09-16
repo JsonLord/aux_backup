@@ -3679,3 +3679,47 @@ of the log. When a measurement disagrees with itself, the next move is to
 instrument the disagreement, not to theorise across it -- and instrumenting it
 means capturing state at the moment of the failure, in the same breath as the
 failure, where nothing can drift between the two.
+
+
+### 55.6g Cycle 42: the boxes and the pixels were never in the same space
+
+The frame gate of §55.6f did nothing: 68 refusals, every one reporting
+`paint: "painted"`. A frame had been committed, the DOM showed visible content,
+and the capture was still refused. And the counts across cycles 37 to 42 -- 64,
+68, 76, 48, 68 -- are noise around a flat line, so cycle 41's 48 was variance and
+reading it as the probe working was one more theory fitted to one more number.
+
+What ended it took no cycle at all. The refused captures were already on disk, so
+the question could be asked of them directly: crop one at the boxes the browser
+itself reported at that step.
+
+- Two of three regions had ink. The third, `/ user / year` at viewport y 489, was
+  white -- extremes 252 to 255.
+- The perception service, run locally on that same image with those same boxes,
+  called two legible and the third blank. **It was right.**
+- The top of the capture is pure white for exactly 112 rows, and the first ink is
+  at row 112. The page was standing at **scrollY 112**.
+
+The walk measures every box with `getBoundingClientRect`, against the viewport.
+The capture draws the page at its document position inside a viewport-sized
+frame. So every crop was taken `scrollY` pixels too high, and every "this region
+has no ink in it" was a true statement about a region nobody meant to measure.
+Translating the boxes by `scrollY` and re-running the service on the same picture
+takes `blankShare` from 0.33 to **0.0**, with the one box that falls past the
+frame correctly dropped as outside the capture rather than reported blank.
+
+Everything follows from it. The two kinds of refusal cycle 40 kept: at 112 part of
+the page still overlaps its boxes and some regions resolve; at 600 and 888 every
+box lands past the bottom of a 577px frame and the entire capture reads blank. The
+shape every single run had -- clean at the top of a page, degrading from the first
+scroll, never recovering. Why three personas looked worse than one: more steps,
+more scrolling. And why reveals, frames, retries and capacity all came to nothing:
+not one of them was about coordinates.
+
+**The lesson.** Six cycles, four wrong root causes, and the disproof of all four
+was a crop of an image that had been sitting on disk since cycle 40. Every theory
+was tested by deploying it and reading a count; none was tested against the
+artifact, which was free, immediate and decisive. A hypothesis that can be checked
+against evidence already in hand must never be checked by shipping it -- and a
+metric noisy enough to move 48 to 76 on its own cannot confirm anything either
+way. The cheapest experiment is the one where the data already exists.
