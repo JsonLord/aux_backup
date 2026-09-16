@@ -1775,7 +1775,7 @@ test("what the person is looking at is measured, not the top of the document", a
   const measured = [];
   const director = new PersonaDirector({
     profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
-    frame: () => ({ data: "data:image/jpeg;base64,VIEWPORTFRAME" }),
+    frame: () => ({ data: "data:image/jpeg;base64,VIEWPORTFRAME", receivedAt: Date.now() }),
     perception: {
       available: true,
       async perceive(request) {
@@ -1839,7 +1839,7 @@ test("when one picture is refused the other one is asked, not the same one again
   const shown = [];
   const director = new PersonaDirector({
     profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
-    frame: () => ({ data: "data:image/jpeg;base64,BLANKFRAME" }),
+    frame: () => ({ data: "data:image/jpeg;base64,BLANKFRAME", receivedAt: Date.now() }),
     perception: {
       available: true,
       async perceive(request) {
@@ -1904,4 +1904,39 @@ test("the hand is aimed even on a step whose capture was refused", async () => {
   assert.ok(pointer, "the hand still had to go somewhere");
   assert.deepEqual(pointer.data.box, { x: 10, y: 40, width: 80, height: 24 },
     "and it is aimed from what the walk measured, not from a capture nobody trusts");
+});
+
+test("a frame older than the measurement is not the measurement's frame", async () => {
+  // The screencast emits when the compositor produces a frame, and a settled page
+  // produces none -- so the newest frame can be the blank first paint after a
+  // navigation with nothing since to replace it. Cycle 45 measured four of those:
+  // 1280x577 of a single colour, on a page elementFromPoint showed fully drawn.
+  // The walk nudges the page a pixel to make a frame happen, so a frame older
+  // than the walk is one from before that nudge.
+  const shown = [];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
+    frame: () => ({ data: "data:image/jpeg;base64,STALEFRAME",
+                    receivedAt: Date.now() - 60_000 }),
+    perception: {
+      available: true,
+      async perceive(request) {
+        shown.push(request.screenshotBase64);
+        return { observation: "[e1] link Pricing", eyes: {}, scan: {},
+          counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+          notPerceived: [], perceived: [{ selector: "e1", name: "Pricing" }], notLookedAt: [],
+          capture: { trustworthy: true, measured: 1, reason: "" } };
+      },
+    },
+    walk: async () => ({
+      elements: [{ selector: "e1", role: "link", name: "Pricing",
+                   box: { x: 0, y: 40, width: 9, height: 2 } }],
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "PAGESCREENSHOT",
+      refs: {}, snapshot: "", scrollY: 0 }),
+    actor: scriptedActor([{ type: "DONE", content: "done" }]),
+  });
+  await run(director, fakeBrowser(), fakeRecorder());
+
+  assert.equal(shown[0], "PAGESCREENSHOT",
+    "a frame that cannot be shown to be fresh is not used at all");
 });

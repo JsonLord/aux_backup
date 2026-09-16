@@ -95,6 +95,13 @@ UNTRUSTWORTHY_ILLEGIBLE_SHARE = 0.5
 # 50%.
 MIN_ELEMENTS_TO_JUDGE = 6
 
+# Past this share of what the tree says is on screen falling outside the picture,
+# the picture is of a different part of the page. Half, because a viewport that
+# has moved on by less than its own height still shows some of what the boxes
+# describe, and one that has moved on by more shows almost none of it -- there is
+# no middle where a capture is half of somewhere else and still worth measuring.
+MOSTLY_OUTSIDE_THE_CAPTURE = 0.5
+
 def _outside_capture(box: dict, width: int, height: int) -> bool:
     """Whether any part of this box falls outside the capture.
 
@@ -170,6 +177,7 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
     # of the three numbers left this function.
     clipped_count = 0
     smallest_font = 0.0
+    supplied = len(elements)
     for element in elements:
         box = element.get("box") or element.get("boundingBox") or {}
         if not box:
@@ -249,9 +257,24 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
     # capture resolved.
     unresolved_share = (len(not_perceived) / measured) if measured else 0.0
     enough = measured >= MIN_ELEMENTS_TO_JUDGE
-    trustworthy = not (enough and (unresolved_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
-                                   or blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
-                                   or illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE))
+    # A picture of somewhere else is not a clean picture.
+    #
+    # Everything above asks how much of what was measured resolved, and every one
+    # of those questions is vacuous when nothing was measured: an element that
+    # falls outside the capture is dropped from both lists, so a capture of the
+    # wrong part of the page measures nothing, fails `enough`, and comes back
+    # trustworthy. A live run took that route 21 times in one cycle -- 31 elements
+    # in, none of them in frame, no refusal -- and told three personas they could
+    # see nothing on a page that was fully drawn.
+    #
+    # The share is of what the tree said was on screen, not of what survived,
+    # because the whole failure is things not surviving.
+    outside_share = (clipped_count / supplied) if supplied else 0.0
+    of_somewhere_else = outside_share > MOSTLY_OUTSIDE_THE_CAPTURE
+    trustworthy = not (of_somewhere_else
+                       or (enough and (unresolved_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
+                                       or blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
+                                       or illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE)))
 
     fixations = scan(candidates, size, scanner)
     # Matched by selector, not by object identity: scan() returns a copy of each
@@ -288,8 +311,13 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                     "illegibleShare": round(illegible_share, 4),
                     "blankShare": round(blank_share, 4),
                     "unresolvedShare": round(unresolved_share, 4),
+                    "outsideShare": round(outside_share, 4),
                     "reason": "" if trustworthy else
-                              (f"{blank} of {measured} regions the tree says hold something had no "
+                              (f"{clipped_count} of {supplied} regions the tree says are on screen "
+                               f"fell outside the picture, so it is a capture of a different part "
+                               f"of the page"
+                               if of_somewhere_else else
+                               f"{blank} of {measured} regions the tree says hold something had no "
                                f"ink in them at all, which reads as boxes and pixels taken from "
                                f"different states of the page"
                                if blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE else

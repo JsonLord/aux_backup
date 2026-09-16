@@ -797,3 +797,65 @@ def test_a_capture_reports_what_a_claim_about_the_page_can_be_checked_against():
 
     assert result["capture"]["clipped"] == 1, "the one that leaves the frame is counted"
     assert result["capture"]["smallestFontPx"] == 11.0, "and the page's own smallest type"
+
+
+def test_a_capture_of_a_different_part_of_the_page_is_not_a_clean_one():
+    """Every trust question above asks how much of what was measured resolved, and
+    all of them are vacuous when nothing was measured: an element outside the
+    capture is dropped from both lists, so a picture of the wrong part of the page
+    measures nothing, fails the minimum, and used to come back trustworthy. A live
+    run took that route 21 times in one cycle -- 31 elements in, none in frame, no
+    refusal -- and told three personas they could see nothing on a page that was
+    fully drawn."""
+    from PIL import Image
+    import base64, io as _io
+
+    image = Image.new("RGB", (1280, 577), (255, 255, 255))
+    buffer = _io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+
+    # Everything the tree says is on screen sits below the picture, which is what
+    # a screenshot of the document's top looks like once the person has scrolled.
+    below = [{"selector": f"e{index}", "role": "", "name": f"Row {index}",
+              "fontPx": 14, "fontWeight": 400,
+              "box": {"x": 10, "y": 900 + index * 30, "width": 200, "height": 24}}
+             for index in range(10)]
+
+    result = perceive(image_base64=encoded, elements=below,
+                      viewport={"width": 1280, "height": 577})
+
+    assert result["capture"]["trustworthy"] is False
+    assert "fell outside the picture" in result["capture"]["reason"]
+    assert result["capture"]["outsideShare"] == 1.0
+
+
+def test_a_capture_with_a_few_things_off_its_edge_is_still_a_capture():
+    """The guard must not swallow an ordinary page. Something at the bottom edge of
+    a viewport is half off it on most pages most of the time."""
+    from PIL import Image, ImageDraw
+    import base64, io as _io
+
+    image = Image.new("RGB", (1280, 577), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    # Glyphs, not bars: a solid rectangle has no internal contrast and is
+    # correctly judged unreadable, which would test a different guard than this.
+    for index in range(8):
+        draw.text((12, 42 + index * 40), f"Row {index} of the page", fill=(0, 0, 0))
+    draw.text((12, 562), "At the edge", fill=(0, 0, 0))
+    buffer = _io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+
+    elements = [{"selector": f"e{index}", "role": "", "name": f"Row {index}",
+                 "fontPx": 16, "fontWeight": 400,
+                 "box": {"x": 10, "y": 40 + index * 40, "width": 200, "height": 20}}
+                for index in range(8)]
+    elements.append({"selector": "e9", "role": "", "name": "At the edge", "fontPx": 16,
+                     "fontWeight": 400, "box": {"x": 10, "y": 560, "width": 200, "height": 40}})
+
+    result = perceive(image_base64=encoded, elements=elements,
+                      viewport={"width": 1280, "height": 577})
+
+    assert result["capture"]["trustworthy"] is True
+    assert result["capture"]["outsideShare"] < 0.5

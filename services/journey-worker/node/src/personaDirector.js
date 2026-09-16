@@ -824,6 +824,7 @@ class PersonaDirector {
     // different scroll positions -- which is how a live run came to report the
     // entire navigation bar as failing WCAG AA at 1:1 for someone with 0.95
     // acuity: the crops had landed on blank page.
+    const startedWalking = Date.now();
     this.hold();
     try {
       // Let the page finish showing itself before measuring it.
@@ -884,8 +885,13 @@ class PersonaDirector {
     // what a live viewer watching this run sees -- and it was already arriving,
     // for the motion map, on 44 of those 45 steps. It is in viewport coordinates,
     // because that is what a viewport is, so its boxes need no moving.
+    // Only a frame this measurement caused. The walk nudges the page a pixel to
+    // make the compositor commit one, so a frame older than the walk is a frame
+    // from before that nudge -- which is the stale blank one this is here to
+    // avoid. A frame that cannot be shown to be fresh is not used at all.
     const presented = preferFrame ? this.frame() : null;
-    const shown = presented ? frameImage(presented) : "";
+    const fresh = presented && Number(presented.receivedAt) >= startedWalking;
+    const shown = fresh ? frameImage(presented) : "";
     const perception = await this.perception.perceive({
       screenshotBase64: shown || seen.screenshotBase64,
       // In the capture's coordinates. The walk measures against the viewport,

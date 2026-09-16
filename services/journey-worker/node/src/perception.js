@@ -33,6 +33,21 @@ const REQUEST_TIMEOUT_MS = 20000;
 // and a link, and none at all to a paragraph -- and low-contrast body copy is
 // the single most common thing a person cannot read.
 const WALK = `(async () => {
+  // Ask the page to paint, then wait for the paint.
+  //
+  // The screencast emits a frame when the compositor produces one, and a page
+  // that has finished settling produces none -- so the newest frame can be the
+  // blank first paint after a navigation, with nothing since to replace it.
+  // Cycle 45 measured four such frames: 1280x577 of a single colour, on a page
+  // that elementFromPoint showed fully drawn.
+  //
+  // A pixel down and back is the smallest thing that makes a compositor commit a
+  // frame, and it leaves the page exactly where it found it -- which matters,
+  // because every box read below is relative to where the page is standing.
+  const restore = Math.round(scrollY);
+  scrollBy(0, 1);
+  scrollBy(0, -1);
+  scrollTo(0, restore);
   // Wait for the page to produce a frame before anything reads it.
   //
   // A picture is of what the compositor last painted, not of what the DOM says
