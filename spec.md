@@ -3723,3 +3723,55 @@ artifact, which was free, immediate and decisive. A hypothesis that can be check
 against evidence already in hand must never be checked by shipping it -- and a
 metric noisy enough to move 48 to 76 on its own cannot confirm anything either
 way. The cheapest experiment is the one where the data already exists.
+
+
+### 55.6h Cycles 44 to 47: the capture, and two metrics that lied
+
+Four things were built together -- the capture source, pointer travel between
+clicks, constrained task generation, and three more checks on the vision critique
+-- and testing them together is what exposed the rest.
+
+**The capture was of the wrong part of the page.** agent-browser's screenshot
+draws the page at its document position, so a persona standing at 600 is handed
+document rows 0 to 577. Translating the boxes lines them up with that picture;
+past the first screen it lines them up with nothing. The screencast frame is the
+compositor's presented viewport and had been arriving all along, used only for the
+motion map. Making it the capture is what let a run read `£200 / user / year`
+for the first time.
+
+**Building a feature found a dead one.** Pointer travel needed `aim()`, and
+`aim()` asks the driver for `getElementBox`, which the driver does not have: the
+call threw on every click of every run, the catch swallowed it, and it returned
+null before recording. 62 clicks, 62 silent nulls, no pointer in the record. The
+hand, the scatter and the miss had been modelled and never once run. The walk
+measures every box anyway; it was never handed over.
+
+**Two guards that passed by measuring less.** An element outside the capture is
+dropped from both lists, so a picture of the wrong part of the page measures
+nothing, fails the minimum needed to judge, and comes back trustworthy: 21
+captures of 31 elements with 0 legible, no refusal, three personas told they could
+see nothing about a page that was fully drawn. Every trust question asked how much
+of what was measured resolved, and all of them are vacuous when nothing was. The
+share is now of what the tree said was on screen.
+
+**And two metrics of mine that lied.**
+
+*A grep for `£` over raw JSON.* Some artifacts escape it as `\u00a3` and some do
+not, so the same report read as 165 mentions or as 0 depending on which encoder
+wrote it. Two cycles were reported here as price-reading regressions on that
+basis. They were not: the price has been read in every cycle since the capture
+changed.
+
+*A pattern for "does not state a price" over the whole report.* Every hit was one
+persona expectation -- "I expect to reach a pricing section with plan names and
+costs, or see that the page does not state a price" -- repeated through the
+timeline, the events and the narration. A person forming a hypothesis before
+acting was counted nine times as the report asserting the page has no price. There
+was never a contradiction.
+
+**The lesson.** §55.6g said to read the record rather than theorise across it.
+This adds the other half: a measurement of the record is itself a measurement, and
+it needs the same scepticism as the thing it measures. Both of these failed in the
+direction that made the system look worse, which is the luckier direction, and
+neither was caught by running it again -- only by reading the string the pattern
+had actually matched.
