@@ -3769,6 +3769,17 @@ timeline, the events and the narration. A person forming a hypothesis before
 acting was counted nine times as the report asserting the page has no price. There
 was never a contradiction.
 
+The first fix for that was to exclude the phrasing, and it promptly found four
+more "denials" in another cycle: "or confirm that the page does not show a clear
+price". Same shape, different words. The shape of a claim and a claim are not the
+same thing, and no amount of pattern is going to close that gap -- so the
+measurement now reads only the fields where the report speaks for itself (the
+summary, the pain points, the limitations, the impact analysis) and never the
+timeline or the narration, where every sentence belongs to a persona. That is
+§55.6h's own subject applied to the thing doing the measuring, and it is the same
+move as constraining task generation instead of checking it afterwards: name the
+set once rather than police the wording for ever.
+
 **The lesson.** §55.6g said to read the record rather than theorise across it.
 This adds the other half: a measurement of the record is itself a measurement, and
 it needs the same scepticism as the thing it measures. Both of these failed in the
