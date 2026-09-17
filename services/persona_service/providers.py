@@ -28,7 +28,14 @@ _UNREACHABLE = re.compile(
     r"|network is unreachable|connection refused|connection reset|connection aborted"
     r"|max retries exceeded|temporary failure in name resolution|timed out|timeout"
     r"|econnrefused|econnreset|enotfound|eai_again|etimedout|ehostunreach|enetunreach"
-    r"|apiconnectionerror|connection error",
+    r"|apiconnectionerror|connection error"
+    # A gateway that took the request and found nothing behind it to serve it.
+    # 502, 503 and 504 are not the model answering unhappily -- no model saw the
+    # question, so asking a different endpoint is not spending a second budget on
+    # the same failure, it is the first budget finding somewhere to be spent.
+    # Cycle 48 never started: four attempts, four 503s from one provider, and a
+    # configured fallback that was never tried because a 503 read as an answer.
+    r"|\b50[234] server error|service unavailable|bad gateway|gateway time-?out",
     re.I)
 
 
@@ -99,5 +106,12 @@ def why(error: BaseException | None) -> str:
 
 
 def unreachable(error: BaseException | None) -> bool:
-    """Nothing answered. Distinct from something answering unhappily."""
+    """No model answered. Distinct from a model answering unhappily.
+
+    The line is not whether bytes came back -- a 503 from a gateway is bytes --
+    but whether anything got as far as reading the question. A 400 or a 401 is a
+    verdict on what was asked and the next provider will reach the same one; a
+    dropped connection or a gateway with nothing behind it is not a verdict at
+    all.
+    """
     return bool(error) and bool(_UNREACHABLE.search(why(error)))

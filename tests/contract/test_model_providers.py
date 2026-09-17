@@ -149,3 +149,30 @@ def test_the_service_resolves_providers_in_exactly_one_place():
     assert not offenders, (
         "provider resolution belongs in providers.py only; a second copy is how "
         "cycle 28 failed:\n" + "\n".join(offenders))
+
+
+def test_a_gateway_with_nothing_behind_it_is_not_an_answer():
+    """Cycle 48 never started: four attempts, four 503s from one provider, and a
+    configured fallback that was never tried because a 503 read as the model
+    answering. It is not. No model saw the question, so asking a different
+    endpoint is not spending a second budget on the same failure -- it is the
+    first budget finding somewhere to be spent."""
+    from services.persona_service.providers import unreachable
+
+    for served_by_nobody in (
+            "503 Server Error: Service Unavailable for url: https://x/v1/chat/completions",
+            "502 Server Error: Bad Gateway for url: https://x/v1/chat/completions",
+            "504 Server Error: Gateway Timeout for url: https://x/v1/chat/completions"):
+        assert unreachable(RuntimeError(served_by_nobody)), served_by_nobody
+
+
+def test_a_verdict_on_the_request_still_stops_the_chain():
+    """The line is not whether bytes came back. A 400 or a 401 is a verdict on
+    what was asked, and the next provider will reach the same one."""
+    from services.persona_service.providers import unreachable
+
+    for answered_unhappily in (
+            "400 Client Error: Bad Request for url: https://x/v1/chat/completions",
+            "401 Client Error: Unauthorized for url: https://x/v1/chat/completions",
+            "422 Client Error: Unprocessable Entity for url: https://x/v1/chat/completions"):
+        assert not unreachable(RuntimeError(answered_unhappily)), answered_unhappily
