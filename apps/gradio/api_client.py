@@ -98,7 +98,11 @@ class ControlPlaneClient:
             if job["status"] in {"succeeded", "failed", "cancelled"}:
                 return job
             time.sleep(poll_interval)
-        raise TimeoutError(f"job {job_id} did not finish within {timeout}s")
+        # Said as what it is: the wait ended, not the work. The job is still
+        # running on the control plane and will still write its artifacts, so a
+        # caller that gives up has abandoned a result rather than lost one.
+        raise TimeoutError(f"job {job_id} did not finish within {timeout}s -- it may still be "
+                           f"running; its artifacts will appear against this job id if it does")
 
     def get_artifact_content(self, artifact_id):
         response = requests.get(f"{self.base_url}/v1/artifacts/{artifact_id}/content", headers=self.headers, timeout=30)

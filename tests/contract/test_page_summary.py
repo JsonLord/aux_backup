@@ -157,3 +157,28 @@ def test_the_prompt_tells_the_model_not_to_invent_what_it_cannot_see(monkeypatch
     captured.clear()
     app.generate_tasks("theme", "profile", "https://example.test/", outline={})
     assert "keep them general" in captured["prompt"]
+
+
+def test_a_cohort_is_given_as_long_as_a_cohort_takes():
+    """The UI waited 300s for a job that runs its personas one after another at
+    855 to 1159 seconds each, and reported "Control-plane error: job ... did not
+    finish within 300s" five minutes into a run that was working -- with its
+    report written to artifacts nobody went back for."""
+    import app
+
+    assert app.analysis_timeout(3) > 3 * 1800, "three runs, plus what comes after them"
+    assert app.analysis_timeout(1) < app.analysis_timeout(3), "more people, more time"
+    # A missing or nonsense count is one person's worth, never zero.
+    assert app.analysis_timeout(0) == app.analysis_timeout(1)
+    assert app.analysis_timeout(None) == app.analysis_timeout(1)
+
+
+def test_the_cohort_budget_follows_the_run_budget(monkeypatch):
+    """Raising the per-run budget for a slow target has to raise the wait for the
+    cohort too, or the ceiling ends up under the floor."""
+    import app
+
+    monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "3600")
+    assert app.analysis_timeout(2) > 2 * 3600
+    monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "not a number")
+    assert app.analysis_timeout(1) > 1800, "a setting nobody can parse falls back, it does not zero"

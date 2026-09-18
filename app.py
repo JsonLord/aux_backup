@@ -76,6 +76,30 @@ try:
         TASK_RETRY_WAIT_SECONDS = 3.0
 except (TypeError, ValueError):
     TASK_RETRY_WAIT_SECONDS = 3.0
+
+
+def analysis_timeout(personas: int) -> float:
+    """How long a cohort is given before it is called stuck.
+
+    A combined_test runs its personas one after another, and a live run of a
+    two-task journey takes 855 to 1159 seconds each -- three personas is the
+    better part of an hour. The api_client helper defaults to 300s, which is
+    right for the jobs that answer in seconds, and this caller took the default:
+    a cohort that was working normally came back to the UI as "Control-plane
+    error: job ... did not finish within 300s", five minutes in, with the run
+    still going behind it and its report written to artifacts nobody went back
+    for.
+
+    Derived from the same per-run budget the worker uses, so raising
+    JOURNEY_RUN_TIMEOUT for a slow target raises both ends together rather than
+    moving the ceiling under the floor. The extra five minutes is the report,
+    the slides and the vision pass, which run once after the last persona.
+    """
+    try:
+        per_persona = float(os.environ.get("JOURNEY_RUN_TIMEOUT", "1800"))
+    except (TypeError, ValueError):
+        per_persona = 1800.0
+    return per_persona * max(1, int(personas or 1)) + 300.0
 # Live TinyTroupe generation is a real, model-backed call per persona and can take
 # up to ~10 minutes even after the speed tuning in services/persona_service --
 # capped here to keep a single on-Space run within a reasonable, honestly-labeled
@@ -757,7 +781,8 @@ def start_and_monitor_sessions(personas, tasks, url, allow_irreversible_actions,
             "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": url,
                         "browserSafety": {"allowIrreversibleActions": bool(allow_irreversible_actions)}}})
         yield f"Analysis queued: {job['job_id']}", "", session["session_id"], job["job_id"]
-        job = session_client.wait_for_job(job["job_id"])
+        job = session_client.wait_for_job(job["job_id"],
+                                          timeout=analysis_timeout(len(persona_artifacts)))
         if job["status"] != "succeeded":
             yield f"Analysis failed: {job.get('error')}", "", session["session_id"], job["job_id"]
             return
