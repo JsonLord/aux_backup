@@ -116,25 +116,31 @@ test("an HTTP error is a failure, not a body to believe", async () => {
   assert.match(client.lastError, /HTTP 500/);
 });
 
+
 /**
- * A batch whose eval read-back says where the page ended up. The real envelope
- * puts the eval's value under a nested `result`; `after` of undefined omits the
- * read-back entirely, which is what a build that does not answer looks like.
+ * The batch as it really comes back, in order.
+ *
+ * snapshot, the walk, the shift that brings the viewport into the rows the camera
+ * photographs, the picture, the shift undone, the scroll read-back, and what the
+ * DOM says is under the pixels. Written out rather than counted, because these
+ * are read by position and a fixture that models three of seven will pass a test
+ * that the real thing fails.
  */
-function capturedAt(scrollBefore, after, frame) {
-  const results = [
+function wholeBatch({ scrollBefore = 0, after, frame, shifted = "0", beneath } = {}) {
+  const evaluation = (value) => ({ command: ["eval"], error: null, success: true,
+    result: { result: value } });
+  return { ok: true, stdout: JSON.stringify([
     { command: ["snapshot"], error: null, success: true,
       result: { refs: { e1: { name: "Home", role: "link" } }, snapshot: "- link \"Home\" [ref=e1]" } },
-    { command: ["eval"], error: null, success: true,
-      result: { result: JSON.stringify({ frame, viewport: { width: 1280, height: 577 }, scrollY: scrollBefore,
-        elements: [{ kind: "control", tag: "a", role: "", name: "Home", x: 483, y: 20,
-          width: 43, height: 24, fontPx: 15, fontWeight: 400 }] }) } },
+    evaluation(JSON.stringify({ frame, viewport: { width: 1280, height: 577 }, scrollY: scrollBefore,
+      elements: [{ kind: "control", tag: "a", role: "", name: "Home", x: 483, y: 20,
+        width: 43, height: 24, fontPx: 15, fontWeight: 400 }] })),
+    evaluation(shifted),
     { command: ["screenshot"], error: null, success: true, result: {} },
-  ];
-  if (after !== undefined) {
-    results.push({ command: ["eval"], error: null, success: true, result: { result: after } });
-  }
-  return { ok: true, stdout: JSON.stringify(results) };
+    evaluation("restored"),
+    evaluation(after),
+    evaluation(beneath === undefined ? undefined : beneath),
+  ]) };
 }
 
 // Every box the walk reports is in viewport coordinates. A scroll between the
@@ -146,7 +152,7 @@ function capturedAt(scrollBefore, after, frame) {
 // because the crops had landed on blank page. The scroller was the reveal keeper,
 // firing every 1500ms through a pass that takes longer than that.
 test("a capture taken while the page moved is marked, not measured", async () => {
-  const seen = await lookAtPage(async () => capturedAt(0, "2400"));
+  const seen = await lookAtPage(async () => wholeBatch({ scrollBefore: 0, after: "2400" }));
 
   assert.equal(seen.moved, true);
   assert.equal(seen.scrollCheck, "moved");
@@ -157,7 +163,7 @@ test("a capture taken while the page moved is marked, not measured", async () =>
 });
 
 test("a capture taken on a still page is cleared to measure", async () => {
-  const seen = await lookAtPage(async () => capturedAt(2400, "2400"));
+  const seen = await lookAtPage(async () => wholeBatch({ scrollBefore: 2400, after: "2400" }));
 
   assert.equal(seen.moved, false);
   assert.equal(seen.scrollCheck, "same");
@@ -170,7 +176,7 @@ test("a read-back that cannot be parsed loses the guard, not the feature", async
   // shape switch perception off for a whole run -- a worse failure than the one
   // being guarded against, and a far quieter one.
   for (const answer of [undefined, "", "not a number", "{}"]) {
-    const seen = await lookAtPage(async () => capturedAt(0, answer));
+    const seen = await lookAtPage(async () => wholeBatch({ after: answer }));
     assert.equal(seen.moved, false, `answer ${JSON.stringify(answer)} must not block the capture`);
     assert.equal(seen.scrollCheck, "unavailable");
     assert.equal(seen.scrolledTo, null);
@@ -179,15 +185,19 @@ test("a read-back that cannot be parsed loses the guard, not the feature", async
 
 test("the scroll read-back is asked for in the same batch as the capture", async () => {
   let asked = null;
-  await lookAtPage(async (commands) => { asked = commands; return capturedAt(0, "0"); });
+  await lookAtPage(async (commands) => { asked = commands; return wholeBatch({ after: "0" }); });
 
   // The scroll read-back and the probe for what the DOM says is under the pixels
   // both follow the capture, in the same batch: a question asked afterwards is a
   // question about a different moment of the page.
   assert.deepEqual(asked.map((item) => item[0]),
-    ["snapshot", "eval", "screenshot", "eval", "eval"]);
-  assert.ok(asked.findIndex((item) => item[0] === "screenshot")
-    < asked.length - 1, "the read-back must come after the capture");
+    ["snapshot", "eval", "eval", "screenshot", "eval", "eval", "eval"]);
+  // The shift that brings the viewport into the rows the camera photographs is
+  // put back in the same batch, before anything else can see the page moved.
+  const shot = asked.findIndex((item) => item[0] === "screenshot");
+  assert.match(String(asked[shot - 1][1]), /translateY/, "shifted just before the picture");
+  assert.match(String(asked[shot + 1][1]), /data-aux-was/, "and put back just after it");
+  assert.ok(shot < asked.length - 1, "the read-back must come after the capture");
 });
 
 test("the scroll read-back survives the envelope layers agent-browser adds", () => {
@@ -250,7 +260,9 @@ test("a page still building itself is not photographed as if it were finished", 
     stdout: JSON.stringify([
       { command: ["snapshot"], result: { snapshot: "", refs: {} } },
       { command: ["eval"], result: walkResult(docAtWalk) },
+      { command: ["eval"], result: "112" },
       { command: ["screenshot"], result: {} },
+      { command: ["eval"], result: "restored" },
       { command: ["eval"], result: JSON.stringify({ y: 112, h: 900, doc: docAfter, painted: true }) },
     ]) });
 
@@ -312,11 +324,11 @@ test("the page is asked for a frame before it is photographed", () => {
 });
 
 test("the walk reports whether the page had painted", async () => {
-  assert.equal((await lookAtPage(async () => capturedAt(0, "0", "painted"))).paintCheck, "painted");
+  assert.equal((await lookAtPage(async () => wholeBatch({ after: "0", frame: "painted" }))).paintCheck, "painted");
   // A page that never produced one says so rather than passing quietly.
-  assert.equal((await lookAtPage(async () => capturedAt(0, "0", "no frame within 1000ms"))).paintCheck,
+  assert.equal((await lookAtPage(async () => wholeBatch({ after: "0", frame: "no frame within 1000ms" }))).paintCheck,
     "no frame within 1000ms");
-  assert.equal((await lookAtPage(async () => capturedAt(0, "0"))).paintCheck, "unavailable");
+  assert.equal((await lookAtPage(async () => wholeBatch({ after: "0" }))).paintCheck, "unavailable");
 });
 
 test("the boxes are put into the capture's coordinates, not the viewport's", () => {
@@ -337,4 +349,32 @@ test("the boxes are put into the capture's coordinates, not the viewport's", () 
   assert.equal(intoCaptureSpace(walked, 112)[0].box.height, 128);
   // A box the walk could not measure is passed through rather than invented.
   assert.deepEqual(intoCaptureSpace([{ selector: "e3" }], 112), [{ selector: "e3" }]);
+});
+
+test("the page is brought to the camera, and put back", async () => {
+  // The screenshot renders document rows 0 to one viewport whatever the page is
+  // scrolled to -- rows 0 to 111 pure white and first ink at 112, on a kept
+  // refusal taken at scrollY 112. Moving the boxes to meet it works while the
+  // viewport still overlaps the top of the document and stops working entirely
+  // past it: at scrollY 700 of a 1465px page every box lands outside a 577px
+  // picture, and cycle 49 lost 21 captures that way.
+  const seen = await lookAtPage(async () => wholeBatch({ scrollBefore: 700, after: "700",
+    shifted: "700" }));
+
+  assert.equal(seen.shiftedBy, 700, "the document is moved up by what the page is scrolled to");
+  // Which means the boxes and the picture are both the viewport, and nothing is
+  // left to correct.
+  assert.equal((seen.scrollY || 0) - (seen.shiftedBy || 0), 0);
+});
+
+test("a shift that did not happen leaves the correction to be made", async () => {
+  // A guard that cannot run is not a guard that passed: if the page would not
+  // take the transform, the picture is still the document's top rows and the
+  // boxes still have to be moved to meet it.
+  const seen = await lookAtPage(async () => wholeBatch({ scrollBefore: 700, after: "700",
+    shifted: "" }));
+
+  assert.equal(seen.shiftedBy, 0);
+  assert.equal((seen.scrollY || 0) - (seen.shiftedBy || 0), 700,
+    "the whole offset is still owed");
 });

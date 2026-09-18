@@ -260,11 +260,47 @@ function intoCaptureSpace(elements, scrollY) {
   });
 }
 
+/**
+ * Bring the page to the camera, since the camera will not come to the page.
+ *
+ * The screenshot renders document rows 0 to one viewport, whatever the page is
+ * scrolled to -- measured exactly on a kept refusal at scrollY 112: rows 0 to 111
+ * pure white, first ink at 112. Moving the boxes to meet it works while the
+ * viewport still overlaps the top of the document and stops working entirely past
+ * that: at scrollY 700 of a 1465px page every box lands outside a 577px picture,
+ * and cycle 49 lost 21 captures that way with the screencast frame -- the only
+ * other source -- coming back white.
+ *
+ * Translating the document up by the scroll offset puts what the person is
+ * looking at into the rows the camera does photograph. The boxes are then already
+ * in the picture's coordinates, because both are the viewport.
+ *
+ * It is put back immediately afterwards, in the same batch, so nothing else ever
+ * sees it. The one thing it changes that a scroll would not: a transform makes the
+ * root a containing block, so anything `position: fixed` is photographed where it
+ * sits in the document rather than pinned. That costs a sticky header its place in
+ * one capture; not doing it costs every element in the capture.
+ */
+const SHIFT_TO_THE_VIEWPORT =
+  "(() => { const root = document.documentElement;"
+  + " const y = Math.round(scrollY);"
+  + " if (!y) return \"0\";"
+  + " root.setAttribute(\"data-aux-was\", root.style.transform || \"\");"
+  + " root.style.transform = \"translateY(\" + (-y) + \"px)\";"
+  + " return String(y); })()";
+
+const PUT_THE_PAGE_BACK =
+  "(() => { const root = document.documentElement;"
+  + " if (!root.hasAttribute(\"data-aux-was\")) return \"nothing to undo\";"
+  + " root.style.transform = root.getAttribute(\"data-aux-was\");"
+  + " root.removeAttribute(\"data-aux-was\");"
+  + " return \"restored\"; })()";
+
 async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const file = capture ? path.join(os.tmpdir(), `perception-${process.pid}-${Date.now()}.png`) : "";
   const commands = capture
-    ? [["snapshot"], ["eval", WALK], ["screenshot", file], ["eval", SCROLL_AFTER],
-       ["eval", WHAT_IS_UNDER_THE_PIXELS]]
+    ? [["snapshot"], ["eval", WALK], ["eval", SHIFT_TO_THE_VIEWPORT], ["screenshot", file],
+       ["eval", PUT_THE_PAGE_BACK], ["eval", SCROLL_AFTER], ["eval", WHAT_IS_UNDER_THE_PIXELS]]
     : [["snapshot"], ["eval", WALK]];
   const empty = { elements: [], refs: {}, viewport: null, scrollY: 0, snapshot: "",
     screenshotBase64: "", moved: false, scrollCheck: "skipped" };
@@ -273,11 +309,13 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
   const results = batchResults(response.stdout);
   const snapshot = results.find((item) => item.command?.[0] === "snapshot")?.result || {};
   const evaluations = results.filter((item) => item.command?.[0] === "eval");
+  // Named rather than counted. The walk is always first; the rest move whenever a
+  // command is added between them, and an index quietly reading the wrong answer
+  // is the kind of mistake that looks like a page behaving strangely.
   const evaluated = evaluations[0]?.result;
-  // The second eval, when there is one, is the scroll read-back.
-  const after = capture && evaluations.length > 1 ? evaluations[1].result : undefined;
-  // The third eval, when there is one, is what the DOM says is under the pixels.
-  const beneath = capture && evaluations.length > 2 ? evaluations[2].result : undefined;
+  const shifted = capture ? scrollNumber(scrollValue(evaluations[1]?.result)) : NaN;
+  const after = capture ? evaluations[3]?.result : undefined;
+  const beneath = capture ? evaluations[4]?.result : undefined;
   let walked = { elements: [], viewport: null };
   try {
     walked = JSON.parse(typeof evaluated === "string" ? evaluated : evaluated?.result || "{}");
@@ -337,6 +375,9 @@ async function lookAtPage(runner = batch, { capture = true, ...options } = {}) {
     // "painted" | "no frame within 1000ms" | "no requestAnimationFrame" -- whether
     // the page had drawn a frame when the picture was taken.
     paintCheck: walked.frame || "unavailable",
+    // How far the document was moved up to bring the viewport into the picture.
+    // Zero at the top of a page, where the camera and the viewport already agree.
+    shiftedBy: Number.isFinite(shifted) ? shifted : 0,
     // "same" | "moved" | "unavailable" -- said out loud, because a guard that
     // cannot run is not a guard that passed.
     scrollCheck: !capture ? "skipped" : known ? (scrolled ? "moved" : "same") : "unavailable",

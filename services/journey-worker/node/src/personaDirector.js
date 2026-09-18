@@ -913,7 +913,14 @@ class PersonaDirector {
       // A frame is the viewport, so its boxes are already where they belong. The
       // screenshot is the document, so theirs have to be moved by how far down it
       // the viewport is standing.
-      elements: shown ? seen.elements : intoCaptureSpace(seen.elements, seen.scrollY),
+      // By however much the picture and the viewport still disagree. A frame is
+      // the viewport, so nothing moves. A screenshot is the document's top rows,
+      // and the walk shifts the document up by the scroll offset to put the
+      // viewport into them -- so what is left to correct is only what the shift
+      // did not manage, which is nothing when it worked and the whole offset when
+      // it did not.
+      elements: shown ? seen.elements
+        : intoCaptureSpace(seen.elements, (seen.scrollY || 0) - (seen.shiftedBy || 0)),
       abilities: this.abilities,
       behavior: this.profile.behavior,
       motionFrames: motionFramesFrom(this.frames()),
