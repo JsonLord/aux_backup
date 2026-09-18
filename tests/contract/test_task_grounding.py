@@ -182,3 +182,63 @@ def test_a_page_that_tells_the_reader_what_to_do_is_not_offered_as_a_place():
                             "Pricing"]}
 
     assert places_on_the_page(outline) == ["Pricing"]
+
+
+def test_a_label_that_does_not_match_exactly_does_not_cost_the_task(monkeypatch):
+    """A live run answered every task with a loosely-matched name and shipped
+    "Task 1 for signup for trial (Manual fallback)" ten times over.
+
+    `refersTo` is a label on the work, not the work. Dropping a task because its
+    label read "the Pricing page" where the list says "Pricing" turned ten good
+    tasks into none -- ten being fewer than five, the run fell through to the
+    numbered placeholders and tested nothing. A constraint that turns a wording
+    slip into no output at all is worse than the invention it was added to
+    prevent."""
+    import app
+
+    loosely_labelled = [{"task": "Open the Pricing page and find out what a seat costs.",
+                         "refersTo": "the Pricing page"} for _ in range(6)]
+    client, calls = _client_returning(loosely_labelled)
+    monkeypatch.setattr(app, "get_llm_client", lambda: client)
+    monkeypatch.setattr(app, "TASK_RETRY_WAIT_SECONDS", 0)
+
+    tasks = app.generate_tasks("theme", "profile", "https://taoshq.com/", outline=TAOHQ)
+
+    assert not any("Manual fallback" in task for task in tasks)
+    assert tasks == [entry["task"] for entry in loosely_labelled]
+
+
+def test_a_label_in_the_wrong_case_is_the_name_on_the_list(monkeypatch):
+    """Matching a name the page itself supplied should not turn on capitals."""
+    import app
+
+    shouted = [{"task": "Open Pricing and read what a seat costs.", "refersTo": "PRICING"}
+               for _ in range(6)]
+    client, calls = _client_returning(shouted)
+    monkeypatch.setattr(app, "get_llm_client", lambda: client)
+    monkeypatch.setattr(app, "TASK_RETRY_WAIT_SECONDS", 0)
+
+    tasks = app.generate_tasks("theme", "profile", "https://taoshq.com/", outline=TAOHQ)
+
+    assert tasks == [entry["task"] for entry in shouted]
+    assert len(calls) == 1, "a name that is on the list is not worth another round trip"
+
+
+def test_a_name_off_the_list_still_goes_back_with_the_request(monkeypatch):
+    """The constraint still does its work: a pick that is not on the list is
+    quoted back and another batch asked for."""
+    import app
+
+    off_list = [{"task": "Explore the Solutions menu for enterprise options.",
+                 "refersTo": "Solutions"} for _ in range(6)]
+    grounded = [{"task": "Open Pricing and read what a seat costs.", "refersTo": "Pricing"}
+                for _ in range(6)]
+    client, calls = _client_returning(off_list, grounded)
+    monkeypatch.setattr(app, "get_llm_client", lambda: client)
+    monkeypatch.setattr(app, "TASK_RETRY_WAIT_SECONDS", 0)
+
+    tasks = app.generate_tasks("theme", "profile", "https://taoshq.com/", outline=TAOHQ)
+
+    assert tasks == [entry["task"] for entry in grounded]
+    assert len(calls) == 2, "the first batch was sent back"
+    assert '"Solutions"' in calls[1], "with the name that is not on the page quoted"

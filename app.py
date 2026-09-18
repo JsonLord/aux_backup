@@ -525,14 +525,28 @@ def generate_tasks(theme, customer_profile, url, outline=None):
     # and one more attempt -- the same shape as the persona adherence gate.
     from apps.gradio.page_summary import tasks_that_invent_the_site
 
-    def chosen(entries):
-        """The task text from each entry, or None when one names a place off the list.
+    by_name = {name.casefold(): name for name in allowed}
 
-        This is the constraint doing the work: the model picked from an
-        enumerated set, so checking the pick is a set membership test, not an
-        attempt to read the site's name out of a sentence. The prose scan below
-        still runs -- a task can name a place in its own words without putting it
-        in the field -- but it is the backstop now rather than the mechanism.
+    def chosen(entries):
+        """The task text out of each entry, whatever shape the entry arrived in.
+
+        The enumerated list is what keeps a task on this site: the model is given
+        the names and asked which one each task is about, and a name that is not
+        one of them comes back as a correction with the wrong ones quoted, the
+        same shape as the persona adherence gate.
+
+        What it must not do is throw the task away. `refersTo` is a label on the
+        work, not the work: "Pricing" against "the Pricing page" is a model
+        matching loosely, and a live run answered every task that way and lost all
+        ten -- ten fewer than five, so the run fell through to "Task 1 for signup
+        for trial (Manual fallback)" and tested nothing. A constraint that turns a
+        wording slip into no output at all is worse than the invention it was
+        added to prevent.
+
+        So the label is matched case-insensitively, a miss is corrected rather
+        than deleted, and whether a task actually names somewhere the page does
+        not have is still settled by reading the task -- which is the check that
+        was already there and already works.
         """
         nonlocal correction
         texts, wrong = [], []
@@ -546,9 +560,8 @@ def generate_tasks(theme, customer_profile, url, outline=None):
             if not text:
                 continue
             refers = entry.get("refersTo")
-            if refers is not None and allowed and str(refers).strip() not in allowed:
+            if refers is not None and allowed and str(refers).strip().casefold() not in by_name:
                 wrong.append(str(refers).strip())
-                continue
             texts.append(text)
         if wrong:
             correction = ("\n    Your last attempt chose names that are not on the list: "
