@@ -11,6 +11,10 @@ Three strands:
 - **Track C — hats.** The asynchronous extension: capabilities as mountable
   profiles, a llama.cpp-style configuration surface at `/webui`, developer mode.
 
+Tracks B and C are specified item by item — seams, contracts, tests and done-when —
+in `docs/next-cycle-tracks-b-c.md`. This document is the ordering argument; that one
+is the build spec.
+
 ## First: the audit is two dozen cycles out of date
 
 The quality audit this plan started from — *Observed vs Explained*, 68 criteria,
