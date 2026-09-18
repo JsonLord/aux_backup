@@ -1765,13 +1765,11 @@ test("the capture the service would not stand behind is kept, not dropped", asyn
   assert.ok(written.length > 0, "and the picture has to be there");
 });
 
-test("what the person is looking at is measured, not the top of the document", async () => {
-  // agent-browser's screenshot draws the page at its document position, so a
-  // page standing at 600 comes back showing document rows 0 to 577 -- none of
-  // which the person can see. Eleven of cycle 43's forty-five captures measured
-  // their elements and found none of them in frame. The screencast frame is the
-  // compositor's presented viewport, and it was already arriving on 44 of those
-  // 45 steps for the motion map.
+test("the frame is measured when there is no screenshot to be had", async () => {
+  // Both sources are the viewport now -- the screenshot because the walk shifts
+  // the document into the camera, the frame because a frame is one by
+  // definition. The screenshot goes first because it is never blank; the frame is
+  // what is left when the walk came back without a picture at all.
   const measured = [];
   const director = new PersonaDirector({
     profile: dogged, sleepFn: async () => {}, maxSteps: 1, frames: () => [],
@@ -1789,15 +1787,19 @@ test("what the person is looking at is measured, not the top of the document", a
     walk: async () => ({
       elements: [{ selector: "e1", role: "link", name: "Pricing",
                    box: { x: 0, y: 40, width: 9, height: 2 } }],
-      viewport: { width: 1280, height: 577 }, screenshotBase64: "PAGESCREENSHOT",
+      viewport: { width: 1280, height: 577 }, screenshotBase64: "", shiftedBy: 600,
       refs: {}, snapshot: "", scrollY: 600 }),
     actor: scriptedActor([{ type: "DONE", content: "done" }]),
   });
-  await run(director, fakeBrowser(), fakeRecorder());
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
 
-  assert.equal(measured[0].screenshotBase64, "VIEWPORTFRAME",
-    "the frame is what this person can see");
-  assert.equal(measured[0].elements[0].box.y, 40,
+  // A walk with no picture is retried, and the frame is what the middle attempt
+  // reaches for.
+  assert.ok(measured.some((request) => request.screenshotBase64 === "VIEWPORTFRAME"),
+    "the frame is measured when the walk brought no picture back");
+  const fromFrame = measured.find((request) => request.screenshotBase64 === "VIEWPORTFRAME");
+  assert.equal(fromFrame.elements[0].box.y, 40,
     "a frame is the viewport, so its boxes are already where they belong");
 });
 
@@ -1827,7 +1829,7 @@ test("with no frame the screenshot is used, and the boxes are moved to meet it",
 
   assert.equal(measured[0].screenshotBase64, "PAGESCREENSHOT");
   assert.equal(measured[0].elements[0].box.y, 640,
-    "the screenshot is the document, so 40 in the viewport is 640 in it");
+    "an unshifted screenshot is the document, so 40 in the viewport is 640 in it");
 });
 
 test("when one picture is refused the other one is asked, not the same one again", async () => {
@@ -1867,8 +1869,8 @@ test("when one picture is refused the other one is asked, not the same one again
   const recorder = fakeRecorder();
   await run(director, fakeBrowser(), recorder);
 
-  assert.deepEqual(shown.slice(0, 2), ["BLANKFRAME", "PAGESCREENSHOT"],
-    "asking the same picture louder is not a second attempt");
+  assert.deepEqual(shown.slice(0, 1), ["PAGESCREENSHOT"],
+    "the source that is never blank is asked first");
   const looked = recorder.events.find((event) => event.type === "persona.perception");
   assert.equal(looked.data.capturedFrom, "page screenshot");
 });
@@ -1937,6 +1939,6 @@ test("a frame older than the measurement is not the measurement's frame", async 
   });
   await run(director, fakeBrowser(), fakeRecorder());
 
-  assert.equal(shown[0], "PAGESCREENSHOT",
+  assert.ok(shown.every((item) => item === "PAGESCREENSHOT"),
     "a frame that cannot be shown to be fresh is not used at all");
 });

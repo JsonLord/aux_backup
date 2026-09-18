@@ -780,14 +780,21 @@ class PersonaDirector {
     for (let attempt = 1; attempt <= CAPTURE_ATTEMPTS; attempt += 1) {
       spent = attempt;
       if (attempt > 1) await this.sleep(CAPTURE_BACKOFF_MS * (attempt - 1));
-      // Each source has its own way of being wrong, and they are not the same
-      // way. The frame is what the person is looking at, and it is whatever the
-      // compositor last emitted -- after a navigation that can be the blank first
-      // paint, with nothing since to replace it, and cycle 45 kept four such
-      // frames: 1280x577 of a single colour. The screenshot is never blank and is
-      // of the wrong part of the page once scrolled. So the second attempt asks
-      // the other one rather than asking the same one louder.
-      const tried = await this.lookOnce(page, tasks, { preferFrame: attempt !== 2 });
+      // The screenshot first, now that it can reach the whole page.
+      //
+      // The frame was preferred because it is what the person is looking at and
+      // the screenshot was of the document's top rows. Shifting the document into
+      // the camera closed that gap -- the screenshot is the viewport too now --
+      // and left the frame with the one fault the screenshot has never had: it
+      // comes back blank. Cycle 50 refused 34 captures and every kept picture was
+      // a frame, 1280x577 of a single colour, on pages the DOM showed fully
+      // drawn. Asking first for the source that is sometimes empty spent two of
+      // every three attempts on it.
+      //
+      // The frame still gets the middle attempt, because when it does arrive it
+      // is the compositor's own account of the page and owes nothing to a
+      // transform we applied ourselves.
+      const tried = await this.lookOnce(page, tasks, { preferFrame: attempt === 2 });
       // How many it took is part of the measurement: a step that needed three
       // goes and a step that needed one are different reports on the same page.
       if (!tried.again) return { ...tried.result, captureAttempts: attempt };
@@ -854,7 +861,18 @@ class PersonaDirector {
     } finally {
       this.release();
     }
-    if (!seen?.elements?.length || !seen.screenshotBase64) {
+    // Only a frame this measurement caused. The walk nudges the page a pixel to
+    // make the compositor commit one, so a frame older than the walk is a frame
+    // from before that nudge -- which is the stale blank one this is here to
+    // avoid. A frame that cannot be shown to be fresh is not used at all.
+    const presented = preferFrame ? this.frame() : null;
+    const fresh = presented && Number(presented.receivedAt) >= startedWalking;
+    const shown = fresh ? frameImage(presented) : "";
+    // A picture from either source will do. This asked only about the walk's,
+    // which was the only one when it was written -- so a step whose walk came
+    // back without a picture was given up on while a perfectly good frame sat
+    // unread.
+    if (!seen?.elements?.length || !(shown || seen.screenshotBase64)) {
       return again(seen?.elements?.length
         ? "the walk came back without a picture" : "the walk found nothing on the page");
     }
@@ -885,13 +903,6 @@ class PersonaDirector {
     // what a live viewer watching this run sees -- and it was already arriving,
     // for the motion map, on 44 of those 45 steps. It is in viewport coordinates,
     // because that is what a viewport is, so its boxes need no moving.
-    // Only a frame this measurement caused. The walk nudges the page a pixel to
-    // make the compositor commit one, so a frame older than the walk is a frame
-    // from before that nudge -- which is the stale blank one this is here to
-    // avoid. A frame that cannot be shown to be fresh is not used at all.
-    const presented = preferFrame ? this.frame() : null;
-    const fresh = presented && Number(presented.receivedAt) >= startedWalking;
-    const shown = fresh ? frameImage(presented) : "";
     const perception = await this.perception.perceive({
       screenshotBase64: shown || seen.screenshotBase64,
       // In the capture's coordinates. The walk measures against the viewport,
