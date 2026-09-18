@@ -253,3 +253,180 @@ Remember the first item on this worksheet: these are one run per commit, and
 `refused` has swung by a factor of four with nothing relevant changed. The stable
 claims are the zeros — no capture reads nothing, no report denies a price it
 read.
+
+---
+
+# Project vision: hats
+
+The system today has one hat. A persona browses, looks, and reports on what a
+visitor can see and do. Everything real it can reach is behind
+`BrowserTool` — and that is the whole shape of the product's ceiling: it can
+only review what a logged-out stranger can reach from the front page.
+
+A hat is a bundle of three things the codebase already keeps separately:
+
+| part | where it lives now | what a hat adds |
+|---|---|---|
+| what it can *do* | `Tool` in `faculty.js`, declaring `actionTypes` and `realWorldSideEffects` | new tools |
+| what it *knows* | `PersonaMemoryBank`, the profile | role knowledge, standing context |
+| what it *thinks with* | `model_settings.py` roles (generation / acting / reflection / vision) | a role's own model choice |
+
+So a hat is not a new subsystem. It is a set of tools, a memory, and a model
+assignment, and the seams for all three exist. `Faculty.actionsDefinitionsPrompt()`
+already builds the persona's action vocabulary from whatever tools are mounted,
+so a hat that adds a tool adds vocabulary without touching the director.
+
+## Sequencing, and why the ground layer comes first
+
+**None of this ships before the scan has a memory.** A persona that re-reads the
+same six things for sixteen steps will do exactly that with a terminal and a
+login as well — it will just burn a larger budget on a bigger surface, and the
+failures will be harder to read. The order is not negotiable:
+
+1. The scan accumulates (§1). Runs finish.
+2. Credentials and the logged-in journey (hat 2) — the smallest real extension,
+   and the one with machinery mostly built.
+3. Developer mode (hat 3).
+4. Role hats (hat 4+).
+
+Each stage is testable while the next is being written; that is the point of
+building them as tools rather than as modes.
+
+---
+
+## Hat 1 — The visitor (shipped)
+
+What exists. Browses, perceives through a modelled eye, states an expectation
+before acting, reflects against what it can actually see, gives up when a real
+person would. Everything below inherits this: a hat that acts without stating
+an expectation first produces activity, not a review.
+
+## Hat 2 — The signed-in visitor
+
+**The point:** most of a product is behind a login. A review that stops at the
+marketing page is reviewing the brochure.
+
+Already built: `CredentialStore` with encryption at rest and per-workspace,
+per-owner scoping; `issue_identity(persona_id, origin, domain)`;
+`loginCapture.js`; `sessionStatePath` plumbed through `runWithJourneyTest`; a
+credentials panel in the UI; `_prepare_run_session` handing a session file to a
+run.
+
+Still to build:
+
+- [ ] **Prefer stored session state to replaying a password.** A captured
+      storage-state (cookies, localStorage) signs a run in without the run ever
+      holding a secret. Password replay is the fallback for sites that expire
+      state, not the default path.
+- [ ] **Re-authentication mid-run.** Sessions expire; a run that silently becomes
+      logged-out reviews the logged-out product and says nothing about it. Detect
+      it and say so in the record, the same way a refused capture says so.
+- [ ] **Redact what a signed-in page shows.** This is the load-bearing one. Every
+      screenshot, crop, snapshot and `beneath` probe in a logged-in run may carry
+      an account name, an email, an invoice. `safety.js` has `redactSensitive`
+      for values; evidence needs the same treatment for pixels and for the
+      accessibility tree before anything is written to an artifact.
+- [ ] **Test accounts only, and say so.** A stored credential is scoped to an
+      origin and a workspace. The UI should make it plain that these are
+      throwaway accounts on systems the operator controls, and refuse to treat a
+      personal account as a test fixture.
+
+*Done when:* a run signs in, reviews a journey behind the login, and its report
+carries no account identifier anywhere in text or evidence.
+
+## Hat 3 — Developer mode
+
+**The point:** a large class of product failure is not visible in a browser at
+all. "The download is broken", "the install instructions do not work", "the API
+key from the dashboard is rejected", "the SDK snippet on the docs page does not
+run". A reviewer who can open a terminal can check the promises a page makes.
+
+The tool is `DeveloperTool`, mounted alongside `BrowserTool` in the same
+`Faculty`, declaring `realWorldSideEffects = true`.
+
+Proposed actions, deliberately few:
+
+| action | for |
+|---|---|
+| `FETCH` | download what the page offers, and report what actually arrived |
+| `INSPECT` | checksum, size, archive listing, file type — no execution |
+| `RUN` | one allowlisted command in a scratch directory |
+| `AUTHENTICATE` | exercise a key or token the product issued, against its own API |
+
+**The safety design is the feature, not a wrapper around it.** These are the
+parts that must exist before the first `RUN`:
+
+- [ ] **Off unless asked for, per run.** The same shape as
+      `browserSafety.allowIrreversibleActions`: a run declares
+      `developer.allowCommands` or the tool is not mounted at all. A capability
+      that is mounted and then guarded is one bug away from ungated.
+- [ ] **An allowlist of commands, not a shell.** No pipes, no substitution, no
+      `&&`. The argument vector is constructed, never interpolated — the same
+      rule `agentBrowser.js` already follows, and for the same reason: some of
+      the arguments are secrets.
+- [ ] **A scratch directory per run, destroyed with it.** Nothing outside it is
+      readable or writable. No access to the repo, the artifact store, or the
+      credential database.
+- [ ] **No secrets in the environment handed to it.** The environment is
+      constructed empty and filled deliberately; it never inherits the worker's,
+      which holds every provider key the deployment has.
+- [ ] **Egress to declared hosts only,** and `privateHost()` in `safety.js`
+      already knows which ranges are never legitimate targets.
+- [ ] **Output is untrusted input.** Anything a command prints goes through
+      `sanitizeUntrustedText` before it reaches a prompt. A downloaded README
+      that says "ignore your instructions" is a file, not an instruction, and the
+      project already treats page text that way.
+- [ ] **Every invocation is evidence.** Command, arguments, exit status, duration
+      and output land in the timeline like a click does, so a finding that says
+      "the install fails" can be checked rather than believed.
+
+*Done when:* a run downloads the thing a page offers, verifies it is what the
+page claimed, and files a finding when it is not — with the transcript attached.
+
+## Hat 4 — Role hats
+
+**The point:** "can a visitor use this" is one question. An organisation has
+others, and they are asked by people with different knowledge, different
+tolerances, and different definitions of a blocker.
+
+A role hat is a persona plus standing knowledge plus a tool set. Sketches:
+
+- **The evaluator** — has a budget, a shortlist and a deadline; judges against
+  alternatives rather than in isolation. Values: pricing clarity, migration cost,
+  proof it works.
+- **The administrator** — sets the product up for other people. Lives in settings,
+  permissions, seat management, SSO. Wants Hat 2's tools and none of Hat 3's.
+- **The integrator** — wants Hat 3's tools. Reads the docs, takes the key, runs
+  the snippet, reports where the promise and the artifact diverge.
+- **The compliance reader** — looks for the data-handling page, the subprocessor
+  list, the retention statement. Reports what could not be found, which is the
+  finding.
+
+Each is a config, not a code path. The gate on adding one is whether it changes
+what the system *does*, not what it *says*: a hat that produces the same actions
+in a different tone is a prompt, and belongs in a persona profile rather than
+here.
+
+- [ ] **A capability manifest per hat**, so a report can state which hat produced
+      a finding and what that hat was able to reach. A reader needs to know
+      whether "I could not find the retention policy" came from someone who could
+      only browse or from someone who could also search the docs site.
+
+---
+
+## What this changes about testing
+
+Every hat widens what a run can touch, so the test strategy widens with it rather
+than after it:
+
+- **Each tool is unit-tested against a fake world** — the `Tool` seam takes an
+  injected runner already, which is how `travelTo` is tested without a browser.
+- **Each safety rail has a test that proves the rail, not the happy path.** An
+  allowlist needs a test that a command off it is refused; a redactor needs a
+  test that an account name in a snapshot does not reach an artifact. This record
+  has three separate cases of a guard that passed by doing less — those tests are
+  the ones that catch it.
+- **One live cycle per hat**, measured with the same script and the same table, so
+  a hat that makes runs worse is visible immediately rather than at the end.
+- **The noise floor from §0 applies to all of it.** A hat cannot be called an
+  improvement on one run.
