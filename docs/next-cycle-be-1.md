@@ -112,7 +112,18 @@ fallback — it is not in the list at all, and a run with an empty chain fails w
 
 ## The work
 
-### BE-1a — the engine learns who it works for
+**Status: BE-1a and BE-1b have landed.** The engine takes a resolved chain, the
+control plane composes one per job and role, and the decision about the built-in
+providers is recorded at job creation. Twelve tests cover it. BE-1c (persona_service),
+BE-1d (journey worker), BE-1e (eyeson worker) and BE-1f (record which provider
+served) remain — so persona compilation and the journey still resolve from the
+environment, and the deployment's keys are still what a run browses on.
+
+Two things came out different from this plan and are recorded under **What actually
+changed** at the end.
+
+
+### BE-1a — the engine learns who it works for — **done**
 
 ```python
 class DirectLLMSemanticEngine:
@@ -140,7 +151,7 @@ With a workspace chain that check moves to "is there anything in the chain at al
 because a workspace provider supplies its key from the store rather than the
 environment.
 
-### BE-1b — thread it through the two control-plane call sites
+### BE-1b — thread it through the two control-plane call sites — **done**
 
 Both are reached from `_combined_test(self, job)`, which has the job:
 
@@ -244,3 +255,41 @@ A run in a workspace that has configured its own provider, with **no
 journey, vision critique and re-design — and the report names the provider that
 served it. And a caller who may not spend the built-in credentials cannot cause a
 single call to be made on them.
+
+## What actually changed, where it differs from the plan above
+
+**The engine does not read the settings store.** The plan's BE-1a sketch had
+`DirectLLMSemanticEngine` take `workspace_id` and `role` and call the store itself.
+It cannot: `semantic.py` lives in `services/persona_service/`, which runs as its own
+process on :8090, and importing `apps.api.model_settings` there would make a service
+reach into the control plane's database — the isolation `AGENTS.md` asks for, and the
+thing Decision 1 exists to prevent one paragraph further down. The same constraint
+the plan applied to the workers applies to this module.
+
+So the engine takes `providers=` — a chain the caller already resolved — and
+composition lives in a new control-plane module, `apps/api/model_routing.py`:
+
+```python
+providers_for(workspace_id, role, *, built_in_allowed)   # store chain, then built-ins if allowed
+record_model_access(metadata, auth, *, example_persona)  # stamped at job creation
+built_in_allowed(job)                                    # what was stamped
+```
+
+`providers=None` means "resolve from the environment as before", so every caller not
+yet threaded is untouched. `providers=[]` is *not* the same thing: it means this
+caller has no provider at all, and the engine raises rather than falling back onto
+credentials it may not use. That distinction is what makes the rail hold.
+
+**The example-persona allowance had to be carried onto the job.** `app.py` lets
+somebody trying a bundled example through on the Space's credentials
+(`_refuse_unless_provisioned`), and the job would then have recorded
+`builtInAllowed: false` — the run disagreeing with the gate that admitted it, and the
+demo path quietly losing its re-designs. The API workflow now puts `examplePersona`
+into the job metadata and `record_model_access` reads it. The Gradio Persona Studio
+path (`start_and_monitor_sessions`) does **not**, and must not: it receives
+already-created personas and has no example-persona notion in scope at all. An
+earlier attempt to add it there was a `NameError` the suite caught.
+
+**A legacy job keeps what it had.** `built_in_allowed({})` is `True`. Denying the
+built-ins to jobs queued before this existed would break them all on deploy, which is
+a worse failure than the one being guarded against.

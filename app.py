@@ -3055,6 +3055,9 @@ if __name__ == "__main__":
         job = session_client.create_job({"session_id": session["session_id"], "type": "combined_test",
             "input_artifacts": persona_artifacts,
             "metadata": {"persona_artifacts": persona_artifacts, "tasks": tasks, "url": payload["url"],
+                        # Same allowance the gate above already granted this
+                        # request, carried onto the job so the run agrees with it.
+                        "examplePersona": example_persona or None,
                         "browserSafety": {"allowIrreversibleActions": bool(payload.get("allow_irreversible_actions", False))}}})
         completed = (session_client.wait_for_job(job["job_id"], timeout=int(payload.get("timeout", 900)))
                      if payload.get("wait") else job)

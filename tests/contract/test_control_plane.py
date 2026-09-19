@@ -1019,7 +1019,7 @@ def test_redesign_generation_is_bounded_and_targets_the_worst_findings(monkeypat
     monkeypatch.setenv("EYESON_REDESIGN_LIMIT", "2")  # opt back in (conftest disables it)
     asked = []
 
-    def fake_fragment(finding, url):
+    def fake_fragment(finding, url, providers=None):
         asked.append(finding["title"])
         return f'<div>fix for {finding["title"]}</div>'
 
@@ -1053,7 +1053,8 @@ def test_redesign_fragment_rejects_a_full_document_or_prose(monkeypatch):
     for reply, expected in [("<html><body>whole page</body></html>", None),
                             ("Sorry, I cannot do that.", None),
                             ("```html\n<div>ok</div>\n```", "<div>ok</div>")]:
-        monkeypatch.setattr(semantic, "DirectLLMSemanticEngine", lambda r=reply: Engine(r))
+        monkeypatch.setattr(semantic, "DirectLLMSemanticEngine",
+                            lambda r=reply, **kwargs: Engine(r))
         assert JobExecutor._generate_redesign_fragment({"title": "t"}, "https://example.com") == expected
 
 

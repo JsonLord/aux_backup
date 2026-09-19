@@ -2465,7 +2465,8 @@ class ReportAssembler:
         return findings
 
     @classmethod
-    def _attach_redesigns(cls, findings: list[dict[str, Any]], url: str | None) -> None:
+    def _attach_redesigns(cls, findings: list[dict[str, Any]], url: str | None,
+                          providers: list[tuple[str, str, str]] | None = None) -> None:
         """Generate the "Re-design" half of each finding as real, inspectable HTML.
 
         The reference review deck pairs a photo of the current design with a mockup
@@ -2490,22 +2491,26 @@ class ReportAssembler:
         for finding in ranked[:limit]:
             if finding.get("title") == "No pain points detected":
                 continue
-            fragment = cls._generate_redesign_fragment(finding, url)
+            fragment = cls._generate_redesign_fragment(finding, url, providers)
             if fragment:
                 finding["redesignHtml"] = fragment
 
     @staticmethod
-    def _generate_redesign_fragment(finding: dict[str, Any], url: str | None) -> str | None:
+    def _generate_redesign_fragment(finding: dict[str, Any], url: str | None,
+                                    providers: list[tuple[str, str, str]] | None = None) -> str | None:
         """One finding -> a self-contained HTML fragment implementing its fix.
 
         Returns None when no model is configured or the call fails: an absent
         redesign is honest, a templated one that ignores the finding is not.
         """
-        if not (os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")):
+        # Handed the chain rather than resolving one: the report half never opens
+        # the settings store, so it stays a thing the control plane calls rather
+        # than a second place that decides whose budget a run spends.
+        if providers is not None and not providers:
             return None
         try:
             from services.persona_service.semantic import DirectLLMSemanticEngine
-            engine = DirectLLMSemanticEngine()
+            engine = DirectLLMSemanticEngine(providers=providers)
         except (ImportError, ValueError):
             return None
         elements = "\n".join(

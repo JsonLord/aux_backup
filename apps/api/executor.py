@@ -20,6 +20,8 @@ from urllib import request
 
 from .store import Store
 
+from apps.api.model_routing import built_in_allowed, providers_for
+from apps.api.model_settings import ROLE_VISION
 from services.report_service import ReportAssembler
 # Still called by the run half, or imported from here by name elsewhere. The
 # rest of the moved helpers are reached through services.report_service.
@@ -333,7 +335,7 @@ class JobExecutor(ReportAssembler):
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
         self._attach_verdict_screenshots(findings, journeys)
-        self._attach_redesigns(findings, data.get("url"))
+        self._attach_redesigns(findings, data.get("url"), self._providers_for(job, ROLE_VISION))
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
         if any(source.startswith("persona.") for source in sources):
             limitations.append(
@@ -538,10 +540,23 @@ class JobExecutor(ReportAssembler):
             message = ""
         return f"HTTP {error.code} from the eyeson worker: {message}" if message else str(error)
 
+    @staticmethod
+    def _providers_for(job: dict[str, Any], role: str) -> list[tuple[str, str, str]]:
+        """What this job may run on, for one role.
+
+        The control plane resolves and the rest receive: the report half and both
+        workers are handed a chain rather than opening the settings store, so a
+        service never reaches into the control plane's database (AGENTS.md: talk
+        over versioned HTTP contracts, job ids and artifacts).
+        """
+        return providers_for(job.get("workspace_id") or "local", role,
+                             built_in_allowed=built_in_allowed(job))
+
     def _ui_adaptation(self, job: dict[str, Any]) -> str:
         data = job["metadata"]
         title, request = data.get("title", "Responsive UX prototype"), data.get("request", "Improve clarity and responsiveness")
-        html = self._generate_ui_html(title, request, data.get("url"), data.get("previous_html"))
+        html = self._generate_ui_html(title, request, data.get("url"), data.get("previous_html"),
+                                      self._providers_for(job, ROLE_VISION))
         if html:
             return html
         # Deterministic offline fallback (no OPENAI_API_KEY/BLABLADOR_API_KEY
@@ -550,17 +565,21 @@ class JobExecutor(ReportAssembler):
         return f"""<!doctype html><html><head><meta name=viewport content='width=device-width,initial-scale=1'><style>body{{font:16px system-ui;margin:auto;max-width:72rem;padding:clamp(1rem,4vw,4rem);color:#18202a}}main{{display:grid;gap:1rem}}section{{padding:1.5rem;border:1px solid #ccd5df;border-radius:1rem}}@media(min-width:48rem){{main{{grid-template-columns:2fr 1fr}}}}</style></head><body><h1>{escape(title)}</h1><main><section><h2>Adaptation request</h2><p>{escape(request)}</p></section><section><h2>Offline fallback</h2><p>No LLM credentials are configured (or generation failed), so this is a static placeholder rather than a generated prototype.</p></section></main></body></html>"""
 
     @staticmethod
-    def _generate_ui_html(title: str, request: str, url: str | None, previous_html: str | None) -> str | None:
+    def _generate_ui_html(title: str, request: str, url: str | None, previous_html: str | None,
+                          providers: list[tuple[str, str, str]] | None = None) -> str | None:
         """Ask the configured OpenAI-compatible model for a real, self-contained
         HTML prototype implementing `request`, optionally revising `previous_html`
         for iterative chat-based adaptation. Returns None (caller falls back) if no
         LLM credentials are configured or the call fails after retries -- this is
         never faked with a fixed template that ignores the actual request."""
-        if not (os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")):
+        # "Is there anything this caller may call?" rather than "is a key set in
+        # the environment?" -- a workspace with its own provider configured has a
+        # model available whether or not the deployment does.
+        if providers is not None and not providers:
             return None
         try:
             from services.persona_service.semantic import DirectLLMSemanticEngine
-            engine = DirectLLMSemanticEngine()
+            engine = DirectLLMSemanticEngine(providers=providers)
         except (ImportError, ValueError):
             return None
         system_prompt = ("You are a senior frontend engineer producing a single, complete, "

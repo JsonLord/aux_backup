@@ -118,16 +118,32 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
 
     DEFAULT_BASE_URL = "https://debian-devil.tail3f341b.ts.net/v1"
 
-    def __init__(self, api_key=None, base_url=None, model=None):
-        resolved = self._resolve(base_url, model, api_key)
+    def __init__(self, api_key=None, base_url=None, model=None, *, providers=None):
+        # `providers` is a chain the caller has already resolved: this workspace's
+        # own model settings, plus the deployment's own only when that caller is
+        # allowed to spend them (apps/api/model_routing.py). Given one, this engine
+        # runs on it and on nothing else -- which is the whole point, because
+        # appending the deployment's providers to everybody's chain would make the
+        # admission gate decorative. Given none, it resolves from the environment
+        # exactly as it did before, so every existing caller is unaffected.
+        #
+        # An empty list is not the same as None: it means this caller has no
+        # provider at all, and __init__ then raises rather than quietly falling
+        # back onto credentials it may not use.
+        self.providers = [tuple(entry) for entry in providers] if providers is not None else None
+        resolved = self._resolve(base_url, model, api_key, chain=self.providers)
         self.base_url = resolved["base_url"].rstrip("/")
         self.model = resolved["model"]
         self.api_key = resolved["api_key"]
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
+            raise ValueError(
+                "no model provider is available for this caller: configure one in "
+                "Settings -> Model providers, or set OPENAI_API_KEY / BLABLADOR_API_KEY"
+                if self.providers is not None else
+                "OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
 
     @classmethod
-    def _resolve(cls, base_url=None, model=None, api_key=None) -> dict:
+    def _resolve(cls, base_url=None, model=None, api_key=None, chain=None) -> dict:
         """One provider's endpoint, model and key -- never a mixture of two.
 
         Explicit arguments win, for tests and for callers that pin an endpoint.
@@ -136,7 +152,7 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
         model and the key travelling together, which is the whole point.
         """
         explicit = {"base_url": base_url, "model": model, "api_key": api_key}
-        chain = model_providers()
+        chain = model_providers() if chain is None else list(chain)
         preferred = chain[0] if chain else (cls.DEFAULT_BASE_URL, "", "auto")
         resolved = {"base_url": explicit["base_url"] or preferred[0],
                     "model": explicit["model"] or preferred[2],
@@ -238,7 +254,10 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
         end because a single name stopped resolving.
         """
         chain = [{"base_url": self.base_url, "model": self.model, "api_key": self.api_key}]
-        for url, key, model in model_providers():
+        # What else this caller may reach. A caller that brought its own chain is
+        # held to it; only one that brought none falls back to the deployment's.
+        rest = model_providers() if self.providers is None else self.providers
+        for url, key, model in rest:
             url = url.rstrip("/")
             if (url, model) == (self.base_url, self.model):
                 continue
