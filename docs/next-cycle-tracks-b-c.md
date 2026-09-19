@@ -5,6 +5,10 @@ Written 2026-09-18 against `124818e`; every line reference was checked against t
 tree. Each item states **what exists**, **the change**, **the seam it attaches to**,
 **the tests that prove it**, and **done when**.
 
+Items are `BE-n` and `CAP-n`, matching `docs/next-cycle-plan.md`; a bare
+letter-digit code such as `B2` there means an audit criterion, not an item here.
+`Hat 1`-`Hat 4` are the worksheet's hats, which `CAP-4`, `CAP-5` and `CAP-6` build.
+
 The tests matter more than usual here. The worksheet's ground rules record three
 separate cases of a guard that passed by producing less, so every rail below gets a
 test that proves the rail rather than the happy path.
@@ -13,7 +17,7 @@ test that proves the rail rather than the happy path.
 
 # Track B — the backend
 
-## B1. Route runs through the workspace's providers
+## BE-1. Route runs through the workspace's providers
 
 ### What exists
 
@@ -147,7 +151,7 @@ environment completes, and the report names the provider that served it.
 
 ---
 
-## B2. Extract the report assembler
+## BE-2. Extract the report assembler
 
 ### What exists
 
@@ -158,7 +162,7 @@ everything that turns `result` into findings and slides, emitted at
 
 `services/report-service/` exists and contains only `__init__.py`.
 
-Track A rewrites the report half and B1 rewrites the run half. Without this they
+Track A rewrites the report half and BE-1 rewrites the run half. Without this they
 collide on every commit.
 
 ### The change
@@ -197,7 +201,7 @@ touches no file Track B touches.
 
 ---
 
-## B3. Cost and time accounting
+## BE-3. Cost and time accounting
 
 ### What exists
 
@@ -226,7 +230,7 @@ which provider served the run.
 
 ---
 
-## B4. The noise floor
+## BE-4. The noise floor
 
 ### What exists
 
@@ -248,11 +252,11 @@ measure.py cycle52 cycle53 cycle54
 
 A later cycle can be called better or worse than this one with a reason. **Nothing
 else in Tracks B or C can be called an improvement before this exists** — including
-C0, whose whole claim is a measured change in `notLookedAt`.
+CAP-0, whose whole claim is a measured change in `notLookedAt`.
 
 ---
 
-## B5. Concurrency and repeat runs
+## BE-5. Concurrency and repeat runs
 
 ### What exists
 
@@ -262,9 +266,9 @@ three-person cohort is about 20 minutes.
 
 ### The change
 
-Concurrency: dispatch the cohort with a bounded pool. **After B1**, because
+Concurrency: dispatch the cohort with a bounded pool. **After BE-1**, because
 concurrency against a provider whose fallback does not work multiplies exactly the
-failure mode B1 exists to fix — and `MAX_CONCURRENT_MODEL_CALLS=5` in `config.ini`
+failure mode BE-1 exists to fix — and `MAX_CONCURRENT_MODEL_CALLS=5` in `config.ini`
 was tuned defensively for a reason.
 
 Repeats: the same persona at a second seed, and a `reproducedIn` count on each
@@ -280,7 +284,7 @@ sequential cohort, and findings carry a reproduction count.
 
 # Track C — hats, capabilities and `/webui`
 
-## C0. The scan accumulates — the ground layer
+## CAP-0. The scan accumulates — the ground layer
 
 ### What exists, exactly
 
@@ -336,7 +340,7 @@ memory**:
 
 The worksheet flags it: "On screen and never looked at: 'Pricing'" is a published
 finding, and part of what it currently measures is **our own scan having no
-memory**, not the page's prominence. Until C0 lands those findings are suspect; when
+memory**, not the page's prominence. Until CAP-0 lands those findings are suspect; when
 it lands they start meaning what they say. Say so in the report's limitations
 section in the same commit, in both directions.
 
@@ -371,7 +375,7 @@ that command is not a capability; it is a loop with a shell.
 
 ---
 
-## C1. `/webui` — the configuration surface
+## CAP-1. `/webui` — the configuration surface
 
 ### What exists
 
@@ -420,7 +424,7 @@ keys.
 | `PUT` | `/webui/api/settings` | `{role, label, base_url, model, kind, secret_ref \| secret, position}` → `store.save()` |
 | `DELETE` | `/webui/api/settings/{provider_id}` | → `store.delete()` |
 | `GET` | `/webui/api/models?provider_id=` | Server-side `GET {base_url}/v1/models`; returns **model ids only** |
-| `GET` | `/webui/api/hats` | The registry (C2) |
+| `GET` | `/webui/api/hats` | The registry (CAP-2) |
 | `PUT` | `/webui/api/hats/{id}` | Create or individualize a hat |
 | `POST` | `/webui/api/chat/completions` | Bounded passthrough — a connectivity check |
 
@@ -457,11 +461,11 @@ keys.
 ### Done when
 
 `/webui` is reachable with `AUX_WEBUI_ENABLED=1`, configures per-role providers a
-run actually uses (B1), and returns no secret under any route.
+run actually uses (BE-1), and returns no secret under any route.
 
 ---
 
-## C2. The hat registry
+## CAP-2. The hat registry
 
 ### What exists
 
@@ -515,7 +519,7 @@ finding carries the hat that produced it and what that hat could reach.
 
 ---
 
-## C3. Front-tab links
+## CAP-3. Front-tab links
 
 A row of buttons in the first Gradio tab opening real URLs, so each still works
 pasted to a colleague: **Developer Mode** (`/webui#developer`), one per preset hat
@@ -525,7 +529,7 @@ no button.
 
 ---
 
-## C4. Hat 2 — redaction *(parallel with C0; gates any real signed-in run)*
+## CAP-4. Hat 2 — redaction *(parallel with CAP-0; gates any real signed-in run)*
 
 ### What exists
 
@@ -582,7 +586,7 @@ identifier anywhere in text or evidence.
 
 ---
 
-## C5. Hat 3 — developer mode
+## CAP-5. Hat 3 — developer mode
 
 ### The shape
 
@@ -610,7 +614,7 @@ Not hardening added later. If any of these is dropped, the hat does not ship.
 | Off unless the run asks | `run.developer.allowCommands` present, or `facultyForHat` does not mount the tool **at all** — the `allowIrreversibleActions` shape (`safety.js:27`, opted into at `executor.py:533`). Mounted-then-guarded is one bug from ungated. |
 | Allowlist, constructed argv | No shell. No pipes, substitution or `&&`. `agentBrowser.js:67` already does exactly this (`execFile(cmd, argv)`), for the same reason: some arguments are secrets. |
 | Scratch directory per run | Beside `_run_session_dir()`; destroyed with the run. No access to the repo, the artifact store or the credential database. |
-| Environment built empty | Never inherited. The worker process holds every provider key the deployment has — and after B1 it also holds workspace keys in run payloads. A subprocess that inherits that hands them to whatever it just downloaded. |
+| Environment built empty | Never inherited. The worker process holds every provider key the deployment has — and after BE-1 it also holds workspace keys in run payloads. A subprocess that inherits that hands them to whatever it just downloaded. |
 | Egress to declared hosts only | `privateHost()` (`safety.js:7`) already knows which ranges are never legitimate targets. |
 | Output is untrusted input | Through `sanitizeUntrustedText()` (`safety.js:45`) before it reaches a prompt. A downloaded README saying "ignore your instructions" is a file, exactly as page text already is. |
 | Every invocation is evidence | Command, argv, exit status, duration and output into the timeline like a click, so "the install fails" can be checked rather than believed. |
@@ -630,7 +634,7 @@ finding when it is not, with the transcript attached.
 
 ---
 
-## C6. Hat 4 — role hats
+## CAP-6. Hat 4 — role hats
 
 Evaluator, administrator, integrator, compliance reader. One gate:
 
@@ -647,19 +651,19 @@ out to be personas. That is why the gate is written down before they are built.
 # Ordering
 
 ```
-B2 ──┬── B1 ──┬── B3
-     │        ├── B5
-     │        └── C1 ── C2 ── C3 ── C5 ── C6
+BE-2 ──┬── BE-1 ──┬── BE-3
+     │        ├── BE-5
+     │        └── CAP-1 ── CAP-2 ── CAP-3 ── CAP-5 ── CAP-6
      └── (Track A)
 
-C0 (+ the two loop fixes)   — independent of B, blocks C5/C6
-C4                          — independent of both, blocks any real signed-in run
-B4                          — independent, and gates calling any of it an improvement
+CAP-0 (+ the two loop fixes)   — independent of B, blocks CAP-5/CAP-6
+CAP-4                          — independent of both, blocks any real signed-in run
+BE-4                          — independent, and gates calling any of it an improvement
 ```
 
-`B2` first and alone; everything rebases. `C0`, `C4` and `B4` start immediately and
-in parallel with it — `C0` and `C4` touch the worker and perception service, `B4` is
-process. `C1` waits on `B1`, because a `/webui` that configures models no run reads
+`BE-2` first and alone; everything rebases. `CAP-0`, `CAP-4` and `BE-4` start immediately and
+in parallel with it — `CAP-0` and `CAP-4` touch the worker and perception service, `BE-4` is
+process. `CAP-1` waits on `BE-1`, because a `/webui` that configures models no run reads
 is worse than offering no setting at all.
 
 # Test strategy
