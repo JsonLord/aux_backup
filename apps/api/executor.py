@@ -21,7 +21,7 @@ from urllib import request
 from .store import Store
 
 from apps.api.model_routing import built_in_allowed, providers_for
-from apps.api.model_settings import ROLE_VISION
+from apps.api.model_settings import ROLE_ACTING, ROLE_REFLECTION, ROLE_VISION
 from services.report_service import ReportAssembler
 # Still called by the run half, or imported from here by name elsewhere. The
 # rest of the moved helpers are reached through services.report_service.
@@ -154,13 +154,21 @@ class JobExecutor(ReportAssembler):
         # the credentials a workspace has stored were unreachable from a run, so
         # every run tested the logged-out product however many were saved.
         session_state_path, issued = self._prepare_run_session(job, data, personas)
+        run_models = self._run_models(job)
         if worker_url:
             try:
                 for persona in personas:
                     run_identity = issued.get(persona.get("id")) if issued else None
                     run_id = f"{job['job_id']}_{persona.get('id', len(journeys))}"
+                    # What this run may send a completion to, resolved here
+                    # because the worker is a separate process and must not open
+                    # the control plane's database for it. Keys travel in this
+                    # body, over loopback to a service in the same deployment --
+                    # the boundary CredentialStore.capture_session() already
+                    # crosses -- so nothing may log, record or echo it.
                     payload = json.dumps({"runId": run_id, "url": data.get("url"),
                         "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
+                        **({"models": run_models} if run_models is not None else {}),
                         **({"sessionStatePath": session_state_path} if session_state_path else {}),
                         **({"identity": run_identity} if run_identity else {})}).encode()
                     call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
@@ -539,6 +547,34 @@ class JobExecutor(ReportAssembler):
         except (OSError, ValueError, AttributeError):
             message = ""
         return f"HTTP {error.code} from the eyeson worker: {message}" if message else str(error)
+
+    @classmethod
+    def _run_models(cls, job: dict[str, Any]) -> dict[str, list[dict[str, str]]] | None:
+        """The model chain to send with a run, or None to leave the worker its own.
+
+        Sent when this workspace configured providers of its own, and when the run
+        may *not* use the deployment's -- an empty acting list is how a refused run
+        is told so, and omitting the block instead would send it back to the
+        worker's environment, which is exactly the credential it may not spend.
+
+        Omitted when the answer is only "whatever this host is set up to do",
+        because the host knows more about that than the general chain does. The
+        worker has model settings of its own: `JOURNEY_MODEL`, and a
+        `JOURNEY_REFLECT_MODEL` that the live Space sets to `alias-fast`
+        deliberately, reflection being small and frequent. Overriding those with
+        the general-purpose `OPENAI_MODEL` would quietly change which model drives
+        a journey and drop that optimisation, so a run that would get the
+        deployment's providers anyway is left alone.
+        """
+        allowed = built_in_allowed(job)
+        workspace = job.get("workspace_id") or "local"
+        roles = (ROLE_ACTING, ROLE_REFLECTION)
+        configured = {role: providers_for(workspace, role, built_in_allowed=False) for role in roles}
+        if allowed and not any(configured.values()):
+            return None
+        return {role: [{"baseUrl": url, "model": model, "apiKey": key}
+                       for url, key, model in providers_for(workspace, role, built_in_allowed=allowed)]
+                for role in roles}
 
     @staticmethod
     def _providers_for(job: dict[str, Any], role: str) -> list[tuple[str, str, str]]:

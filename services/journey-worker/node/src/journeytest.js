@@ -268,22 +268,65 @@ async function loadJourneyTest() {
   return import("@baguette-studios/journeytest-core");
 }
 
+/**
+ * Where this run may send a completion, for one role.
+ *
+ * The control plane resolves a chain per run -- this workspace's own providers,
+ * and the deployment's own only when that caller is allowed them
+ * (apps/api/model_routing.py) -- and sends it in the run body. A run that was
+ * given one is held to it: falling back to this worker's environment would hand
+ * a refused caller the deployment's keys through the back door, which is the
+ * whole thing the chain exists to stop. A run given none resolves from the
+ * environment exactly as before, so a worker started by hand, or by its own
+ * tests, is unaffected.
+ *
+ * An entry is a set -- endpoint, model and key together -- and one missing any
+ * of the three is dropped rather than half-used: an alias without its token is a
+ * 401 on every call.
+ */
+function modelChain(input, role) {
+  const supplied = input && input.models ? input.models[role] : undefined;
+  if (!Array.isArray(supplied)) return [];
+  return supplied
+    .filter((entry) => entry && entry.baseUrl && entry.model && entry.apiKey)
+    .map((entry) => ({ baseUrl: String(entry.baseUrl).replace(/\/$/, ""),
+      model: String(entry.model), apiKey: String(entry.apiKey) }));
+}
+
+/** True when the control plane decided this run's providers rather than the host. */
+function isRouted(input) {
+  return Boolean(input && input.models);
+}
+
 async function runWithJourneyTest(input) {
+  const routed = isRouted(input);
+  const acting = modelChain(input, "acting");
+  const reflection = modelChain(input, "reflection");
+  // Checked before the browser package is loaded or a driver is started: a run
+  // that has no provider it may use is over, and finding that out after the
+  // expensive setup only makes the answer slower. Said out loud rather than
+  // quietly served from this host's environment, which holds the deployment's
+  // own credentials -- the ones this run was told it may not spend.
+  if (routed && !acting.length) {
+    throw new Error("this run was given no model provider to act with; configure one "
+      + "in Settings -> Model providers");
+  }
   const core = await loadJourneyTest();
   if (typeof core.runJourney !== "function" || typeof core.createDefaultJourneyTestFactoryRegistry !== "function") {
     throw new Error("journeytest-core@0.1.2 is missing its documented library exports");
   }
-  const modelId = process.env.JOURNEY_MODEL;
+  const modelId = routed ? acting[0].model : process.env.JOURNEY_MODEL;
   if (!modelId) throw new Error("JOURNEY_MODEL is required for live JourneyTest execution");
   const provider = process.env.JOURNEY_PROVIDER || "openai";
-  const apiKey = process.env.OPENAI_API_KEY || process.env.BLABLADOR_API_KEY;
+  const apiKey = routed ? acting[0].apiKey : (process.env.OPENAI_API_KEY || process.env.BLABLADOR_API_KEY);
   if (!apiKey) throw new Error("OPENAI_API_KEY or BLABLADOR_API_KEY is required for live JourneyTest execution");
   const registry = core.createDefaultJourneyTestFactoryRegistry();
   const driver = retryingDaemonRaces(
     process.env.AGENT_BROWSER_COMMAND && typeof core.AgentBrowserDriver === "function"
       ? new core.AgentBrowserDriver({ command: process.env.AGENT_BROWSER_COMMAND })
       : registry.browserDrivers.create("agent-browser", {}));
-  const baseUrl = process.env.OPENAI_BASE_URL || process.env.OPENAI_COMPATIBLE_ENDPOINT;
+  const baseUrl = routed ? acting[0].baseUrl
+    : (process.env.OPENAI_BASE_URL || process.env.OPENAI_COMPATIBLE_ENDPOINT);
   const knownModel = registry.directors.create.bind(registry.directors);
   // The competent-agent director, built only when a run actually asks for it.
   // Constructing it unconditionally meant a persona run could still fail on a
@@ -334,19 +377,28 @@ async function runWithJourneyTest(input) {
         // scoring persona adherence is smaller still, so both run on a smaller,
         // faster model where one is configured -- on its own endpoint and key
         // when it is served somewhere other than the acting model.
-        reflectModel: process.env.JOURNEY_REFLECT_MODEL || undefined,
-        reflectBaseUrl: process.env.JOURNEY_REFLECT_BASE_URL
-          || process.env.BLABLADOR_BASE_URL || undefined,
-        reflectApiKey: process.env.JOURNEY_REFLECT_API_KEY
-          || process.env.BLABLADOR_API_KEY || undefined,
+        reflectModel: routed ? (reflection[0] && reflection[0].model) || undefined
+          : process.env.JOURNEY_REFLECT_MODEL || undefined,
+        reflectBaseUrl: routed ? (reflection[0] && reflection[0].baseUrl) || undefined
+          : process.env.JOURNEY_REFLECT_BASE_URL
+            || process.env.BLABLADOR_BASE_URL || undefined,
+        reflectApiKey: routed ? (reflection[0] && reflection[0].apiKey) || undefined
+          : process.env.JOURNEY_REFLECT_API_KEY
+            || process.env.BLABLADOR_API_KEY || undefined,
         // Where to act from when the primary endpoint stops resolving. Deliberately
         // not the reflect model: alias-fast is small because reflection is frequent
         // and cheap, and deciding what a person does next is neither.
-        fallbackModel: process.env.JOURNEY_FALLBACK_MODEL || undefined,
-        fallbackBaseUrl: process.env.JOURNEY_FALLBACK_BASE_URL
-          || process.env.BLABLADOR_BASE_URL || undefined,
-        fallbackApiKey: process.env.JOURNEY_FALLBACK_API_KEY
-          || process.env.BLABLADOR_API_KEY || undefined }),
+        // The second entry of this run's own acting chain, not the reflect model:
+        // a small fast model is chosen because reflection is frequent and cheap,
+        // and deciding what a person does next is neither.
+        fallbackModel: routed ? (acting[1] && acting[1].model) || undefined
+          : process.env.JOURNEY_FALLBACK_MODEL || undefined,
+        fallbackBaseUrl: routed ? (acting[1] && acting[1].baseUrl) || undefined
+          : process.env.JOURNEY_FALLBACK_BASE_URL
+            || process.env.BLABLADOR_BASE_URL || undefined,
+        fallbackApiKey: routed ? (acting[1] && acting[1].apiKey) || undefined
+          : process.env.JOURNEY_FALLBACK_API_KEY
+            || process.env.BLABLADOR_API_KEY || undefined }),
       maxSteps: stepBudget(input.tasks),
     });
   }
@@ -421,5 +473,6 @@ async function runWithJourneyTest(input) {
 
 module.exports = {
   retryingDaemonRaces, CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
-  loadJourneyTest, resolveSessionState, runWithJourneyTest, sessionNameFor, stepBudget,
+  loadJourneyTest, modelChain, resolveSessionState, runWithJourneyTest, sessionNameFor,
+  stepBudget,
   testerContract };

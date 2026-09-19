@@ -112,12 +112,12 @@ fallback — it is not in the list at all, and a run with an empty chain fails w
 
 ## The work
 
-**Status: BE-1a and BE-1b have landed.** The engine takes a resolved chain, the
+**Status: BE-1a, BE-1b and BE-1d have landed.** The engine takes a resolved chain, the
 control plane composes one per job and role, and the decision about the built-in
-providers is recorded at job creation. Twelve tests cover it. BE-1c (persona_service),
-BE-1d (journey worker), BE-1e (eyeson worker) and BE-1f (record which provider
-served) remain — so persona compilation and the journey still resolve from the
-environment, and the deployment's keys are still what a run browses on.
+providers is recorded at job creation. Twelve tests cover it. A journey now runs on the workspace's own
+providers when it has them. BE-1c (persona_service), BE-1e (eyeson worker) and
+BE-1f (record which provider served) remain, so persona compilation and the
+vision critique still resolve from the environment.
 
 Two things came out different from this plan and are recorded under **What actually
 changed** at the end.
@@ -173,7 +173,7 @@ workspace being told no model is available because the *deployment's* keys are a
 absent, `semantic_engine()` (`compiler.py:111`, `:132`) behaves exactly as today.
 Role **generation**. The caller (`apps/gradio/api_client.py`) resolves and sends it.
 
-### BE-1d — the journey worker
+### BE-1d — the journey worker — **done**
 
 The executor already builds the `/v1/runs` payload and already passes
 `sessionStatePath` and `identity` through it. Add:
@@ -293,3 +293,32 @@ earlier attempt to add it there was a `NameError` the suite caught.
 **A legacy job keeps what it had.** `built_in_allowed({})` is `True`. Denying the
 built-ins to jobs queued before this existed would break them all on deploy, which is
 a worse failure than the one being guarded against.
+
+### What BE-1d changed beyond the plan
+
+**A chain is sent only when it changes something.** The plan had every run carry
+one. That would have been a silent regression: the worker has model settings of its
+own, and the live Space sets `JOURNEY_REFLECT_MODEL=alias-fast` deliberately —
+reflection is a factual comparison that happens on every step, so it runs on a
+small fast model, and the code defends that choice at length. Sending the
+general-purpose chain would have overwritten it with `OPENAI_MODEL` and dropped the
+optimisation without a word. So `_run_models()` sends a chain when the workspace
+configured providers of its own, or when the run may **not** use the deployment's,
+and otherwise sends nothing and leaves the worker its own settings.
+
+That second case matters as much as the first: omitting the block for a refused run
+would send the worker back to its environment, which holds exactly the credentials
+that run may not spend. A refused run is sent `{"acting": []}` — present, and empty
+— and the worker refuses on it.
+
+**The refusal moved ahead of the browser package.** `runWithJourneyTest` loaded
+`journeytest-core` before anything else, so a run with no provider found that out
+only after the expensive setup. A cheap refusal belongs first, and the test that
+proves it cannot run at all otherwise.
+
+**The redaction the plan asked for was already true, and is now held in place by a
+test.** Nothing in the worker records the request: `runWithJourneyTest` echoes
+`input.profile` into its result but never `input.models`, and `reasoningCapture`'s
+`fetch` wrapper reads the *response* body only, never `init` — so the
+`authorization` header it would otherwise carry never reaches a capture. The test
+asserts a key put through `redactSensitive()` does not survive it.

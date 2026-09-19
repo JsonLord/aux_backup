@@ -186,3 +186,47 @@ def test_somebody_trying_a_bundled_example_keeps_the_allowance_the_gate_gave_the
     allowed = record_model_access({"examplePersona": "Friedrich_Wolf.agent.json"}, stranger,
                                   example_persona="Friedrich_Wolf.agent.json")
     assert allowed["modelAccess"]["builtInAllowed"] is True
+
+
+def _job(workspace="w1", **access):
+    return {"workspace_id": workspace, "job_id": "job_1",
+            "metadata": {"modelAccess": {"builtInAllowed": True, **access}}}
+
+
+def test_a_run_on_the_deployments_own_providers_is_left_the_workers_settings(monkeypatch, store):
+    """`JOURNEY_REFLECT_MODEL` is `alias-fast` in the live Space on purpose --
+    reflection is small and happens every step. Sending the general chain would
+    overwrite that with OPENAI_MODEL and quietly drop the optimisation, so a run
+    that would get these providers anyway is left alone."""
+    from apps.api.executor import JobExecutor
+    monkeypatch.setattr("apps.api.model_routing.settings_store", lambda: store)
+
+    assert JobExecutor._run_models(_job()) is None
+
+
+def test_a_workspace_with_its_own_provider_sends_it(monkeypatch, store):
+    from apps.api.executor import JobExecutor
+    from apps.api.model_settings import ROLE_ACTING
+    monkeypatch.setenv("MY_KEY", "sk-mine")
+    store.save(workspace_id="w1", owner_user_id="u1", label="Mine", role=ROLE_ACTING,
+               base_url="https://mine.example/v1", model="my-model",
+               kind=KIND_REFERENCE, secret_ref="MY_KEY")
+    monkeypatch.setattr("apps.api.model_routing.settings_store", lambda: store)
+
+    models = JobExecutor._run_models(_job())
+
+    assert models["acting"][0] == {"baseUrl": "https://mine.example/v1",
+                                   "model": "my-model", "apiKey": "sk-mine"}
+
+
+def test_a_refused_run_is_sent_an_empty_chain_rather_than_no_chain(monkeypatch, store):
+    """Omitting the block would send the worker back to its own environment --
+    the deployment's credentials, which is exactly what this run may not spend.
+    An empty acting list is how the worker is told to refuse."""
+    from apps.api.executor import JobExecutor
+    monkeypatch.setattr("apps.api.model_routing.settings_store", lambda: store)
+
+    models = JobExecutor._run_models(_job(builtInAllowed=False))
+
+    assert models is not None, "a refused run must not fall back to the worker's environment"
+    assert models["acting"] == []
