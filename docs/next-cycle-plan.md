@@ -90,7 +90,11 @@ the setting.
 
 ## Track A — the report
 
-### RPT-1. Commit to one concrete change *(the largest remaining report defect)*
+### RPT-1. Commit to one concrete change — **done**
+
+*(Line references below are as originally written; after BE-2 the report half moved
+to `services/report_service/assembler.py`. The recommendation string was at
+`assembler.py:1037` when this landed.)*
 
 `executor.py:1806`, unchanged since the audit:
 
@@ -111,6 +115,32 @@ generation, not a recommendation.
 Note that `_finding_slide` currently synthesises `alternatives` from the
 recommendation when the field is empty. That fallback exists because the field was
 never filled; it goes when RPT-1 fills it.
+
+**What shipped.** A committed recommendation and a real `alternatives` entry for
+`_broken_promise_finding` (`"Promised more than it did: …"` — the worksheet's own
+worked example, "Start 3-day free trial"), decided by one rule read from data the
+run already recorded rather than asked of a model: **nothing visible happened** →
+commit to building the behaviour the label already promises (the label is the
+evidence of intent; the cheapest fix is to make it true) — **something happened,
+just not what was promised** → commit to relabelling, since the behaviour already
+exists and evidently works. Both branches embed the control's own `label`, so two
+different pages produce two different sentences, which is what the acceptance test
+checks. The rejected half of the either/or moves to `alternatives`, with a stated
+rationale, and `_finding_slide`'s synthesis fallback is now unreachable for this
+finding type without being deleted for the finding types that still need it.
+
+`_committed_recommendation()` shares its classification (`label`, `wanted`, `silent`)
+with `_why_they_expected_that()` (RPT-2's root-cause generation) through a new
+`_expectation_shape()` — factored out rather than duplicated, so the recommendation
+and the root cause can never reason from two different readings of the same
+encounter. This is a template, not a model call, matching how `_why_they_expected_that`
+already worked: the commitment is defensible because it is read from what the run
+measured (did anything visible happen, and what verb did the visitor's own words
+use), not invented.
+
+Five new tests, including the plan's own acceptance criterion made concrete: two
+different `label`s produce two different, non-identical sentences, each containing
+its own control's name.
 
 ### RPT-2. Give the root cause depth, and stop it falling back to the symptom
 

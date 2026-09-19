@@ -3119,6 +3119,76 @@ def test_traits_are_claimed_only_where_the_encounter_shows_them():
         _promise_group(personas=["p1", "p2"]))
 
 
+# --- RPT-1: commit to one concrete change --------------------------------------
+#
+# "Either make {label} do what it reads as doing, or stop it reading that way"
+# restated the problem as a choice and handed the thinking back to the reader.
+# These pin the replacement: a committed recommendation with a real noun and verb
+# from the page, and the rejected half moved to `alternatives` rather than
+# dropped.
+
+def test_the_recommendation_commits_instead_of_offering_a_choice():
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+
+    assert "Either" not in finding["recommendation"], \
+        "a recommendation that hands the choice back to the reader is not a recommendation"
+    assert not finding["recommendation"].lower().startswith(("either", "or "))
+    # A concrete noun and verb: add, move, relabel, remove -- some verb of that
+    # shape, not a restatement of the problem.
+    assert any(verb in finding["recommendation"] for verb in ("Relabel", "Make", "Reword"))
+
+
+def test_a_recommendation_carries_a_noun_drawn_from_the_page_under_test():
+    """The acceptance test the plan names: reject any recommendation that would
+    read identically on a different page. Two different pages -- two different
+    control labels -- must produce two different sentences, both naming their own
+    control."""
+    label_a = JobExecutor._broken_promise_finding(_promise_group(label="Start 3-day free trial"))
+    label_b = JobExecutor._broken_promise_finding(_promise_group(label="See annual pricing"))
+
+    assert "Start 3-day free trial" in label_a["recommendation"]
+    assert "See annual pricing" in label_b["recommendation"]
+    assert label_a["recommendation"] != label_b["recommendation"]
+
+
+def test_the_rejected_half_of_the_commitment_lands_in_alternatives_not_nowhere():
+    """RPT-1: `_finding_slide` only synthesises `alternatives` from `recommendation`
+    when the field is empty -- that fallback existed because this finding type
+    never filled it. It is filled now, with the option not committed to above,
+    never an echo of the recommendation itself."""
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+
+    assert finding["alternatives"], "the field the audit found shipping None must carry something"
+    proposed = finding["alternatives"][0]["proposedChange"]
+    assert proposed != finding["recommendation"], \
+        "an alternative that repeats the recommendation is not an alternative"
+    assert finding["alternatives"][0].get("rationale")
+
+
+def test_something_happening_is_a_relabel_nothing_happening_is_a_build():
+    """The rule the commitment turns on: nothing visible happened (a likely
+    implementation bug) commits to building the behaviour the label already
+    promises; something happened, just not what was promised (the behaviour
+    exists and evidently works) commits to fixing the label instead."""
+    nothing_happened = JobExecutor._broken_promise_finding(_promise_group(
+        label="Monthly",
+        expectations=["Clicking Monthly will open a page showing the monthly plan"],
+        gaps=[{"quote": "The view did not change and the button is still present.", "personaId": "p1"}]))
+    assert nothing_happened["recommendation"].startswith("Make “Monthly”")
+
+    something_else_happened = JobExecutor._broken_promise_finding(_promise_group())  # default fixture
+    assert something_else_happened["recommendation"].startswith("Relabel “Start 3-day free trial”")
+
+
+def test_nothing_to_reason_from_commits_to_nothing():
+    """The same honesty `_why_they_expected_that` already has: a group with no
+    expectation to classify produces no recommendation and no alternatives,
+    rather than a generic sentence with no noun to hang it on."""
+    recommendation, alternatives = JobExecutor._committed_recommendation(_promise_group(expectations=[]))
+    assert recommendation == ""
+    assert alternatives == []
+
+
 def test_a_run_that_saw_less_than_it_tried_to_says_so():
     """Cycle 26 lost four walks in one journey and shipped run_diagnostics: [], so a reader
     had no way to know the review was made on ten steps of twelve."""

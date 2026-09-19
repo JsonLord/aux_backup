@@ -922,25 +922,20 @@ class ReportAssembler:
         r"\b(did not|didn'?t|nothing|no change|unchanged|remain\w*|still (?:present|there|shown))\b", re.I)
 
     @classmethod
-    def _why_they_expected_that(cls, group: dict[str, Any]) -> str:
-        """A root cause: the property of the control that produced the expectation.
+    def _expectation_shape(cls, group: dict[str, Any]) -> tuple[str, str, bool]:
+        """`(label, wanted, silent)` for one broken-promise group, or `("", "", False)`
+        when there is not enough to classify.
 
-        The slide headed "Root cause analysis" fell back to `observation`, which is
-        the gap sentence -- already printed under "Observed user issue" and again
-        under "In the user's words". Three headings, one sentence, and the panel
-        meant to carry the thinking carried none.
-
-        So this names a mechanism instead, and it is built from what the run
-        measured rather than asked of a model: the control's own label, the kind of
-        behaviour the visitor's own verbs predicted of it, and the kind of
-        behaviour the run recorded. Requoting either sentence would only move the
-        duplication somewhere else, so neither is repeated here.
+        Shared between the root cause and the committed recommendation (RPT-1/RPT-2),
+        so the two are never reasoning from two different readings of the same
+        encounter: `wanted` is what the visitor's own verb predicted of the control,
+        `silent` is whether the run recorded the page doing nothing visible about it.
         """
         label = str(group.get("label") or "").strip()
         expectation = " ".join(group.get("expectations") or [])
         gap = " ".join(item.get("quote", "") for item in (group.get("gaps") or []))
         if not label or not expectation:
-            return ""
+            return "", "", False
 
         # Whichever verb governs the sentence, which is the one that comes first:
         # "open a page showing the plan" is a request to be taken somewhere, and
@@ -956,6 +951,26 @@ class ReportAssembler:
         else:
             wanted = "get a response"
         silent = bool(cls._DID_NOTHING.search(gap))
+        return label, wanted, silent
+
+    @classmethod
+    def _why_they_expected_that(cls, group: dict[str, Any]) -> str:
+        """A root cause: the property of the control that produced the expectation.
+
+        The slide headed "Root cause analysis" fell back to `observation`, which is
+        the gap sentence -- already printed under "Observed user issue" and again
+        under "In the user's words". Three headings, one sentence, and the panel
+        meant to carry the thinking carried none.
+
+        So this names a mechanism instead, and it is built from what the run
+        measured rather than asked of a model: the control's own label, the kind of
+        behaviour the visitor's own verbs predicted of it, and the kind of
+        behaviour the run recorded. Requoting either sentence would only move the
+        duplication somewhere else, so neither is repeated here.
+        """
+        label, wanted, silent = cls._expectation_shape(group)
+        if not label:
+            return ""
         got = "nothing they could see" if silent else "something else"
         # The lesson depends on both halves. Saying "the click only moves the
         # visitor instead" about a control that did nothing at all describes a
@@ -984,6 +999,61 @@ class ReportAssembler:
                  f"they used the right control and assume they mis-clicked." if hits > 1 else "")
         return (f"The wording is what set the expectation. Reading \u201c{label}\u201d, this visitor "
                 f"expected to {wanted}, and got {got}. {moral}{again}")
+
+    # One concrete verb per shape of promise, keyed on (wanted, silent). Committed
+    # to, never offered as a choice -- "either make X do Y or stop it reading that
+    # way" restates the problem and hands the thinking back to the reader, which is
+    # what RPT-1 exists to stop.
+    _COMMIT_VERB = {
+        ("be told something", True): "show what it promises",
+        ("be told something", False): "name what it actually shows, not what a reader assumes it shows",
+        ("be taken somewhere", True): "navigate to where it reads as leading",
+        ("be taken somewhere", False): "name where it actually leads, not where it reads as leading",
+        ("get a response", True): "give a visible response when it is clicked",
+        ("get a response", False): "name the response it actually gives",
+    }
+
+    @classmethod
+    def _committed_recommendation(cls, group: dict[str, Any]) -> tuple[str, list[dict[str, str]]]:
+        """One concrete change, committed to, with the rejected half moved to
+        `alternatives` where a reader who disagrees with the call can still find it.
+
+        RPT-1: `"Either make {label} do what it reads as doing, or stop it reading
+        that way"` is a principle, not a recommendation -- it restates the problem
+        as a choice and hands the thinking back to the reader. The benchmark this
+        was measured against commits: "put the Danish database at the top of the
+        menu", "add a counter". So this commits too, on one rule decided by what the
+        run actually recorded happening:
+
+        Nothing visible happened (`silent`): the label already describes the
+        intended behaviour, so the cheaper and more likely fix is to build that
+        behaviour -- this is the worksheet's own example, a "Start 3-day free
+        trial" button that does nothing at all. Something happened, just not what
+        the label said: the behaviour already exists and evidently works, so the
+        label -- not the behaviour -- is what is wrong.
+
+        Grounded entirely in this group's own `label`, which is a real string from
+        the page under test, never a template that would read the same on another
+        one -- the acceptance test this exists to pass.
+        """
+        label, wanted, silent = cls._expectation_shape(group)
+        if not label:
+            return "", []
+        verb = cls._COMMIT_VERB[(wanted, silent)]
+        if silent:
+            commit = (f"Make \u201c{label}\u201d {verb}. Right now the click produces nothing a "
+                      f"visitor can see, and the label is the thing telling them it should.")
+            rejected = (f"Reword \u201c{label}\u201d so a visitor no longer expects to {wanted} -- "
+                        f"right now nothing does. Kept as the fallback, not the recommendation: it "
+                        f"treats the symptom rather than the control, and a visitor who reads the "
+                        f"new wording correctly still gets nothing for the click.")
+        else:
+            commit = (f"Relabel \u201c{label}\u201d to {verb}.")
+            rejected = (f"Change what \u201c{label}\u201d does so it matches its current label. Kept "
+                        f"as the fallback: the existing behaviour may be the one worth keeping, and "
+                        f"relabelling is the cheaper of the two changes to be wrong about.")
+        return commit, [{"proposedChange": rejected,
+                         "rationale": "The half of the either/or not committed to above."}]
 
     @staticmethod
     def _traits_behind(group: dict[str, Any]) -> list[str]:
@@ -1025,6 +1095,7 @@ class ReportAssembler:
         again = (f" {len(personas)} different visitors expected the same thing of it."
                  if len(personas) > 1 else
                  f" They tried it {hits} times." if hits > 1 else "")
+        recommendation, alternatives = cls._committed_recommendation(group)
         return {
             "severity": severity, "category": "expectation",
             "title": f"Promised more than it did: {label}",
@@ -1034,10 +1105,11 @@ class ReportAssembler:
                         f"\"{expected.rstrip(' .')}.\" What arrived was not that -- "
                         f"\"{happened.rstrip(' .')}.\"{again} It cost {cls._patience_in_words(cost)}, "
                         f"measured across the run rather than assumed."),
-            "recommendation": (f"Either make {label} do what it reads as doing, or stop it reading "
-                               f"that way. This is not a wording problem in the copy around it: the "
-                               f"visitor said out loud what they expected before they touched it, "
-                               f"and the control itself is what set that expectation."),
+            "recommendation": recommendation,
+            # The rejected half of the commit above, not a synthesised echo of
+            # `recommendation` -- RPT-1: _finding_slide only fakes an alternative
+            # from the recommendation when this field is empty, and it never is now.
+            "alternatives": alternatives,
             "evidence": (f"{cls._plural(hits, 'unmet expectation')} across "
                          f"{cls._plural(len(group['runs']) or 1, 'run')} and "
                          f"{cls._plural(len(personas) or 1, 'person', 'people')}, "
