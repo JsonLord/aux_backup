@@ -55,8 +55,18 @@ const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
 const { holdRevealKeeper, releaseRevealKeeper, revealOnce } = require("./revealKeeper");
 const { latestFrame, recentFrames } = require("./viewportStream");
+const { markSelectorsSensitive, redactSensitive } = require("./safety");
 
 const DEFAULT_MAX_STEPS = 40;
+
+// CAP-4: a run given a session file started signed in. A "Sign in"/"Log in"
+// prompt appearing where the walk did not see one before is the one signal
+// this codebase has that the session it started with no longer holds --
+// journeytest-core has no other notion of "still authenticated" to check
+// against. Matched on the whole accessible name/text so it does not also
+// catch "Sign in with Google" on a page that offers it as one of several
+// options while already signed in some other way.
+const SIGNED_OUT_PROMPT = /^(sign|log)\s*in$/i;
 
 /**
  * How much of the persona's simulated time is actually spent waiting.
@@ -212,7 +222,8 @@ class PersonaDirector {
    */
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
     scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
-    frames = recentFrames, frame = latestFrame, faculty, gate, memory } = {}) {
+    frames = recentFrames, frame = latestFrame, faculty, gate, memory,
+    redactSelectors, authenticatedSession = false } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -220,6 +231,14 @@ class PersonaDirector {
     this.profile = profile || {};
     this.abilities = this.profile.abilities || {};
     this.maxSteps = maxSteps;
+    // CAP-4: only a run that started signed in has a session to lose. A
+    // signed-out run seeing "Sign in" is the ordinary page, not an expiry.
+    this.authenticatedSession = Boolean(authenticatedSession);
+    // CAP-4: elements this run always treats as sensitive by selector, regardless
+    // of what a walked element's own data says -- an account menu, an invoice
+    // table. Applied to every element list before it leaves this process, at the
+    // point of capture rather than the point of render.
+    this.redactSelectors = redactSelectors || [];
     this.sleep = sleepFn;
     this.scale = scale;
     this.shots = [];
@@ -282,7 +301,7 @@ class PersonaDirector {
     const tasks = (journey.tasks || []).map(taskText).filter(Boolean);
     const history = [];
     let steps = 0;
-    let ending = null;              // {type: "done"|"gave_up"|"abandoned"|"exhausted", detail}
+    let ending = null;              // {type: "done"|"gave_up"|"abandoned"|"exhausted"|"diagnostic", detail}
     let lastUrl = "";
     let skipAction = false;         // a re-read spends a turn looking, not acting
     let pending = null;             // the page as it was left, reused next turn
@@ -348,6 +367,24 @@ class PersonaDirector {
         seen = await this.look(page, tasks);
       }
       const { observation, perception } = seen;
+      // CAP-4: a run that started signed in and now sees a sign-in prompt is
+      // reviewing the logged-out product without knowing it -- the worst
+      // failure available, because nothing else here would say so. Checked
+      // before anything below spends a turn reasoning about this page as if
+      // the session still held.
+      if (this.authenticatedSession) {
+        const droppedSession = (seen.elements || [])
+          .find((element) => SIGNED_OUT_PROMPT.test(String(element?.name || element?.text || "").trim()));
+        if (droppedSession) {
+          await recorder.record("journey.session_expired",
+            "The session this run started signed in with no longer reads as signed in", {
+              reason: `saw a "${droppedSession.name || droppedSession.text}" prompt where the session `
+                     + "was expected to still be authenticated",
+              sinceStep: steps, selector: droppedSession.selector, url: lastUrl });
+          ending = { type: "diagnostic", detail: "the authenticated session expired mid-run" };
+          break;
+        }
+      }
       // One failed call disables the perception client for the rest of the run
       // (perception.js: `this.disabled = true`). That is the right behaviour --
       // retrying a dead service every step would only slow the run down -- but it
@@ -860,6 +897,17 @@ class PersonaDirector {
       // no-ops.
       await this.settle();
       seen = await this.walk();
+      // CAP-4: redacted here, once, right after the walk -- so every downstream
+      // use of these elements (what is sent to the perception service, what a
+      // pointer is aimed from, what lands in the step's own record) sees the
+      // same already-redacted list. An element already marked sensitive by the
+      // walk's own data is caught by redactSensitive alone; an account menu or
+      // an invoice table that carries no such marker is caught by this run's own
+      // redactSelectors, applied first.
+      if (seen?.elements?.length) {
+        seen = { ...seen, elements: redactSensitive(
+          markSelectorsSensitive(seen.elements, this.redactSelectors)) };
+      }
     } catch (error) {
       // A page walk can fail for reasons that have nothing to do with the run --
       // a navigation mid-batch, a browser still settling. The tree is still there.
@@ -1105,44 +1153,56 @@ class PersonaDirector {
     const failCriterion = (journey.failCriteria || [])[0]?.id || "tasks-blocked";
     const state = controller.state;
     const completed = ending.type === "done";
+    // CAP-4: a run-harness condition, not a claim about the product -- the
+    // account matches _instrument_diagnostics' own reason for existing
+    // (services/report_service/helpers.py): an absence of findings here means
+    // nothing was checked, not that nothing was wrong. Excluded from status,
+    // criteria and blockers the same way "done" is, so it never reads as a
+    // failed or blocked journey.
+    const isDiagnostic = ending.type === "diagnostic";
     const evidence = this.shots.at(-1) || this.shots[0] || undefined;
     const summary = {
       done: `Completed what they came to do. ${ending.detail || ""}`.trim(),
       gave_up: `Gave up: ${ending.detail || "not worth any more time"}.`,
       abandoned: `Walked away after ${steps} actions -- ${ending.detail}.`,
       exhausted: `Still going after ${steps} actions without finishing.`,
+      diagnostic: `Stopped after ${steps} actions -- ${ending.detail}.`,
     }[ending.type];
 
     return {
-      status: completed ? "passed" : ending.type === "exhausted" ? "inconclusive" : "failed",
-      confidence: ending.type === "exhausted" ? "low" : "high",
+      status: completed ? "passed" : (isDiagnostic || ending.type === "exhausted") ? "inconclusive" : "failed",
+      confidence: (isDiagnostic || ending.type === "exhausted") ? "low" : "high",
       summary: `${summary} Frustration ended at ${state.frustration.toFixed(2)}, `
         + `confusion at ${state.confusion.toFixed(2)}, trust at ${state.trust.toFixed(2)}.`,
       // Each criterion cites the frame the persona was looking at when they
       // stopped: the journey contract requires screenshot evidence, and a
       // conclusion about a page should be able to show the page.
       criteria: [
-        { id: passCriterion, result: completed ? "met" : "not-met",
-          explanation: completed ? summary : `${summary} The tasks were not completed.`,
+        { id: passCriterion, result: completed ? "met" : isDiagnostic ? "not-observed" : "not-met",
+          explanation: completed ? summary
+            : isDiagnostic ? `${summary} Whether the tasks would have been completed under the intended `
+                             + "session is not established."
+            : `${summary} The tasks were not completed.`,
           evidence: { screenshot: evidence, url, observation: summary } },
-        // "Blocked" is a claim about the page, and only two of the four endings
-        // support it: they gave up, or they walked away. Running out of the
-        // harness's own step budget is not one -- a live report headlined "The
-        // journey was blocked before completion", severity critical, over a run
-        // whose record says "Still going after 16 actions without finishing".
-        // Nothing had blocked that person; the budget ran out while they were
-        // still working. The pass criterion already says they did not finish,
-        // which is true and is what the report should lead with.
-        { id: failCriterion, result: ending.type === "exhausted" ? "not-observed"
+        // "Blocked" is a claim about the page, and only two of the four product
+        // endings support it: they gave up, or they walked away. Running out of
+        // the harness's own step budget is not one -- a live report headlined
+        // "The journey was blocked before completion", severity critical, over a
+        // run whose record says "Still going after 16 actions without
+        // finishing". Nothing had blocked that person; the budget ran out while
+        // they were still working. A run-harness diagnostic is not one either,
+        // for the same reason: the harness stopped it, not the page.
+        { id: failCriterion, result: (ending.type === "exhausted" || isDiagnostic) ? "not-observed"
             : completed ? "not-met" : "met",
           explanation: completed ? "Nothing blocked this person."
             : ending.type === "exhausted"
               ? `${summary} They had not given up when the run's action budget ran out, so `
                 + "whether the page would have blocked them is not established."
+            : isDiagnostic ? `${summary} The run-harness condition, not the page, ended this run.`
               : summary,
           evidence: { screenshot: evidence, url, observation: summary } },
       ],
-      blockers: completed ? [] : [{
+      blockers: (completed || isDiagnostic) ? [] : [{
         id: "persona-stopped", severity: ending.type === "exhausted" ? "minor" : "major",
         category: "blocker", title: `The visitor ${ending.type === "gave_up" ? "gave up" : "did not get there"}`,
         evidence: { screenshot: evidence, url },

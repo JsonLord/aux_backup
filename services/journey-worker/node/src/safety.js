@@ -31,15 +31,40 @@ function validateBrowserSafety(input) {
     cookiePolicy: policy.cookiePolicy || "ephemeral", isolatedSession: true };
 }
 
+// CAP-4: an element marked sensitive is redacted on its `name` as well as its
+// `value`/`text`/`inputValue`. This function had exactly one caller before CAP-4
+// (evidence.js, redacting a persona's own recorded action) and was never applied
+// to the accessibility tree the walk produces -- an account menu's accessible
+// name ("Signed in as jane.doe@example.com") is exactly as sensitive as a typed
+// password, and `name` is the field a walked element's label actually arrives in
+// (perceive.py reads `element.name or element.text`).
+const SENSITIVE_FIELDS = ["value", "text", "inputValue", "name"];
+
 function redactSensitive(value, key = "") {
   if (secretKey.test(key)) return "[REDACTED]";
   if (Array.isArray(value)) return value.map((item) => redactSensitive(item));
   if (value && typeof value === "object") {
     const sensitiveValue = value.sensitive === true || /^(password|hidden)$/i.test(value.inputType || value.type || "");
     return Object.fromEntries(Object.entries(value).map(([childKey, child]) =>
-      [childKey, sensitiveValue && ["value", "text", "inputValue"].includes(childKey) ? "[REDACTED]" : redactSensitive(child, childKey)]));
+      [childKey, sensitiveValue && SENSITIVE_FIELDS.includes(childKey) ? "[REDACTED]" : redactSensitive(child, childKey)]));
   }
   return value;
+}
+
+/**
+ * Mark elements a run was told to always treat as sensitive, by selector --
+ * "a per-credential selector list (an account menu, an invoice table)": nothing
+ * in a walked element's own data says an account-menu button or an invoice row
+ * is sensitive, because no browser-native signal marks it so. This is the other
+ * half of the redaction key alongside `redactSensitive`'s own `sensitive`/
+ * `inputType` check, supplied by whoever configured the run rather than read off
+ * the page. A selector not present on this page, or an absent list, is a no-op.
+ */
+function markSelectorsSensitive(elements, selectors) {
+  if (!Array.isArray(elements) || !selectors?.length) return elements || [];
+  const wanted = new Set(selectors);
+  return elements.map((element) => (element && wanted.has(element.selector)
+    ? { ...element, sensitive: true } : element));
 }
 
 function sanitizeUntrustedText(value, maxLength = 20_000) {
@@ -47,4 +72,4 @@ function sanitizeUntrustedText(value, maxLength = 20_000) {
   return `<untrusted_web_content>\n${text}\n</untrusted_web_content>`;
 }
 
-module.exports = { validateBrowserSafety, redactSensitive, sanitizeUntrustedText, privateHost };
+module.exports = { validateBrowserSafety, redactSensitive, markSelectorsSensitive, sanitizeUntrustedText, privateHost };

@@ -389,6 +389,10 @@ async function runWithJourneyTest(input) {
   // director is named on every run (`director` in the result) precisely because
   // a finding from a persona run and one from an agent run are about different
   // things.
+  // Resolved before the director so the director can be told, at construction,
+  // whether this run started signed in -- it is what CAP-4's mid-run expiry
+  // check needs to tell "logged out" apart from "was always logged out".
+  const statePath = resolveSessionState(input);
   let director;
   let personaActorFn = null;
   if (directorKind() === "pi") {
@@ -397,6 +401,11 @@ async function runWithJourneyTest(input) {
     director = new PersonaDirector({
       profile: input.profile,
       model: { provider, name: modelId },
+      // CAP-4: selectors this run always treats as sensitive, regardless of
+      // what a walked element's own data says -- resolved by the control plane
+      // from the signed-in credential and sent with the run.
+      redactSelectors: input.redactSelectors,
+      authenticatedSession: Boolean(statePath),
       actor: personaActorFn = llmActor({ model: modelId, apiKey, baseUrl,
         // The reflection is a factual comparison rather than a performance, and
         // scoring persona adherence is smaller still, so both run on a smaller,
@@ -436,7 +445,6 @@ async function runWithJourneyTest(input) {
   // the frames journeytest-core is writing while the run is still going.
   const sessionName = sessionNameFor(captureId);
   startRunCapture(captureId, { outputDir: path.resolve(outputDir), sessionName });
-  const statePath = resolveSessionState(input);
   const cursorOverlay = installCursorOverlay();
   // Everything the worker does on this run's behalf goes to the run's own
   // browser. Set before anything is sent, because a command without a session

@@ -1601,8 +1601,60 @@ class ReportAssembler:
             kept.append(finding)
         return kept, rejected
 
+    # CAP-4: fields a redacted element's outbound copy must never carry a real
+    # value in, matching the worker's own SENSITIVE_FIELDS in safety.js.
+    _SENSITIVE_ELEMENT_FIELDS = ("name", "text", "value", "inputValue")
+
+    @staticmethod
+    def _boxes_to_redact(elements: list[dict[str, Any]], redact_selectors: list[str]) -> list[dict[str, Any]]:
+        """Boxes of elements this run was told to always treat as sensitive (an
+        account menu, an invoice row) -- the Python side of the same
+        per-credential selector list the worker's markSelectorsSensitive reads
+        off the DOM walk. No box, or no selector match: nothing to blank."""
+        if not redact_selectors:
+            return []
+        wanted = set(redact_selectors)
+        return [element["box"] for element in elements
+                if isinstance(element, dict) and element.get("selector") in wanted and element.get("box")]
+
     @classmethod
-    def _attach_verdict_screenshots(cls, findings: list[dict[str, Any]], journeys: list[dict[str, Any]]) -> None:
+    def _redact_element_fields(cls, elements: list[dict[str, Any]], redact_selectors: list[str]
+                               ) -> list[dict[str, Any]]:
+        """Blank the accessible name/text/value of a redact-listed element before
+        it is included in an outbound vision-critique request -- the Python-side
+        equivalent of the worker's markSelectorsSensitive + redactSensitive pair,
+        applied to journeytest-core's own DOM snapshots rather than the walk."""
+        if not redact_selectors:
+            return elements
+        wanted = set(redact_selectors)
+        return [{**element, **{field: "[REDACTED]" for field in cls._SENSITIVE_ELEMENT_FIELDS if field in element}}
+                if isinstance(element, dict) and element.get("selector") in wanted else element
+                for element in elements]
+
+    @staticmethod
+    def _redact_boxes_in_image(image_bytes: bytes, boxes: list[dict[str, Any]]) -> bytes:
+        """Blank the pixels of every sensitive box before this image becomes part
+        of a report artifact or leaves this process in a vision-critique request
+        -- redaction at the point of capture, not the point of render. Raises on
+        a bad box or an unreadable image rather than returning the bytes
+        unredacted: a caller with boxes to redact and a failure here must drop
+        the screenshot, not ship it unblanked."""
+        if not boxes:
+            return image_bytes
+        from PIL import Image, ImageDraw
+        with Image.open(BytesIO(image_bytes)) as image:
+            image = image.convert("RGB")
+            draw = ImageDraw.Draw(image)
+            for box in boxes:
+                x, y, width, height = float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"])
+                draw.rectangle([x, y, x + width, y + height], fill=(0, 0, 0))
+            buffer = BytesIO()
+            image.save(buffer, format="PNG")
+            return buffer.getvalue()
+
+    @classmethod
+    def _attach_verdict_screenshots(cls, findings: list[dict[str, Any]], journeys: list[dict[str, Any]],
+                                    redact_selectors: list[str] | None = None) -> None:
         """Show the page a stage-1 finding is about.
 
         Only the vision-synthesis findings carried an image before, so every slide
@@ -1613,8 +1665,11 @@ class ReportAssembler:
         for a blocker or a failed criterion, the state it started in for an
         observation about the page.
         """
+        redact_selectors = redact_selectors or []
         screenshots_by_run = {journey.get("runId"): (journey.get("artifacts") or {}).get("screenshots") or []
                               for journey in journeys}
+        snapshots_by_run = {journey.get("runId"): (journey.get("artifacts") or {}).get("snapshots") or []
+                            for journey in journeys}
         for finding in findings:
             if finding.get("screenshotCrop"):
                 continue
@@ -1630,6 +1685,14 @@ class ReportAssembler:
                 image_bytes = Path(path).read_bytes()
             except OSError:
                 continue
+            if redact_selectors:
+                elements = cls._elements_for_screenshot(path, snapshots_by_run.get(finding.get("runId")) or [])
+                boxes = cls._boxes_to_redact(elements, redact_selectors)
+                if boxes:
+                    try:
+                        image_bytes = cls._redact_boxes_in_image(image_bytes, boxes)
+                    except (OSError, ValueError, KeyError, TypeError):
+                        continue
             # Crop to the element when the finding knows where it is. A finding
             # about one unreadable caption, illustrated with the whole page, makes
             # the reader hunt for what it is talking about -- and on a capture
@@ -2040,7 +2103,8 @@ class ReportAssembler:
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
                                      personas: list[dict[str, Any]], url: str | None,
                                      vision: list[tuple[str, str, str]] | None = None,
-                                     send_options: bool = False
+                                     send_options: bool = False,
+                                     redact_selectors: list[str] | None = None
                                      ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]],
                                                 str | None, list[str]]:
         """Critique a bounded, evenly-spaced sample of each run's real screenshots
@@ -2051,7 +2115,14 @@ class ReportAssembler:
         records that persona's screenshots produced, ready for
         _synthesize_pain_points' cross-persona aggregation. Best-effort: a
         failure here never fails the run -- stage 1's findings still stand on
-        their own."""
+        their own.
+
+        CAP-4: `redact_selectors`, when given, blanks the pixel boxes and the
+        name/text/value fields of any matching element before either the
+        outbound vision-critique request or `screenshot_bytes` (which
+        `_synthesize_pain_points` later crops from) ever sees them -- the one
+        request body in this run that actually leaves the deployment.
+        """
         # Handed no vision provider this caller may use, the critique is not
         # attempted at all. The alternative -- calling and letting the worker fall
         # back to its own environment -- would spend the deployment's credentials
@@ -2059,6 +2130,7 @@ class ReportAssembler:
         # critique is a gap the report names rather than a failure.
         if vision is not None and not vision:
             return [], {}, [], "no model provider is configured for vision critique", []
+        redact_selectors = redact_selectors or []
         worker_url = os.getenv("EYESON_WORKER_URL", "http://127.0.0.1:8081")
         try:
             limit = int(os.getenv("EYESON_VISION_SCREENSHOT_LIMIT", "3"))
@@ -2094,8 +2166,21 @@ class ReportAssembler:
                     image_bytes, repeated_from = cls._trim_repeated_capture(image_bytes)
                     if repeated_from:
                         repeated_captures.append(screenshot_path)
-                    screenshot_bytes[screenshot_path] = image_bytes
                     elements = cls._elements_for_screenshot(screenshot_path, snapshots)
+                    if redact_selectors:
+                        boxes = cls._boxes_to_redact(elements, redact_selectors)
+                        if boxes:
+                            try:
+                                image_bytes = cls._redact_boxes_in_image(image_bytes, boxes)
+                            except (OSError, ValueError, KeyError, TypeError) as error:
+                                last_error = f"a sensitive region could not be redacted, screenshot skipped: {error}"
+                                continue
+                        elements = cls._redact_element_fields(elements, redact_selectors)
+                    # Population happens only after any redaction above, so every
+                    # later reader of this dict -- the payload below and
+                    # _synthesize_pain_points' own crop -- sees the same
+                    # already-redacted bytes. Never redact twice, never miss one.
+                    screenshot_bytes[screenshot_path] = image_bytes
                     image_b64, image_mime = cls._vision_image_payload(image_bytes)
                     payload = json.dumps({
                         "imageBase64": image_b64, "imageMimeType": image_mime,

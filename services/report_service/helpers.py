@@ -193,6 +193,18 @@ _INSTRUMENT_FAILURES = {
         "taken as-is rather than scored against who they are and sent back when they did not fit. "
         "The run still browsed as this person's abilities and patience dictate; what stopped is "
         "the check on whether its choices read like them."),
+    # CAP-4: a run that started signed in and lost that session mid-run reviews the
+    # logged-out product without knowing it -- the worst failure available, because
+    # nothing else here would say so. The director ends the run the moment it
+    # notices rather than continuing to treat the logged-out page as evidence.
+    "journey.session_expired": (
+        "The authenticated session this run started with stopped holding",
+        "The run began signed in and, partway through, the page it was on read as "
+        "signed out again. Everything measured after that point would have been about "
+        "the logged-out product, not the one this run was asked to review, so the "
+        "director ended the run there instead of continuing. This is not a claim "
+        "that the product failed -- it is a run-harness condition, and the findings "
+        "this run could have made past that point are unknown, not absent."),
 }
 
 

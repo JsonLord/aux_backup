@@ -580,7 +580,7 @@ that does not yet distinguish itself by URL fragment, in `docs/next-cycle-plan.m
 
 ---
 
-## CAP-4. Hat 2 — redaction *(parallel with CAP-0; gates any real signed-in run)*
+## CAP-4. Hat 2 — redaction *(parallel with CAP-0; gates any real signed-in run)* — **done**, see `docs/next-cycle-plan.md`'s CAP-4 section for the full write-up (redaction points, the one designed deviation from the spec's literal wording, the mid-run expiry ending, and the 14 new tests).
 
 ### What exists
 

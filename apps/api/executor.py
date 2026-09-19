@@ -155,6 +155,11 @@ class JobExecutor(ReportAssembler):
         # every run tested the logged-out product however many were saved.
         session_state_path, issued = self._prepare_run_session(job, data, personas)
         run_models = self._run_models(job)
+        # CAP-4: a signed-in run's account is what this list exists to keep out of
+        # evidence -- an account menu, an invoice table, anything a credential's
+        # own configuration names as always-sensitive regardless of what a walked
+        # element's data says about it. Only meaningful when the run is signed in.
+        redact_selectors = list(data.get("redactSelectors") or []) if session_state_path else []
         if worker_url:
             try:
                 for persona in personas:
@@ -170,7 +175,13 @@ class JobExecutor(ReportAssembler):
                         "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
                         **({"models": run_models} if run_models is not None else {}),
                         **({"sessionStatePath": session_state_path} if session_state_path else {}),
-                        **({"identity": run_identity} if run_identity else {})}).encode()
+                        **({"identity": run_identity} if run_identity else {}),
+                        # CAP-4: selectors this run always treats as sensitive --
+                        # "an account menu, an invoice table" -- no matter what a
+                        # walked element's own data says. A run signed in has one
+                        # to redact; a signed-out run has none, and an absent list
+                        # is a no-op on the worker side.
+                        **({"redactSelectors": redact_selectors} if redact_selectors else {})}).encode()
                     call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
                     try:
                         with request.urlopen(call, timeout=self._journey_run_timeout()) as response:
@@ -231,7 +242,8 @@ class JobExecutor(ReportAssembler):
                     journeys, tasks, personas, data.get("url"),
                     self._providers_for(job, ROLE_VISION),
                     send_options=bool(providers_for(job.get("workspace_id") or "local",
-                                                    ROLE_VISION, built_in_allowed=False)))
+                                                    ROLE_VISION, built_in_allowed=False)),
+                    redact_selectors=redact_selectors)
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             # The vision model has a "strengths" array and still puts praise in
             # "issues" -- a live run published "Familiar and clean layout" as a
@@ -365,7 +377,7 @@ class JobExecutor(ReportAssembler):
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
-        self._attach_verdict_screenshots(findings, journeys)
+        self._attach_verdict_screenshots(findings, journeys, redact_selectors=redact_selectors)
         self._attach_redesigns(findings, data.get("url"), self._providers_for(job, ROLE_VISION))
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
         if any(source.startswith("persona.") for source in sources):

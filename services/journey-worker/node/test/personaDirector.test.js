@@ -2027,3 +2027,126 @@ test("a capture the service itself distrusts is never folded into the memory", a
   assert.deepEqual(calls[0], []);
   assert.deepEqual(calls[1], [], "the untrustworthy capture's fixation never joined the memory");
 });
+
+// --- CAP-4: elements are redacted once, right after the walk ------------------
+
+test("an account menu named as a redact selector never leaves this process", async () => {
+  const sent = [];
+  const perception = {
+    available: true,
+    async perceive(options) {
+      sent.push(options.elements);
+      return { observation: "", eyes: {}, scan: { pattern: "spotted", fixationBudget: 1 },
+        counts: { elements: 2, legible: 2, fixated: 1, notPerceived: 0, notLookedAt: 1 },
+        notPerceived: [], perceived: [], notLookedAt: [] };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    redactSelectors: [".account-menu"],
+    walk: async () => ({
+      elements: [
+        { selector: ".account-menu", role: "button", name: "Signed in as jane.doe@example.com",
+          box: { x: 0, y: 0, width: 10, height: 10 } },
+        { selector: "#buy-button", role: "button", name: "Buy now",
+          box: { x: 20, y: 0, width: 10, height: 10 } },
+      ],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+    }),
+    frames: () => [],
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+
+  const result = await director.look({ text: "" }, ["find the price"]);
+
+  assert.equal(sent[0][0].name, "[REDACTED]", "sent to the perception service already redacted");
+  assert.equal(sent[0][1].name, "Buy now");
+  // And what the step itself records -- the same list, once, redacted the same
+  // way, because it is the same array both paths were handed.
+  assert.equal(result.elements[0].name, "[REDACTED]");
+});
+
+test("with no redactSelectors, an unmarked element is unaffected", async () => {
+  const sent = [];
+  const perception = {
+    available: true,
+    async perceive(options) {
+      sent.push(options.elements);
+      return { observation: "", eyes: {}, scan: { pattern: "spotted", fixationBudget: 1 },
+        counts: { elements: 1, legible: 1, fixated: 0, notPerceived: 0, notLookedAt: 1 },
+        notPerceived: [], perceived: [], notLookedAt: [] };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({
+      elements: [{ selector: "#buy-button", role: "button", name: "Buy now",
+                  box: { x: 0, y: 0, width: 10, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+    }),
+    frames: () => [],
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+
+  await director.look({ text: "" }, ["find the price"]);
+
+  assert.equal(sent[0][0].name, "Buy now");
+});
+
+// --- CAP-4: mid-run session expiry ---------------------------------------------
+
+test("a session that stops reading as signed in ends the run as a diagnostic, not a finding", async () => {
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[signin] link Sign in", eyes: {}, scan: { pattern: "spotted", fixationBudget: 1 },
+        counts: { elements: 1, legible: 1, fixated: 0, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [], notLookedAt: [] };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception, authenticatedSession: true,
+    walk: async () => ({
+      elements: [{ selector: "#signin", role: "link", name: "Sign in", box: { x: 0, y: 0, width: 40, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+    }),
+    frames: () => [],
+    actor: async () => { throw new Error("the run must end before the actor is ever asked"); },
+  });
+  const recorder = fakeRecorder();
+  const verdict = await run(director, fakeBrowser(), recorder);
+
+  assert.equal(verdict.status, "inconclusive");
+  assert.deepEqual(verdict.blockers, [], "a run-harness condition is not a claim about the page");
+  assert.ok(verdict.criteria.every((criterion) => criterion.result === "not-observed"),
+    "neither criterion is a claim this run is positioned to make");
+  const expired = recorder.events.find((event) => event.type === "journey.session_expired");
+  assert.ok(expired, "the expiry is recorded so the report can tell a reader why nothing else was measured");
+  assert.match(expired.data.reason, /Sign in/);
+});
+
+test("the same page with no authenticated session is read as ordinary, not an expiry", async () => {
+  const perception = {
+    available: true,
+    async perceive() {
+      return { observation: "[signin] link Sign in", eyes: {}, scan: { pattern: "spotted", fixationBudget: 1 },
+        counts: { elements: 1, legible: 1, fixated: 0, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [], perceived: [], notLookedAt: [] };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({
+      elements: [{ selector: "#signin", role: "link", name: "Sign in", box: { x: 0, y: 0, width: 40, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+    }),
+    frames: () => [],
+    actor: async () => ({ visible: "a sign-in link", expectation: "nothing",
+      action: { type: "DONE", content: "looked around" } }),
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  assert.equal(recorder.events.find((event) => event.type === "journey.session_expired"), undefined,
+    "a signed-out run seeing an ordinary sign-in link has no session to lose");
+});

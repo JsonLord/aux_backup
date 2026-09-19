@@ -1318,6 +1318,133 @@ def test_a_verdict_finding_shows_the_screenshot_journeytest_cited(tmp_path):
     assert findings[2]["screenshotCrop"] == "data:image/png;base64,Zm9v"
 
 
+# --- CAP-4: redacting a screenshot's sensitive boxes before it ships -----------
+
+def _decoded_data_uri(data_uri):
+    from io import BytesIO
+    from PIL import Image
+    header, encoded = data_uri.split(",", 1)
+    return Image.open(BytesIO(base64.b64decode(encoded)))
+
+
+def test_redact_boxes_in_image_blanks_only_the_given_region():
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (200, 100), color="white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    redacted_bytes = JobExecutor._redact_boxes_in_image(
+        buffer.getvalue(), [{"x": 10, "y": 10, "width": 40, "height": 20}])
+    redacted = Image.open(BytesIO(redacted_bytes))
+
+    assert redacted.getpixel((20, 20)) == (0, 0, 0), "inside the box is blanked"
+    assert redacted.getpixel((100, 80)) == (255, 255, 255), "outside the box is untouched"
+    # No boxes: the original bytes come back unchanged, not a re-encode.
+    assert JobExecutor._redact_boxes_in_image(buffer.getvalue(), []) == buffer.getvalue()
+
+
+def test_boxes_to_redact_matches_by_selector_and_needs_a_box():
+    elements = [
+        {"selector": ".account-menu", "box": {"x": 1, "y": 2, "width": 3, "height": 4}},
+        {"selector": ".no-box-here"},
+        {"selector": "#buy-button", "box": {"x": 9, "y": 9, "width": 9, "height": 9}},
+    ]
+
+    assert JobExecutor._boxes_to_redact(elements, [".account-menu", ".no-box-here"]) == [
+        {"x": 1, "y": 2, "width": 3, "height": 4}]
+    assert JobExecutor._boxes_to_redact(elements, []) == []
+    assert JobExecutor._boxes_to_redact(elements, None) == []
+
+
+def test_redact_element_fields_blanks_name_text_value_for_listed_selectors_only():
+    elements = [
+        {"selector": ".account-menu", "role": "button", "name": "Signed in as jane.doe@example.com",
+         "text": "jane.doe@example.com", "value": "jane.doe@example.com"},
+        {"selector": "#buy-button", "role": "button", "name": "Buy now"},
+    ]
+
+    redacted = JobExecutor._redact_element_fields(elements, [".account-menu"])
+
+    assert redacted[0]["name"] == redacted[0]["text"] == redacted[0]["value"] == "[REDACTED]"
+    assert redacted[0]["selector"] == ".account-menu", "the selector itself is not a secret"
+    assert redacted[0]["role"] == "button", "an unrelated field is untouched"
+    assert redacted[1]["name"] == "Buy now", "an element off the list is untouched"
+    assert JobExecutor._redact_element_fields(elements, []) == elements
+
+
+def test_a_verdict_screenshot_is_blanked_before_it_is_cropped_when_its_region_is_listed(tmp_path):
+    from PIL import Image
+    import json as json_module
+
+    screenshot = tmp_path / "final-view.png"
+    Image.new("RGB", (200, 100), color="red").save(screenshot)
+    snapshot = tmp_path / "final-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": ".account-menu", "role": "button", "name": "Signed in as jane.doe@example.com",
+         "box": {"x": 0, "y": 0, "width": 200, "height": 100}}]}))
+
+    findings = [{"title": "Account menu shows the wrong state", "source": "uxFindings", "runId": "run_1",
+                "evidenceScreenshot": None, "elementBox": {"x": 0, "y": 0, "width": 200, "height": 100}}]
+    JobExecutor._attach_verdict_screenshots(
+        findings, [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)], "snapshots": [str(snapshot)]}}],
+        redact_selectors=[".account-menu"])
+
+    decoded = _decoded_data_uri(findings[0]["screenshotCrop"]).convert("RGB")
+    assert decoded.getpixel((decoded.width // 2, decoded.height // 2)) == (0, 0, 0), (
+        "the whole cited region was the redacted box, so no red survives")
+
+    # The same run, with no redact selectors, keeps the real pixels.
+    findings_unredacted = [{"title": "Account menu shows the wrong state", "source": "uxFindings", "runId": "run_1",
+                            "evidenceScreenshot": None, "elementBox": {"x": 0, "y": 0, "width": 200, "height": 100}}]
+    JobExecutor._attach_verdict_screenshots(
+        findings_unredacted, [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)],
+                                                                "snapshots": [str(snapshot)]}}])
+    decoded_unredacted = _decoded_data_uri(findings_unredacted[0]["screenshotCrop"]).convert("RGB")
+    assert decoded_unredacted.getpixel((decoded_unredacted.width // 2, decoded_unredacted.height // 2)) == (255, 0, 0)
+
+
+def test_a_redacted_element_never_leaves_this_process_in_the_vision_critique_request(tmp_path, monkeypatch):
+    """The vision-critique request body is the one thing built here that
+    actually leaves the deployment. An account name in its element list, or
+    its sensitive region still visible in the pixels, is exactly the leak
+    CAP-4 exists to close."""
+    import json as json_module
+    from PIL import Image
+
+    screenshot = tmp_path / "step1.png"
+    Image.new("RGB", (200, 100), color="red").save(screenshot)
+    snapshot = tmp_path / "step1-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": ".account-menu", "role": "button", "name": "Signed in as jane.doe@example.com",
+         "box": {"x": 0, "y": 0, "width": 200, "height": 100}}]}))
+
+    captured = {}
+
+    def urlopen(call, timeout):
+        class Response:
+            def __enter__(self_): return self_
+            def __exit__(self_, *args): pass
+            def read(self_): return json_module.dumps({"painPoints": []}).encode()
+        captured["payload"] = json_module.loads(call.data)
+        return Response()
+
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+    journeys = [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)], "snapshots": [str(snapshot)]}}]
+    JobExecutor._collect_vision_pain_points(
+        journeys, ["Buy an item"], [{"id": "persona_ada"}], "https://example.com",
+        vision=[("https://mine.example/v1", "sk-mine", "vision-model")], send_options=True,
+        redact_selectors=[".account-menu"])
+
+    payload = captured["payload"]
+    assert payload["elements"][0]["name"] == "[REDACTED]"
+    assert "jane.doe" not in json_module.dumps(payload)
+    decoded = _decoded_data_uri(f"data:{payload['imageMimeType']};base64,{payload['imageBase64']}").convert("RGB")
+    assert decoded.getpixel((decoded.width // 2, decoded.height // 2)) == (0, 0, 0), (
+        "the sensitive region is blanked in the pixels the model actually receives")
+
+
 def test_one_issue_described_two_ways_merges_on_its_description():
     """A live run against leon4gr45-nova-test published "Ambiguous navigation
     hierarchy" and "Redundant and confusing navigation layers" as two findings.
@@ -1707,6 +1834,37 @@ def test_no_scan_memory_caveat_when_nothing_from_that_class_is_published(tmp_pat
 
     assert completed["status"] == "succeeded"
     assert not [line for line in report["limitations"] if "remembers what each persona" in line]
+
+
+def test_a_mid_run_session_expiry_is_a_run_diagnostic_not_a_finding_about_the_page(tmp_path, monkeypatch):
+    """CAP-4: a run whose authenticated session stopped holding reviewed the
+    logged-out product without knowing it. The director ends the run there
+    (personaDirector.js) rather than continuing, with an "inconclusive" verdict
+    and no blocker -- this proves the report reads that as a harness diagnostic,
+    the same class as persona.perception_unavailable, never as a usability
+    finding about the page."""
+    timeline = [{"type": "journey.session_expired",
+                "data": {"reason": 'saw a "Sign in" prompt where the session was expected to still be '
+                                   "authenticated", "sinceStep": 3, "url": "https://example.com/account"}}]
+    verdict = {"status": "inconclusive", "confidence": "low",
+              "summary": "Stopped after 3 actions -- the authenticated session expired mid-run.",
+              "criteria": [{"id": "tasks-completed", "result": "not-observed"},
+                           {"id": "tasks-blocked", "result": "not-observed"}],
+              "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict, "timeline": timeline,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    diagnostics = report["run_diagnostics"]
+    expired = [item for item in diagnostics if item["title"].startswith("The authenticated session")]
+    assert expired, "the expiry must reach the reader as a diagnostic, not silence"
+    assert expired[0]["category"] == "harness"
+    assert "signed in" in expired[0]["summary"] or "logged-out" in expired[0]["summary"]
+    # Never counted or titled as a usability problem with the page itself.
+    assert not any("session" in item.get("title", "").lower() for item in report["critical_pain_points"])
 
 
 def test_clean_run_is_still_reported_as_completed(tmp_path, monkeypatch):

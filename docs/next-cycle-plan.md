@@ -542,7 +542,7 @@ will eventually be a section of) rather than a dead link — but whoever builds 
 should wire `app.js` to the fragment at the same time, or drop this link if that
 turns out to be the wrong shape once hats exist.
 
-### CAP-4. Hat 2 — redaction *(parallel with CAP-0; gates any real signed-in run)*
+### CAP-4. Hat 2 — redaction *(parallel with CAP-0; gates any real signed-in run)* — **done**
 
 The one piece of hat work with no dependency on the ground layer: it touches
 `safety.js` and the evidence path, not the director.
@@ -561,6 +561,102 @@ in the output.
 
 *Done when:* a run signs in, reviews a journey behind the login, and its report
 carries no account identifier anywhere in text or evidence.
+
+**What shipped.** All three redaction surfaces the detail spec named, plus both
+"cheap" items.
+
+1. **Pixels.** `ReportAssembler._redact_boxes_in_image()` (assembler.py, PIL
+   `ImageDraw`) blanks the boxes of any element on a per-run selector list before
+   the bytes are stored, cropped, or sent anywhere — applied once, at
+   population time, in `_collect_vision_pain_points` (before `screenshot_bytes`
+   is populated, so `_synthesize_pain_points`'s later crop sees the same
+   already-redacted bytes) and in `_attach_verdict_screenshots` (which gained
+   its own DOM-snapshot pairing via `_elements_for_screenshot` — it never had
+   one before this).
+2. **The element tree.** `ReportAssembler._redact_element_fields()` blanks
+   `name`/`text`/`value`/`inputValue` for a listed selector before an element
+   list built from `_read_snapshot_elements()` reaches the outbound
+   vision-critique payload — the Python-side counterpart of the worker's
+   `redactSensitive`/`markSelectorsSensitive` pair, which now also redacts an
+   element's accessible `name` (previously value-only) and gained
+   `markSelectorsSensitive(elements, selectors)` for a selector list with no
+   native "this is sensitive" signal of its own (an account menu, an invoice
+   row). `PersonaDirector.lookOnce()` applies both to `seen.elements`
+   immediately after the walk, before anything downstream — `perceive()`'s
+   request body included — can see the unredacted tree.
+3. **The vision-critique request body.** Built from evidence already redacted
+   by (1) and (2) at the point of capture, never redacted on its way out —
+   the single redaction point the spec asked for.
+
+**The one designed deviation.** The spec's own wording ("blank the boxes of
+elements the walk marks sensitive") assumes a live `sensitive`/`inputType`
+signal already reaches a walked element. It does not: `redactSensitive()` had
+exactly one caller before this (`evidence.js`, a persona's own recorded action)
+and nothing in this codebase ever set `sensitive` or `inputType` on a walked
+DOM element. The selector list (`redactSelectors`, resolved by the control
+plane from a signed-in run's credential and threaded through `/v1/runs` →
+`PersonaDirector` → `markSelectorsSensitive`) is the mechanism actually built
+and tested; the latent value-based path stays in place as the other half of
+the same function, unused until something starts marking elements sensitive on
+its own.
+
+**The two cheap ones, both true, one newly guaranteed rather than assumed.**
+"Prefer stored state to replaying a password" was already true by construction
+— `_prepare_run_session` (executor.py) calls only `write_state_file()`;
+`capture_session()` has exactly one caller anywhere in this codebase,
+`credentials_panel.py`'s explicit "sign in" button, never a run's own path —
+and is now pinned with a test that fails loudly (`capture_session` raises) if
+that ever stops being true rather than staying true by omission. Mid-run
+expiry detection is new: `PersonaDirector` takes `authenticatedSession`
+(resolved from whether the run was given a state file, in `journeytest.js`,
+before the director is constructed so the check has it from the first step);
+each step, a `"Sign in"`/`"Log in"` prompt appearing in the walked elements
+where none was expected ends the run immediately, before the persona is asked
+to act on what is now the logged-out page. This is deliberately *not* wired
+through the existing `ending: "abandoned"` path, which produces a
+`persona-stopped` blocker — a claim about the product. A new ending,
+`"diagnostic"`, was added to `verdict()`: `status: "inconclusive"`, both
+criteria `"not-observed"`, `blockers: []`, so a session that drops out mid-run
+never reads as a usability failure of the page. The report side gained a
+matching `_INSTRUMENT_FAILURES` entry (`journey.session_expired`,
+`report_service/helpers.py`) so it surfaces as a `run_diagnostic` — same class
+as `persona.perception_unavailable` — rather than silently vanishing.
+
+**What this heuristic is, and is not.** The sign-in-prompt check is a
+reasonable signal built from what this codebase can observe (the walked
+accessibility tree), not a verified live-infrastructure result — no live
+browser or real login flow was exercised in this sandbox. A site that shows a
+"Sign in" link to an already-authenticated user for an unrelated reason (a
+second account switcher, say) would false-positive; that tradeoff — ending the
+run on a false signal rather than silently reviewing a possibly-logged-out
+page — is judged the safer one and is what the detail spec's own priority
+("the worst failure available, because it is invisible in the output") asks
+for, but it has not been checked against a real site.
+
+**Tests.** Fourteen new across the whole track, covering every rail the detail
+spec named. Seven in Python (`tests/contract/test_control_plane.py`,
+`test_browser_credentials.py`): pixel redaction blanks only the given region
+and passes bytes through unchanged with no boxes; box-to-selector matching
+requires both a listed selector and a box; element-field redaction blanks the
+four fields for a listed selector only; a verdict-sourced screenshot is
+blanked before cropping when its region is listed, and untouched when it is
+not; a full round-trip through `_collect_vision_pain_points` proves an
+account name never reaches the outbound request body and the pixels the
+model receives are already blanked; a stored-state run is proven to never
+call `capture_session()`; a session that stops reading as signed in ends the
+run as a diagnostic with no blocker and no findings, is recorded, and reaches
+the report as a `run_diagnostic`. Seven in Node (`safety.test.js`,
+`personaDirector.test.js`): a sensitive element's accessible name is redacted
+alongside its value; a selector on this run's redact list is marked sensitive
+and one off the list is not; no list and no marker is a no-op; an
+account-menu selector named as sensitive never leaves the process, in both
+the outbound `perceive()` payload and the director's own `result.elements`;
+an unmarked element is unaffected with no list; a session that stops reading
+as signed in ends the run as a diagnostic; the same page with no
+authenticated session is read as ordinary, not an expiry. Full regression:
+445 Python tests passing (the same 3 pre-existing, unrelated failures as the
+established baseline), 274 Node tests passing (up from 272 before this
+track).
 
 ### CAP-5. Hat 3 — developer mode
 

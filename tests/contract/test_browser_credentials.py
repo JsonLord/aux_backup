@@ -90,6 +90,38 @@ def test_state_is_encrypted_at_rest(store, keyed):
     assert "cookies" not in stored
 
 
+def test_a_run_with_a_stored_state_never_replays_a_password(store, keyed, tmp_path, monkeypatch):
+    """CAP-4: prefer stored state to replaying a password. write_state_file()
+    already produces a session file for a run to use; a run that has one must
+    never fall through to capture_session() -- more exposure for no gain, and
+    it trips rate limits and challenge scoring a restored session does not.
+
+    _prepare_run_session (apps/api/executor.py) only ever calls
+    write_state_file(); capture_session() has exactly one caller in this
+    codebase, apps/gradio/credentials_panel.py's explicit "sign in" button --
+    never anything on a run's own path. This pins that shape with a real
+    refusal rather than trusting it stays true by omission.
+    """
+    from apps.api.executor import JobExecutor
+
+    store.put(label="Shop login", kind=KIND_STATE, secret=STATE_JSON)
+    credential_id = store.list_credentials()[0]["credential_id"]
+
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{store.path}")
+    monkeypatch.setenv("ARTIFACT_ROOT", str(tmp_path / "artifacts"))
+
+    def refuse(self, *args, **kwargs):
+        raise AssertionError("a run with a stored session must never call capture_session()")
+    monkeypatch.setattr(CredentialStore, "capture_session", refuse)
+
+    session_path, issued = JobExecutor._prepare_run_session(
+        {"workspace_id": "local", "job_id": "job_1"}, {"credentialId": credential_id}, [])
+
+    assert session_path is not None
+    assert json.loads(open(session_path, encoding="utf-8").read())["cookies"][0]["value"] == "s3cr3t"
+    assert issued == {}
+
+
 def test_a_run_gets_an_owner_only_state_file(store, keyed, tmp_path):
     meta = store.put(label="Shop login", kind=KIND_STATE, secret=STATE_JSON)
 
