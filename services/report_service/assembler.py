@@ -1654,7 +1654,8 @@ class ReportAssembler:
 
     @classmethod
     def _attach_verdict_screenshots(cls, findings: list[dict[str, Any]], journeys: list[dict[str, Any]],
-                                    redact_selectors: list[str] | None = None) -> None:
+                                    redact_selectors: list[str] | None = None, start_evidence_number: int = 1
+                                    ) -> None:
         """Show the page a stage-1 finding is about.
 
         Only the vision-synthesis findings carried an image before, so every slide
@@ -1664,8 +1665,13 @@ class ReportAssembler:
         none, fall back to the run's own framing shots: the state the run ended in
         for a blocker or a failed criterion, the state it started in for an
         observation about the page.
+
+        `start_evidence_number` continues E7's per-finding marker numbering after
+        whatever `_synthesize_pain_points` already assigned, so a report with both
+        finding sources never draws two region crops with the same digit.
         """
         redact_selectors = redact_selectors or []
+        evidence_number = start_evidence_number
         screenshots_by_run = {journey.get("runId"): (journey.get("artifacts") or {}).get("screenshots") or []
                               for journey in journeys}
         snapshots_by_run = {journey.get("runId"): (journey.get("artifacts") or {}).get("snapshots") or []
@@ -1699,7 +1705,7 @@ class ReportAssembler:
             # degraded to that persona's eyesight, hunting is exactly what they
             # cannot do.
             box = finding.get("elementBox")
-            crop = cls._crop_element_data_uri(image_bytes, box) if box else None
+            crop = cls._crop_element_data_uri(image_bytes, box, number=evidence_number) if box else None
             is_region = bool(crop)
             if not crop:
                 crop = cls._screenshot_data_uri(image_bytes)
@@ -1707,6 +1713,9 @@ class ReportAssembler:
                 finding["screenshotCrop"] = crop
                 finding["screenshotIsRegion"] = is_region
                 finding["screenshotRef"] = path
+                if is_region:
+                    finding["evidenceNumber"] = evidence_number
+                    evidence_number += 1
 
     @staticmethod
     def _praise_as_strengths(findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
@@ -2016,13 +2025,51 @@ class ReportAssembler:
         except (OSError, ValueError):
             return base64.b64encode(image_bytes).decode("ascii"), "image/png"
 
-    @staticmethod
-    def _crop_element_data_uri(image_bytes: bytes, box: dict[str, Any] | None,
-                               max_edge: int = 1200) -> str | None:
+    # RPT-5/E7: the colour a marker is drawn in. Distinct from the deck's own
+    # palette (`_presentation`'s `#38bdf8` accent) on purpose -- this has to read
+    # against an arbitrary, unknown page background, not the deck's own.
+    _EVIDENCE_MARKER_COLOR = (255, 59, 48)
+
+    @classmethod
+    def _draw_evidence_marker(cls, image: Any, box: dict[str, Any], offset: tuple[int, int], number: int) -> None:
+        """Outline the exact element a finding is about and number it, in place.
+
+        E7 (audit, absent, high): "bare screenshots make a reader hunt for the
+        thing being discussed." The coordinates are already held on every
+        finding (`elementBox`) -- this is the first thing that draws them."""
+        from PIL import ImageDraw, ImageFont
+        left, top = offset
+        x0, y0 = box["x"] - left, box["y"] - top
+        x1, y1 = x0 + box["width"], y0 + box["height"]
+        draw = ImageDraw.Draw(image)
+        draw.rectangle([x0, y0, x1, y1], outline=cls._EVIDENCE_MARKER_COLOR, width=3)
+        label = str(number)
+        radius = 11
+        # Anchored on the box's own top-left corner, not the crop's -- the crop
+        # is padded around the element, and a badge in the crop's corner would
+        # point at empty margin rather than the control itself.
+        cx, cy = max(radius, x0), max(radius, y0)
+        draw.ellipse([cx - radius, cy - radius, cx + radius, cy + radius], fill=cls._EVIDENCE_MARKER_COLOR)
+        try:
+            font = ImageFont.load_default()
+        except OSError:
+            font = None
+        text_box = draw.textbbox((0, 0), label, font=font)
+        tw, th = text_box[2] - text_box[0], text_box[3] - text_box[1]
+        draw.text((cx - tw / 2 - text_box[0], cy - th / 2 - text_box[1]), label, fill=(255, 255, 255), font=font)
+
+    @classmethod
+    def _crop_element_data_uri(cls, image_bytes: bytes, box: dict[str, Any] | None,
+                               max_edge: int = 1200, number: int | None = None) -> str | None:
         """Crop the specific region a vision finding refers to out of the full
         screenshot, so the UI can show exactly what the finding is about instead
         of just a wall of text. Returns None (caller shows no image) rather than
-        raising -- a missing crop is a lesser failure than losing the finding."""
+        raising -- a missing crop is a lesser failure than losing the finding.
+
+        `number`, when given, is drawn as a marker on the element's own box
+        (E7) -- the same number the deck prints beside this finding's title, so
+        a reader can match text to picture without reading the caption.
+        """
         if not box:
             return None
         try:
@@ -2037,7 +2084,10 @@ class ReportAssembler:
                 right, bottom = min(image.width, int(x + width + pad)), min(image.height, int(y + height + pad))
                 if right <= left or bottom <= top:
                     return None
-                cropped = image.crop((left, top, right, bottom))
+                cropped = image.crop((left, top, right, bottom)).convert("RGB")
+                if number is not None:
+                    cls._draw_evidence_marker(cropped, {"x": x, "y": y, "width": width, "height": height},
+                                              (left, top), number)
                 # A finding can point at a large region (a hero, a whole nav
                 # column), and an uncapped crop is emitted at natural size --
                 # which is how a slide ended up with an image taller than the
@@ -2572,6 +2622,10 @@ class ReportAssembler:
             return []
         pain_point_by_id = {point["id"]: point for run in cohort_runs for point in run["painPoints"]}
         findings = []
+        # E7: a number drawn on the region crop, matched by the deck to the same
+        # number beside this finding's title -- one counter across this whole
+        # call, so two findings from the same run never draw the same digit.
+        next_evidence_number = 1
         for root_cause in root_causes:
             member_points = [pain_point_by_id[pid] for pid in root_cause["painPointIds"] if pid in pain_point_by_id]
             if not member_points:
@@ -2581,12 +2635,15 @@ class ReportAssembler:
                            key=lambda value: cls._SEVERITY_RANK.get(value, 1))
             affected = len(root_cause["affectedUsers"])
             impact = root_cause["averageStateImpact"]
-            crop, crop_is_region = None, False
+            crop, crop_is_region, evidence_number = None, False, None
             element = (representative.get("elements") or [{}])[0]
             screenshot = screenshot_bytes.get(representative.get("screenshotRef"))
             if element.get("box") and screenshot:
-                crop = cls._crop_element_data_uri(screenshot, element["box"])
+                evidence_number = next_evidence_number
+                crop = cls._crop_element_data_uri(screenshot, element["box"], number=evidence_number)
                 crop_is_region = crop is not None
+                if crop_is_region:
+                    next_evidence_number += 1
             if crop is None and screenshot:
                 # Page-wide finding (no element to point at): show the page itself.
                 crop = cls._screenshot_data_uri(screenshot)
@@ -2632,6 +2689,8 @@ class ReportAssembler:
                 # Without this the crop could not be traced back to the capture it
                 # was taken from (it was recorded only for stage-1 findings).
                 finding["screenshotRef"] = representative.get("screenshotRef")
+                if crop_is_region:
+                    finding["evidenceNumber"] = evidence_number
             findings.append(finding)
         return findings
 
@@ -2667,7 +2726,58 @@ class ReportAssembler:
                 finding["redesignHtml"] = fragment
 
     @staticmethod
-    def _generate_redesign_fragment(finding: dict[str, Any], url: str | None,
+    def _sample_palette(screenshot_path: str | None, box: dict[str, Any] | None) -> dict[str, str] | None:
+        """The real colours this page actually uses, read from the pixels rather
+        than assumed.
+
+        C4 (audit, weak, high): the re-design panel is real, working HTML -- a
+        genuine advantage over a static mockup -- and it renders a generic
+        `#0066ff` button on white in system-ui, so it reads as a sketch rather
+        than a proposal grounded in the page it is fixing. journeytest-core's
+        DOM snapshot carries no colour, type-size or radius fields to lift this
+        from (checked: not one fixture or live payload in this codebase's tests
+        has ever carried them), so this reads it the one place it verifiably
+        is -- the screenshot's own pixels -- rather than assuming a schema this
+        codebase has not seen.
+        """
+        if not screenshot_path:
+            return None
+        try:
+            from PIL import Image
+        except ImportError:
+            return None
+        try:
+            with Image.open(screenshot_path) as image:
+                image = image.convert("RGB")
+                element_region = image
+                if box:
+                    x, y, width, height = float(box["x"]), float(box["y"]), float(box["width"]), float(box["height"])
+                    left, top = max(0, int(x)), max(0, int(y))
+                    right, bottom = min(image.width, int(x + width)), min(image.height, int(y + height))
+                    if right > left and bottom > top:
+                        element_region = image.crop((left, top, right, bottom))
+                # The corner farthest from the element's own box is the closest
+                # thing to "the page background" this can read without a layout
+                # model -- top-left would as often as not sample the element
+                # itself, on a page where the finding is about something near
+                # the top of the viewport.
+                far_left = image.width // 2 <= (box.get("x", 0) if box else 0)
+                far_top = image.height // 2 <= (box.get("y", 0) if box else 0)
+                bx0 = 0 if far_left else max(0, image.width - 40)
+                by0 = 0 if far_top else max(0, image.height - 40)
+                background_region = image.crop((bx0, by0, min(bx0 + 40, image.width), min(by0 + 40, image.height)))
+
+                def dominant_hex(region):
+                    small = region.resize((1, 1), Image.LANCZOS)
+                    r, g, b = small.getpixel((0, 0))
+                    return f"#{r:02x}{g:02x}{b:02x}"
+
+                return {"elementColor": dominant_hex(element_region), "pageBackground": dominant_hex(background_region)}
+        except (OSError, ValueError, KeyError, TypeError):
+            return None
+
+    @classmethod
+    def _generate_redesign_fragment(cls, finding: dict[str, Any], url: str | None,
                                     providers: list[tuple[str, str, str]] | None = None) -> str | None:
         """One finding -> a self-contained HTML fragment implementing its fix.
 
@@ -2687,7 +2797,18 @@ class ReportAssembler:
         elements = "\n".join(
             f'- selector="{element.get("elementId") or element.get("elementSelector", "")}" '
             f'role={element.get("role", "")} box={json.dumps(element.get("box") or {})}'
+            # Opportunistic: used when present on an element, never assumed. See
+            # _sample_palette's docstring for why this cannot be relied on.
+            + (f' fontPx={element["fontPx"]}' if element.get("fontPx") else "")
+            + (f' color={element["color"]}' if element.get("color") else "")
             for element in (finding.get("elements") or [])[:8]) or "(no specific element; page-wide finding)"
+        first_box = next((element.get("box") for element in (finding.get("elements") or []) if element.get("box")),
+                         finding.get("elementBox"))
+        palette = cls._sample_palette(finding.get("screenshotRef"), first_box)
+        palette_line = (f"Measured palette from the real screenshot: this element's colour is "
+                        f"{palette['elementColor']}, the page background is {palette['pageBackground']}. "
+                        "Use these, not a generic default, unless the fix specifically requires a different "
+                        "colour (e.g. a contrast fix)." if palette else "")
         changes = "\n".join(f"- {alternative.get('proposedChange')}"
                             for alternative in (finding.get("alternatives") or [])
                             if alternative.get("proposedChange")) or (finding.get("recommendation") or "")
@@ -2705,6 +2826,7 @@ class ReportAssembler:
             f"What the user hit: {finding.get('summary') or finding.get('evidence') or ''}",
             f"Root cause: {finding.get('rootCause') or finding.get('mechanism') or 'not stated'}",
             f"Real elements observed in the page (from the browser's own semantic snapshot):\n{elements}",
+            *([palette_line] if palette_line else []),
             f"Changes to implement:\n{changes}",
             "Produce the corrected component implementing those changes.",
         ])
@@ -2736,6 +2858,12 @@ class ReportAssembler:
                                    for ref in references) + '</p>') if references else ""
             badge = escape(str(item.get("severity", "")).upper())
             category = escape(str(item.get("category", "")))
+            # E7: the same number drawn on the region crop, so a reader matches
+            # text to picture without reading the caption end to end.
+            marker = (f'<span style="display:inline-flex;align-items:center;justify-content:center;'
+                     f'width:1.3em;height:1.3em;border-radius:50%;background:#ff3b30;color:#fff;'
+                     f'font-size:.75em;margin-right:.4em">{item["evidenceNumber"]}</span>'
+                     if item.get("evidenceNumber") else "")
             # The persona's own reasoning from the run that produced this finding --
             # what makes it demonstrated rather than asserted.
             quotes = "".join(
@@ -2743,7 +2871,7 @@ class ReportAssembler:
                 f'{escape(str(evidence.get("quote", ""))[:400])}'
                 f'<br><span style="opacity:.6;font-size:.8em">— {escape(str(evidence.get("personaName") or "Synthetic user"))}</span>'
                 f'</blockquote>' for evidence in (item.get("personaEvidence") or [])[:2])
-            return (f'<li><strong>[{badge}] {escape(item["title"])}</strong> '
+            return (f'<li>{marker}<strong>[{badge}] {escape(item["title"])}</strong> '
                     f'<span style="opacity:.6">({category})</span><br>'
                     f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{grounding}{quotes}{image}</li>')
 
@@ -3049,7 +3177,9 @@ show(0);
             document = ("<!doctype html><meta charset=utf-8>"
                         "<style>body{margin:0;padding:12px;font:14px/1.5 system-ui,sans-serif;background:#fff;color:#111}</style>"
                         + fragment)
-            panels.append('<figure class="shot"><figcaption>Re-design (live HTML)</figcaption>'
+            # C3: labelled as what it is -- working code, not a mockup -- with its
+            # own source offered right below it so it can be read and lifted.
+            panels.append('<figure class="shot"><figcaption>Re-design &mdash; working code, not a mockup</figcaption>'
                           f'<iframe class="redesign" sandbox="allow-same-origin" '
                           f'srcdoc="{escape(document, quote=True)}" title="Proposed redesign of this component"></iframe>'
                           '</figure>')

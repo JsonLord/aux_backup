@@ -993,7 +993,7 @@ def test_redesign_is_rendered_as_live_html_beside_the_current_screenshot():
     }, 1, "Observed user issue")
 
     assert "Current design" in html
-    assert "Re-design (live HTML)" in html
+    assert "Re-design" in html and "working code, not a mockup" in html
     assert "<iframe" in html and 'sandbox="allow-same-origin"' in html
     assert "srcdoc=" in html
     # The fragment is escaped into srcdoc, not injected raw into the deck.
@@ -1403,6 +1403,117 @@ def test_a_verdict_screenshot_is_blanked_before_it_is_cropped_when_its_region_is
                                                                 "snapshots": [str(snapshot)]}}])
     decoded_unredacted = _decoded_data_uri(findings_unredacted[0]["screenshotCrop"]).convert("RGB")
     assert decoded_unredacted.getpixel((decoded_unredacted.width // 2, decoded_unredacted.height // 2)) == (255, 0, 0)
+
+
+# --- RPT-5/E7: annotating the evidence -----------------------------------------
+
+def test_a_numbered_marker_is_drawn_on_the_elements_own_box():
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (200, 100), color="white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    crop = JobExecutor._crop_element_data_uri(
+        buffer.getvalue(), {"x": 100, "y": 40, "width": 40, "height": 20}, number=3)
+
+    decoded = _decoded_data_uri(crop).convert("RGB")
+    # The badge is centred on the box's own top-left corner (offset by the crop's
+    # own padding), not the crop's -- a badge in the crop's corner would point at
+    # empty margin rather than the control itself.
+    pad = 12
+    badge_x, badge_y = pad, pad
+    # A few pixels off centre: solid marker colour, clear of the number glyph's
+    # own anti-aliased edge at the exact centre pixel.
+    sample = (badge_x - 8, badge_y)
+    assert decoded.getpixel(sample) == JobExecutor._EVIDENCE_MARKER_COLOR
+    # No number: no marker drawn, and the crop is otherwise unchanged.
+    plain = _decoded_data_uri(JobExecutor._crop_element_data_uri(
+        buffer.getvalue(), {"x": 100, "y": 40, "width": 40, "height": 20})).convert("RGB")
+    assert plain.getpixel(sample) == (255, 255, 255)
+
+
+def test_evidence_numbers_are_unique_across_verdict_and_vision_findings(tmp_path):
+    """The deck prints the same number beside a finding's title that its image
+    carries, so two findings in one report must never draw the same digit --
+    proven here by continuing the counter from a start other than 1, the way
+    executor.py continues it past whatever _synthesize_pain_points already used."""
+    from PIL import Image
+    import json as json_module
+
+    screenshot = tmp_path / "final-view.png"
+    Image.new("RGB", (200, 100), color="white").save(screenshot)
+    snapshot = tmp_path / "final-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": "#a", "box": {"x": 0, "y": 0, "width": 20, "height": 20}},
+        {"selector": "#b", "box": {"x": 40, "y": 0, "width": 20, "height": 20}}]}))
+    findings = [
+        {"title": "First issue", "source": "uxFindings", "runId": "run_1", "evidenceScreenshot": None,
+         "elementBox": {"x": 0, "y": 0, "width": 20, "height": 20}},
+        {"title": "Second issue", "source": "uxFindings", "runId": "run_1", "evidenceScreenshot": None,
+         "elementBox": {"x": 40, "y": 0, "width": 20, "height": 20}},
+    ]
+    JobExecutor._attach_verdict_screenshots(
+        findings, [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)],
+                                                     "snapshots": [str(snapshot)]}}],
+        start_evidence_number=5)
+
+    assert [item["evidenceNumber"] for item in findings] == [5, 6]
+
+
+def test_the_deck_prints_the_same_number_beside_the_title():
+    html = JobExecutor._presentation({
+        "critical_pain_points": [{"title": "Ambiguous label", "severity": "medium", "category": "ux",
+                                  "summary": "s", "evidenceNumber": 2}],
+        "elements_to_preserve": [], "impact_analysis": {}, "url": "https://example.com",
+        "executive_summary": "", "evidence_language": "observed", "limitations": []})
+
+    assert ">2<" in html
+
+
+# --- RPT-5/C4: the re-design drawn in the page's own palette --------------------
+
+def test_the_redesign_prompt_is_grounded_in_the_screenshots_own_colours(tmp_path, monkeypatch):
+    from PIL import Image
+
+    screenshot = tmp_path / "shot.png"
+    image = Image.new("RGB", (200, 100), color=(30, 60, 90))
+    image.paste((0, 0, 0), (0, 0, 40, 40))
+    image.save(screenshot)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    captured = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs): pass
+        def complete_text(self, system_prompt, user_prompt):
+            captured["user_prompt"] = user_prompt
+            return "<div>fixed</div>"
+
+    import services.persona_service.semantic as semantic
+    monkeypatch.setattr(semantic, "DirectLLMSemanticEngine", FakeEngine)
+
+    finding = {"title": "Generic button", "summary": "s", "elements": [
+        {"elementId": "#buy", "role": "button", "box": {"x": 0, "y": 0, "width": 40, "height": 40}}],
+        "screenshotRef": str(screenshot), "alternatives": [{"proposedChange": "Make it blue"}]}
+
+    fragment = JobExecutor._generate_redesign_fragment(finding, "https://example.com")
+
+    assert fragment == "<div>fixed</div>"
+    assert "#000000" in captured["user_prompt"], "the element's own measured colour reaches the prompt"
+    assert "#1e3c5a" in captured["user_prompt"], "the page background, sampled from a corner, reaches the prompt"
+
+
+def test_the_redesign_is_labelled_as_working_code_not_a_mockup():
+    html = JobExecutor._finding_slide({
+        "title": "Generic link text", "summary": "The link says only 'Learn more'.",
+        "screenshotCrop": "data:image/png;base64,Zm9v", "screenshotIsRegion": True,
+        "redesignHtml": '<div class="fix"><style>.fix a{font-weight:600}</style>'
+                        '<a href="#">Read the IANA domain policy</a></div>',
+    }, 1, "Observed user issue")
+
+    assert "working code, not a mockup" in html
 
 
 def test_a_redacted_element_never_leaves_this_process_in_the_vision_critique_request(tmp_path, monkeypatch):

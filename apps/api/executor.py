@@ -377,7 +377,13 @@ class JobExecutor(ReportAssembler):
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
-        self._attach_verdict_screenshots(findings, journeys, redact_selectors=redact_selectors)
+        # E7: continue the vision findings' own evidence-marker numbering rather
+        # than restarting at 1, so no two region crops in one report share a digit.
+        # Read off `findings` itself, not `vision_findings` -- the latter is only
+        # ever assigned when a worker is configured, and this call runs either way.
+        next_evidence_number = 1 + max((item.get("evidenceNumber") or 0 for item in findings), default=0)
+        self._attach_verdict_screenshots(findings, journeys, redact_selectors=redact_selectors,
+                                         start_evidence_number=next_evidence_number)
         self._attach_redesigns(findings, data.get("url"), self._providers_for(job, ROLE_VISION))
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
         if any(source.startswith("persona.") for source in sources):
