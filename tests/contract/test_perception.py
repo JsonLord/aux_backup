@@ -859,3 +859,126 @@ def test_a_capture_with_a_few_things_off_its_edge_is_still_a_capture():
 
     assert result["capture"]["trustworthy"] is True
     assert result["capture"]["outsideShare"] < 0.5
+
+
+# --- CAP-0: the scan accumulates a memory across steps -----------------------
+#
+# Before this, `scan()` was called fresh from `candidates` on every HTTP call
+# with no record of what an earlier call already fixated, so a persona whose
+# fixation budget is smaller than the page re-fixated the identical top-scoring
+# elements every step and `notLookedAt` never fell (docs/next-cycle-worksheet.md
+# measures this precisely on cycle 51: `fixated` was 6 on all 26 captures, the
+# identical six, 19 of 43 elements ever looked at, `notLookedAt` holding at
+# 13-14). These pin the fix: `already_seen` deprioritises rather than excludes,
+# and `not_looked_at` is computed against the whole run's memory, not one call.
+
+def test_an_already_seen_candidate_is_deprioritised_not_excluded():
+    """The core of CAP-0's scan() change. Two candidates, B naturally stronger
+    than A; marking B already-seen must flip the order (deprioritised) but must
+    not remove B from contention (not excluded) once the budget covers both."""
+    from services.perception_service.scanpath import Scanner, scan
+
+    candidate_a = {"selector": "a", "box": {"x": 0, "y": 0, "width": 10, "height": 10},
+                   "role": "", "salience": {"score": 0.5, "motion": 0.0}, "goalAffinity": 0.0}
+    candidate_b = {"selector": "b", "box": {"x": 0, "y": 0, "width": 10, "height": 10},
+                   "role": "", "salience": {"score": 0.8, "motion": 0.0}, "goalAffinity": 0.0}
+    # "spotted" gives a constant pattern affinity regardless of position, so the
+    # salience gap above (0.5 vs 0.8) is the only thing separating them.
+    scanner = Scanner(pattern="spotted", fixations=1, distractibility=0.0, goal_pull=0.0)
+
+    baseline = scan([candidate_a, candidate_b], (1280, 900), scanner)
+    assert [item["selector"] for item in baseline] == ["b"], \
+        "without memory, the naturally stronger candidate wins -- confirms the fixture"
+
+    deprioritised = scan([candidate_a, candidate_b], (1280, 900), scanner,
+                         already_seen=frozenset({"b"}))
+    assert [item["selector"] for item in deprioritised] == ["a"], \
+        "seen before, so a fresh comparable candidate now wins first"
+
+    # Not excluded: raise the budget to 2 and b is still reachable.
+    both = scan([candidate_a, candidate_b], (1280, 900),
+               Scanner(pattern="spotted", fixations=2, distractibility=0.0, goal_pull=0.0),
+               already_seen=frozenset({"b"}))
+    assert {item["selector"] for item in both} == {"a", "b"}, \
+        "a person can re-read something -- already_seen narrows the budget, it does not remove a candidate"
+
+
+def test_scan_with_no_already_seen_is_unchanged():
+    """Every caller that does not yet send memory -- and every existing test in
+    this file -- must see identical behaviour. Pinned two ways: the parameter
+    absent, and explicitly empty."""
+    from services.perception_service.scanpath import Scanner, scan
+
+    candidates = [
+        {"selector": "a", "box": {"x": 0, "y": 0, "width": 10, "height": 10},
+         "role": "", "salience": {"score": 0.5, "motion": 0.0}, "goalAffinity": 0.0},
+        {"selector": "b", "box": {"x": 0, "y": 0, "width": 10, "height": 10},
+         "role": "", "salience": {"score": 0.8, "motion": 0.0}, "goalAffinity": 0.0},
+    ]
+    scanner = Scanner(pattern="spotted", fixations=1, distractibility=0.0, goal_pull=0.0)
+
+    without_the_argument = scan(candidates, (1280, 900), scanner)
+    with_an_empty_set = scan(candidates, (1280, 900), scanner, already_seen=frozenset())
+
+    assert [item["selector"] for item in without_the_argument] == ["b"]
+    assert without_the_argument == with_an_empty_set
+
+
+def _stacked_headline_elements(count):
+    """`count` distinguishable, unmissable blocks of text stacked down a page --
+    same shape as the existing edge-of-capture fixture above, so every one is
+    legible to default abilities and becomes a scan candidate."""
+    from PIL import Image, ImageDraw
+    import base64, io as _io
+
+    image = Image.new("RGB", (1280, 120 + count * 70), (255, 255, 255))
+    draw = ImageDraw.Draw(image)
+    for index in range(count):
+        draw.text((12, 42 + index * 70), f"Row {index} of the page, unmissable text", fill=(0, 0, 0))
+    buffer = _io.BytesIO()
+    image.save(buffer, format="PNG")
+    encoded = base64.b64encode(buffer.getvalue()).decode()
+
+    elements = [{"selector": f"e{index}", "role": "", "name": f"Row {index}",
+                "fontPx": 16, "fontWeight": 400,
+                "box": {"x": 10, "y": 40 + index * 70, "width": 320, "height": 20}}
+               for index in range(count)]
+    return encoded, elements, image.height
+
+
+def test_not_looked_at_excludes_everything_already_seen_this_run():
+    """The line CAP-0's done-when measures: `notLookedAt` falls as memory grows,
+    because it is computed against the whole run's fixations, not one call's six.
+
+    Deterministic regardless of which specific elements scan() picks this call:
+    with `already_seen` covering every candidate, nothing can be newly unseen."""
+    image, elements, height = _stacked_headline_elements(10)
+    viewport = {"width": 1280, "height": height}
+    # Impatient: "spotted", budget 6 -- fewer than the 10 candidates, so the
+    # first call necessarily leaves some not looked at.
+    behavior = {"patience": 0.1}
+
+    first = perceive(image_base64=image, elements=elements, behavior=behavior, viewport=viewport)
+    assert first["counts"]["notLookedAt"] > 0, "budget (6) is smaller than the page (10) -- confirms the fixture"
+
+    all_selectors = [item["selector"] for item in elements]
+    second = perceive(image_base64=image, elements=elements, behavior=behavior, viewport=viewport,
+                      already_seen=all_selectors)
+    assert second["counts"]["notLookedAt"] == 0, \
+        "everything is in already_seen, so nothing can print as newly unseen this call"
+    assert second["notLookedAt"] == []
+
+
+def test_an_absent_already_seen_leaves_perceive_unchanged():
+    """Signature-level pin: perceive() with no already_seen argument at all --
+    every call in this file before CAP-0 -- must behave exactly as it did."""
+    image, elements, height = _stacked_headline_elements(3)
+    viewport = {"width": 1280, "height": height}
+
+    with_default = perceive(image_base64=image, elements=elements, viewport=viewport)
+    with_explicit_empty = perceive(image_base64=image, elements=elements, viewport=viewport,
+                                   already_seen=[])
+
+    assert with_default["counts"] == with_explicit_empty["counts"]
+    assert [item["selector"] for item in with_default["perceived"]] == \
+           [item["selector"] for item in with_explicit_empty["perceived"]]

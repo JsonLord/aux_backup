@@ -484,7 +484,7 @@ class PerceptionClient {
   }
 
   async perceive({ screenshotBase64, elements, abilities, behavior, motionFrames, viewport, goal,
-    returnSeenImage = false }) {
+    returnSeenImage = false, alreadySeen }) {
     if (!this.available || !screenshotBase64 || !elements?.length) return null;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
@@ -500,6 +500,11 @@ class PerceptionClient {
           // never produced.
           returnSeenImage: Boolean(returnSeenImage),
           detectUnnamed: this.detectUnnamed,
+          // CAP-0: what this persona has already fixated this run, so the service
+          // deprioritises re-fixating it rather than the scan resetting to
+          // nothing every step. The director accumulates this; this client only
+          // forwards it.
+          alreadySeen: alreadySeen || [],
         }),
         signal: controller.signal,
       });

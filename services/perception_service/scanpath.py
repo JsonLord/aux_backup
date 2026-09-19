@@ -130,17 +130,32 @@ def pattern_affinity(pattern: str, box: dict, size: tuple[int, int], role: str =
     return 0.5
 
 
-def scan(candidates: list[dict], size: tuple[int, int], scanner: Scanner) -> list[dict]:
+# How hard an already-seen candidate's score is cut before this look's fixations
+# compete against it. Not zero -- a real visitor can re-read something -- but
+# enough that a fresh, comparable element wins first. CAP-0: without this, scan()
+# has no memory between HTTP calls, so a persona who has already read the same six
+# things sixteen times fixates the identical six a seventeenth time and reports
+# never having seen the rest of the page.
+ALREADY_SEEN_DECAY = 0.35
+
+
+def scan(candidates: list[dict], size: tuple[int, int], scanner: Scanner,
+         already_seen: frozenset[str] = frozenset()) -> list[dict]:
     """Walk the page and return the fixations, in the order they happened.
 
-    Two rules make this a scan rather than a ranking. Inhibition of return: once
-    something has been looked at, it stops competing, which is why a person does
-    not stare at the same banner for their whole visit. And a budget: the eye
-    stops when patience does, and whatever is left was not seen.
+    Three rules make this a scan rather than a ranking. Inhibition of return:
+    once something has been looked at *this call*, it stops competing, which is
+    why a person does not stare at the same banner for one visit. A budget: the
+    eye stops when patience does, and whatever is left was not seen. And decay
+    across calls: `already_seen` is everything this person has fixated on an
+    earlier look this run, and it is deprioritised rather than dropped, the same
+    distinction the rest of this module draws between "not looked at" and "not
+    there".
 
-    Each candidate is `{box, role, salience, goalAffinity}`; `salience` is the
-    score from salience.py, already weighted by how distractible this person is,
-    and `goalAffinity` is how much the region looks like what they came for.
+    Each candidate is `{selector, box, role, salience, goalAffinity}`; `salience`
+    is the score from salience.py, already weighted by how distractible this
+    person is, and `goalAffinity` is how much the region looks like what they
+    came for.
     """
     remaining = list(candidates)
     fixations: list[dict] = []
@@ -163,7 +178,10 @@ def scan(candidates: list[dict], size: tuple[int, int], scanner: Scanner) -> lis
             # price fixated six paragraphs of feature copy and never looked at
             # the price, which was bolder and larger than any of them.
             wanted = float(candidate.get("goalAffinity") or 0.0) * scanner.goal_pull
-            scored.append((affinity * 0.7 + salience * 0.6 + interrupt + wanted, candidate))
+            weight = affinity * 0.7 + salience * 0.6 + interrupt + wanted
+            if candidate.get("selector") in already_seen:
+                weight *= ALREADY_SEEN_DECAY
+            scored.append((weight, candidate))
         scored.sort(key=lambda pair: pair[0], reverse=True)
         weight, chosen = scored[0]
         remaining.remove(chosen)

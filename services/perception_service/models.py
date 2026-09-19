@@ -94,6 +94,12 @@ class PerceiveRequest(BaseModel):
     # Ask the screen parser for things the DOM does not name -- text baked into
     # an image, a canvas-drawn control. Ignored when no detector is installed.
     detectUnnamed: bool = False
+    # CAP-0: every selector this person has fixated on an earlier look this run.
+    # The caller (PersonaDirector) accumulates this across steps; this service
+    # stays stateless HTTP and only deprioritises what it is handed. Absent or
+    # empty behaves exactly as before -- extra="ignore" above means an older
+    # client that never sends it is unaffected.
+    alreadySeen: list[str] = Field(default_factory=list)
 
 
 class PerceiveResponse(BaseModel):

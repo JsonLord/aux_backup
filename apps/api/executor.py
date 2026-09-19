@@ -219,6 +219,10 @@ class JobExecutor(ReportAssembler):
             # exist nowhere else, because no check against the DOM can produce
             # either -- see _pain_points_from_perception.
             findings += self._pain_points_from_perception(journeys)
+            # CAP-0: whether this run produced a "never looked at" finding, so the
+            # limitations note below can say what changed about that class rather
+            # than staying silent about it.
+            has_missed_findings = any(finding.get("source") == "perception.missed" for finding in findings)
             # What the page looked like it would do and then did not. First-hand,
             # falsifiable, and invisible to every other source here.
             findings += self._pain_points_from_expectations(journeys)
@@ -258,6 +262,21 @@ class JobExecutor(ReportAssembler):
                 "suggestedImprovements/failed pass-criteria) from a real browser run against the "
                 "target URL, not text inferred from the task description.",
             ]
+            if has_missed_findings:
+                # Said explicitly, in both directions: before CAP-0 the scan had no
+                # memory between HTTP calls, so it re-fixated the same few elements
+                # on every step and "on screen and never looked at" partly measured
+                # that amnesia rather than the page's prominence
+                # (docs/next-cycle-worksheet.md). This run's scan carries a per-run
+                # memory (alreadySeen), so this class means what it says here; a
+                # report from before this change should be read with that caveat.
+                limitations.append(
+                    "This run's scan remembers what each persona already looked at earlier in "
+                    "the same run, so findings below titled \"On screen and never looked at\" "
+                    "reflect the page's prominence rather than the scan re-fixating the same "
+                    "few elements on every step. Reports produced before this change did not "
+                    "have that memory and should be read with that caveat."
+                )
             limitations.extend(tempered)
             if vision_findings:
                 limitations.append(

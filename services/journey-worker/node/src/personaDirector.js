@@ -227,6 +227,12 @@ class PersonaDirector {
     this.walk = walk;
     this.frames = frames;
     this.frame = frame;
+    // CAP-0: every selector this person has fixated on an earlier look, this
+    // run only -- not PersonaMemoryBank, which is about standing lessons across
+    // runs, and not the page in front of them right now. Sent back on each
+    // perceive() call so the scan deprioritises what it has already shown this
+    // person instead of re-ranking the page from nothing every step.
+    this.everSeen = new Set();
     // What this person has already been told about themselves, kept across runs.
     // Every judged action goes in; recurring criticism is consolidated into
     // standing lessons that reach the next step through the faculty.
@@ -943,6 +949,9 @@ class PersonaDirector {
       // beside a finding that says they could not see something -- and until now
       // the service could produce it and nobody ever asked.
       returnSeenImage: true,
+      // CAP-0: what this person has fixated on an earlier look this run, so the
+      // scan does not fixate the identical six candidates on every step.
+      alreadySeen: [...this.everSeen],
     });
     // A capture the service itself does not believe describes the page. It says
     // so, and until now nobody asked: the run took the empty view at face value,
@@ -955,6 +964,17 @@ class PersonaDirector {
     // on a capture we trust is the strongest finding this system makes. Nothing
     // legible on a capture we do not trust is a failed measurement, and the only
     // honest thing to do with it is put it down.
+    const captureTrusted = !(perception?.capture && perception.capture.trustworthy === false);
+    // CAP-0: only a trustworthy capture's fixations join the running total. This
+    // step is retried whole when the capture is not trusted (see below), and
+    // `everSeen` is instance state that outlives one attempt -- folding in a
+    // discarded measurement's selectors would decay elements this person has
+    // never actually seen, permanently, from data the run itself threw away.
+    if (captureTrusted) {
+      for (const item of perception?.perceived || []) {
+        if (item?.selector) this.everSeen.add(item.selector);
+      }
+    }
     if (perception?.capture && perception.capture.trustworthy === false) {
       // Where the page was standing, when we know. A renderer that painted
       // nothing and a viewport parked past the end of the document produce the

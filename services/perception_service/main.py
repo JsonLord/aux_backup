@@ -61,6 +61,7 @@ def perceive_page(body: PerceiveRequest):
             viewport=body.viewport.model_dump() if body.viewport else None,
             return_seen_image=body.returnSeenImage,
             goal=body.goal,
+            already_seen=body.alreadySeen,
         )
     except ValueError as error:
         # A capture too large to decode, or one that is not an image at all.

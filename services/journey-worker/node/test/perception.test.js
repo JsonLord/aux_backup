@@ -378,3 +378,21 @@ test("a shift that did not happen leaves the correction to be made", async () =>
   assert.equal((seen.scrollY || 0) - (seen.shiftedBy || 0), 700,
     "the whole offset is still owed");
 });
+
+test("alreadySeen travels in the request body, defaulting to empty", async () => {
+  const bodies = [];
+  const client = new PerceptionClient({
+    endpoint: "http://perception.test",
+    fetch: async (url, options) => {
+      bodies.push(JSON.parse(options.body));
+      return { ok: true, json: async () => ({ perceived: [] }) };
+    },
+  });
+  const args = { screenshotBase64: "AAA", elements: [{ selector: "e1", box: {} }] };
+
+  await client.perceive(args);
+  assert.deepEqual(bodies[0].alreadySeen, [], "a caller that sends nothing behaves as before");
+
+  await client.perceive({ ...args, alreadySeen: ["e1", "e2"] });
+  assert.deepEqual(bodies[1].alreadySeen, ["e1", "e2"]);
+});

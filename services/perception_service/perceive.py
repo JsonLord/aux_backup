@@ -130,7 +130,7 @@ def _scaled(element: dict, scale: float) -> dict:
 def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None = None,
              behavior: dict | None = None, motion_frames: list[str] | None = None,
              viewport: dict | None = None, return_seen_image: bool = False,
-             goal: str = "") -> dict:
+             goal: str = "", already_seen: list[str] | None = None) -> dict:
     """Run one page through one persona's eyes.
 
     `elements` are the DOM's own account of what is there -- selector, role, name
@@ -140,6 +140,14 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
     `goal` is what they came for, in their own words -- the task text. A scan is
     not a survey, and somebody hunting for a price walks past the feature copy
     without reading it.
+
+    `already_seen` is every selector this person has fixated on an earlier look
+    this run (CAP-0). This function is stateless HTTP and stays that way -- the
+    caller accumulates it across steps and sends it back each time. Without it,
+    `scan()` has no memory between calls: it re-ranks the same page from nothing
+    every step, so a fixation budget of six fixates the identical six
+    candidates on every look, and "on screen and never looked at" measures the
+    scan's own amnesia rather than the page.
     """
     page = _decode(image_base64)
     eyes = Eyes.from_abilities(abilities)
@@ -276,12 +284,19 @@ def perceive(*, image_base64: str, elements: list[dict], abilities: dict | None 
                                        or blank_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE
                                        or illegible_share > UNTRUSTWORTHY_ILLEGIBLE_SHARE)))
 
-    fixations = scan(candidates, size, scanner)
+    seen_before = frozenset(already_seen or ())
+    fixations = scan(candidates, size, scanner, already_seen=seen_before)
     # Matched by selector, not by object identity: scan() returns a copy of each
     # candidate with its order attached, so `id()` never matches and every
     # element -- including the ones just fixated -- lands in "not looked at".
     fixated = {item["selector"] for item in fixations}
-    not_looked_at = [item for item in candidates if item["selector"] not in fixated]
+    # CAP-0: "not looked at" is against everything this person has ever fixated
+    # this run, not only this call's six. Without seen_before here, a selector
+    # fixated on step one and deprioritised out of step two's six would print as
+    # newly unseen on step two -- the same amnesia scan() no longer has, reintroduced
+    # one line later.
+    not_looked_at = [item for item in candidates
+                      if item["selector"] not in fixated and item["selector"] not in seen_before]
 
     result = {
         "eyes": {"colorVision": eyes.color_vision, "acuity": eyes.acuity,

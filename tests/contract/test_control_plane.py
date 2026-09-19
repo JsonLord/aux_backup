@@ -1665,6 +1665,50 @@ def test_run_that_produced_neither_verdict_nor_evidence_fails_the_job(tmp_path, 
     assert "no usable Chromium" in completed["error"]["message"]
 
 
+def test_a_never_looked_at_finding_carries_the_scan_memory_caveat(tmp_path, monkeypatch):
+    """CAP-0: before the scan carried alreadySeen across steps, "on screen and
+    never looked at" partly measured the scan re-fixating the same few elements
+    every step rather than the page's prominence. The report says so, in both
+    directions, whenever it publishes one of these findings."""
+    missed = {"selector": "p.price", "name": "From EUR 49 per month", "goalAffinity": 0.85,
+              "box": {"x": 40, "y": 73, "width": 300, "height": 26}}
+    perception_step = {"eyes": {"acuity": 1.0, "contrastSensitivity": 1.0, "blurPx": 0.0},
+                       "scan": {"pattern": "spotted", "fixationBudget": 6,
+                                "why": ["little patience, so they hunt for the one thing they came for"]},
+                       "counts": {"elements": 15, "fixated": 6},
+                       "notPerceived": [], "notLookedAt": ["e2", "e4"],
+                       "missedWhatTheyCameFor": [missed]}
+    timeline = [{"type": "persona.perception", "data": perception_step} for _ in range(2)]
+    timeline.append({"type": "persona.reflection", "data": {"matched": "no", "gap": "No price seen."}})
+    verdict = {"status": "failed", "criteria": [], "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict, "timeline": timeline,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert "On screen and never looked at" in {item["title"].split(": ")[0]
+                                               for item in report["critical_pain_points"]}
+    caveat = [line for line in report["limitations"] if "remembers what each persona" in line]
+    assert caveat, "a report publishing this finding class must say what changed about it"
+    assert "same few elements on every step" in caveat[0]
+
+
+def test_no_scan_memory_caveat_when_nothing_from_that_class_is_published(tmp_path, monkeypatch):
+    """The caveat is not boilerplate on every report -- only on the ones that
+    actually carry a finding it is about."""
+    verdict = {"status": "passed", "criteria": [{"id": "tasks-completed", "result": "met"}],
+              "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert not [line for line in report["limitations"] if "remembers what each persona" in line]
+
+
 def test_clean_run_is_still_reported_as_completed(tmp_path, monkeypatch):
     """The salvage path must not relabel healthy runs."""
     completed, report = _run_journey_job(tmp_path, monkeypatch, {

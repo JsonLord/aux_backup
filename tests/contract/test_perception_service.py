@@ -124,3 +124,18 @@ def test_an_element_without_a_box_is_dropped_rather_than_guessed_at():
     seen = {item["selector"] for item in
             body["perceived"] + body["notPerceived"] + body["notLookedAt"]}
     assert "e9" not in seen
+
+
+def test_already_seen_travels_through_the_http_contract():
+    """CAP-0: the field an old client never sends is ignored (model_config
+    extra="ignore" on the request already covers that); a client that does send
+    it changes what comes back, so the wiring from body to perceive() is real."""
+    all_selectors = [item["selector"] for item in ELEMENTS]
+
+    fresh = perceive()
+    assert fresh.status_code == 200
+
+    remembering = perceive(alreadySeen=all_selectors)
+    assert remembering.status_code == 200
+    assert remembering.json()["counts"]["notLookedAt"] == 0
+    assert remembering.json()["notLookedAt"] == []

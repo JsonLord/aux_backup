@@ -1942,3 +1942,88 @@ test("a frame older than the measurement is not the measurement's frame", async 
   assert.ok(shown.every((item) => item === "PAGESCREENSHOT"),
     "a frame that cannot be shown to be fresh is not used at all");
 });
+
+// --- CAP-0: the scan accumulates a memory across steps ------------------------
+//
+// PersonaDirector.everSeen is the run's own memory of what has been fixated --
+// distinct from PersonaMemoryBank, which is standing lessons about the person
+// across runs. This must grow across successive look()s and be sent as
+// alreadySeen on each perceive() call, so the perception service can
+// deprioritise re-fixating the same elements every step.
+
+test("what was fixated on one look is sent as alreadySeen on the next", async () => {
+  const calls = [];
+  let step = 0;
+  const perception = {
+    available: true,
+    async perceive(options) {
+      calls.push(options.alreadySeen);
+      step += 1;
+      // A different element "wins" each step, as memory-aware scanning would
+      // produce -- the test only needs the accumulation, not real scoring.
+      return {
+        observation: `step ${step}`, eyes: {}, scan: { pattern: "spotted", fixationBudget: 1 },
+        counts: { elements: 3, legible: 3, fixated: 1, notPerceived: 0, notLookedAt: 2 },
+        notPerceived: [],
+        perceived: [{ selector: `e${step}`, role: "link", name: `Row ${step}`,
+                     box: { x: 0, y: 0, width: 10, height: 10 } }],
+        notLookedAt: [],
+      };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({
+      elements: [{ selector: "e1", box: { x: 0, y: 0, width: 10, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+    }),
+    frames: () => [],
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+
+  await director.look({ text: "" }, ["find the price"]);
+  await director.look({ text: "" }, ["find the price"]);
+  await director.look({ text: "" }, ["find the price"]);
+
+  assert.deepEqual(calls[0], [], "nothing has been seen before the first look");
+  assert.deepEqual(calls[1], ["e1"], "what step one fixated is memory going into step two");
+  assert.deepEqual(new Set(calls[2]), new Set(["e1", "e2"]), "and it keeps accumulating");
+});
+
+test("a capture the service itself distrusts is never folded into the memory", async () => {
+  // The step is retried whole when the capture is not trusted, and everSeen is
+  // instance state that outlives one attempt -- folding in a discarded
+  // measurement's selectors would decay elements this person has never actually
+  // seen, permanently, from data the run itself threw away.
+  const calls = [];
+  const perception = {
+    available: true,
+    async perceive(options) {
+      calls.push(options.alreadySeen);
+      return {
+        observation: "", eyes: {}, scan: { pattern: "spotted", fixationBudget: 1 },
+        counts: { elements: 1, legible: 1, fixated: 1, notPerceived: 0, notLookedAt: 0 },
+        notPerceived: [],
+        perceived: [{ selector: "untrustworthy-element", role: "link", name: "x",
+                     box: { x: 0, y: 0, width: 10, height: 10 } }],
+        notLookedAt: [],
+        capture: { trustworthy: false, reason: "boxes and pixels disagree" },
+      };
+    },
+  };
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {}, perception,
+    walk: async () => ({
+      elements: [{ selector: "e1", box: { x: 0, y: 0, width: 10, height: 10 } }],
+      viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA",
+    }),
+    frames: () => [],
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+
+  await director.look({ text: "" }, ["find the price"]);
+  await director.look({ text: "" }, ["find the price"]);
+
+  assert.deepEqual(calls[0], []);
+  assert.deepEqual(calls[1], [], "the untrustworthy capture's fixation never joined the memory");
+});

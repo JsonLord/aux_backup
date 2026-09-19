@@ -300,6 +300,16 @@ into `spec.md` as the noise floor.
 *Done when:* a later cycle can be called better or worse than this one with a
 reason. **No item in this plan can be called an improvement before this exists.**
 
+**Not attempted, and why.** This needs `cycle-cohort.sh` and `measure.py`, which the
+worksheet places in "the session scratchpad" — a prior session's temp directory, not
+committed to this repository — plus a pinned `agent-browser` binary and network
+access to a live target site and model provider. None of the environments this cycle
+has been worked in so far had all three. Whoever picks this up first should either
+locate or rebuild `measure.py` (its job, per the worksheet, is straightforward:
+parse the run JSON for `refused`, `legibleShare`, and completed-run counts across
+three same-commit cohorts and report the min/max) and commit it alongside the noise
+floor it produces, so the next person is not solving this same problem again.
+
 ### BE-5. Concurrency and repeat runs
 
 Personas run sequentially, so time grows linearly, and a three-person cohort is
@@ -315,7 +325,7 @@ Design rationale in `docs/next-cycle-worksheet.md`. A hat is what the agent can
 and what it **thinks with** (the `model_settings.py` roles — which exist, and which
 BE-1 makes real).
 
-### CAP-0. The ground layer — the scan accumulates *(nothing hat-shaped ships first)*
+### CAP-0. The ground layer — the scan accumulates — **partly done**
 
 The worksheet measures this precisely on cycle 51's 26 captures: `fixated` is **6
 on every single capture** whatever the page offered; consecutive captures fixate the
@@ -347,6 +357,49 @@ forth up to six times) and **scrolling to an offset the page already holds**
 
 *Done when:* `notLookedAt` falls across a run instead of holding at 13–14, and two
 of three runs reach a verdict other than inconclusive.
+
+**What shipped.** The memory mechanism, in full: `scan()` (`scanpath.py:133`) takes
+`already_seen` and deprioritises rather than excludes (`ALREADY_SEEN_DECAY = 0.35`);
+`perceive()` computes `not_looked_at` against `candidates − (fixated ∪ already_seen)`,
+exactly the line the detail spec named; `PerceiveRequest` carries `alreadySeen`
+(`extra="ignore"`, so an old caller is unaffected); the worker's `PerceptionClient`
+forwards it; `PersonaDirector` accumulates the union of fixated selectors into
+`this.everSeen` across the run and sends it on every `perceive()` call. The report's
+limitations section now states, in both directions, that a "never looked at" finding
+draws on a scan with per-run memory as of this change, and that reports from before
+it should be read with that caveat. Twenty tests across Python and Node, each
+proving a specific claim: deprioritised-not-excluded, an untrustworthy capture's
+fixations never joining the run's memory (state that outlives one retried attempt),
+an absent `alreadySeen` behaving exactly as before, and the wiring at every hop.
+
+**One deviation, found while accumulating the memory, not anticipated by the
+detail spec.** `PersonaDirector.everSeen` must only accumulate from a call whose
+capture the perception service itself trusts. The step is retried whole when
+`perception.capture.trustworthy === false`, and `everSeen` is instance state that
+outlives one attempt — folding in a discarded measurement's selectors would decay
+elements this person has never actually seen, permanently, from data the run itself
+threw away. Guarded and covered by its own test.
+
+**What is not done, and why it is not a code gap.** The two "cheap siblings" —
+billing-toggle oscillation and scroll-to-an-already-held-offset — are not built.
+`faculty.js`'s `SCROLL` handler forwards `amount` to `browser.scroll({direction,
+amount})` as what reads, in this repository, as a **relative** delta; the worksheet
+describes `SCROLL:600` as **an absolute offset** the run keeps re-requesting. That is
+a claim about `agent-browser`'s behaviour under the pinned driver
+(`@baguette-studios/journeytest-core`), which is not installed in every environment
+this cycle was worked in (no `node_modules`, no live browser) and could not be
+verified from source in that environment. Building a no-op against a guessed API
+risks shipping code that either does nothing or throws against the real driver.
+Left for whoever can run a live `agent-browser` session to confirm the semantics
+first.
+
+**The second half of the done-when — "two of three runs reach a verdict other than
+inconclusive" — is a live-run measurement**, and requires the same infrastructure
+`BE-4` does (a live target site, real model credentials, several live cohorts) plus
+`measure.py`, which is referenced by the worksheet as living in a prior session's
+scratchpad and is not committed to this repository. It was not run. The mechanism
+that should produce that outcome is built and tested at the unit and integration
+level; confirming the outcome itself is `BE-4`'s job, on real infrastructure.
 
 ### CAP-1. `/webui` — the configuration surface — **done**
 

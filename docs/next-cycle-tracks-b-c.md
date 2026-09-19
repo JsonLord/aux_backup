@@ -288,7 +288,7 @@ sequential cohort, and findings carry a reproduction count.
 
 # Track C — hats, capabilities and `/webui`
 
-## CAP-0. The scan accumulates — the ground layer
+## CAP-0. The scan accumulates — the ground layer — **partly done, see `docs/next-cycle-plan.md`**
 
 ### What exists, exactly
 
@@ -376,6 +376,16 @@ persona that re-reads the same six things for sixteen steps will do exactly that
 a terminal and a login, burning a larger budget across a bigger surface with failures
 much harder to read. A `RUN` taken by an agent that has not noticed it already ran
 that command is not a capability; it is a loop with a shell.
+
+**Status.** The memory mechanism this section specifies is built and tested exactly
+as laid out — `alreadySeen`, the deprioritisation weight, the corrected `not_looked_at`
+subtraction, the worker forwarding it, `PersonaDirector` accumulating it. The two
+"cheap siblings" in the plan's summary of this item are not built: the SCROLL
+semantics they depend on live in the pinned `agent-browser` driver, not visible from
+source without a live browser session. And the code-level half of the done-when is
+verified by 20 new tests; the live-run half ("two of three runs reach a verdict")
+is a measurement that needs the same live infrastructure `BE-4` does. Full account
+in `docs/next-cycle-plan.md`'s CAP-0 section.
 
 ---
 
