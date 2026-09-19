@@ -1,7 +1,8 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { BehaviorController, computeWaitTolerance, initialState, seededRandom } = require("../src/behavior");
+const { BehaviorController, computeWaitTolerance, copingScores, initialState, probabilities,
+  seededRandom } = require("../src/behavior");
 const { EvidenceCoordinator } = require("../src/evidence");
 const { runJourney } = require("../src/index");
 
@@ -21,7 +22,33 @@ test("state transitions are deterministic and repeated failures escalate", () =>
   assert.deepEqual(a2, second.apply(failure()));
   assert.ok(a2.after.frustration - a1.after.frustration > a1.after.frustration);
   assert.equal(a2.after.repeatedEventCounts.submit, 2);
-  assert.equal(Object.keys(a2.coping.probabilities).length, 8);
+  // Named rather than counted. "continue" -- getting on with it -- was missing
+  // entirely, so every step forced a coping behaviour on a persona who had nothing
+  // to cope with: a calm one whose expectation had just been met retried the
+  // action that worked 60.3% of the time. Coping is control flow in the director,
+  // so those were real wasted steps.
+  assert.deepEqual(Object.keys(a2.coping.probabilities).sort(), [
+    "abandon", "backtrack", "continue", "explore", "impulsive_retry", "reread", "retry",
+    "seek_help", "wait",
+  ].sort());
+});
+
+test("a person with nothing to cope with gets on with it", () => {
+  const calm = new BehaviorController(profile);
+  const settled = { ...initialState(), perceivedProgress: 0.5 };
+  const easy = probabilities(copingScores(calm.profile, settled, { taskImportance: 0.6 }));
+
+  assert.ok(easy.continue > 0.5, `carrying on should be the common case, got ${easy.continue}`);
+  assert.ok(easy.continue > easy.retry, "retrying an action that just worked is not what a person does");
+  assert.ok(easy.continue > easy.impulsive_retry + easy.reread + easy.wait);
+
+  // And it gets out of the way the moment there is something to cope with: the
+  // rest of this table exists for the person who is stuck.
+  const stuck = { ...settled, frustration: 0.6, confusion: 0.5, anger: 0.3, perceivedProgress: 0,
+    consecutiveFailures: 2 };
+  const hard = probabilities(copingScores(calm.profile, stuck, { taskImportance: 0.6 }));
+  assert.ok(hard.continue < 0.1, `a stuck person should be coping, got continue=${hard.continue}`);
+  assert.ok(hard.retry + hard.reread > hard.continue * 5);
 });
 
 test("visible progress raises an auditable wait threshold", () => {

@@ -12,6 +12,7 @@ import requests
 from .auth import IdentityProvider
 from .executor import JobExecutor
 from .legacy import LegacyGitHubSessionProvider
+from .model_routing import record_model_access
 from .models import ArtifactCreate, ArtifactPin, JobCreate, LegacyGitHubImport, MultipartComplete, PresignedArtifactCreate, SessionCreate
 from .queue import job_queue
 from .store import Store, create_store
@@ -126,6 +127,15 @@ def create_app(store: Store | None = None, legacy_provider: LegacyGitHubSessionP
         require_write(auth)
         payload = body.model_dump() if hasattr(body, "model_dump") else body.dict()
         authorized(store.get_session(payload["session_id"]), auth, "session")
+        # Whose model budget this job may spend, decided here because this is
+        # where the auth dict exists. A job carries only workspace_id and
+        # owner_user_id, and in hf_token mode that owner id is the Hugging Face
+        # subject while the reserved-owner list holds usernames -- so deciding it
+        # later would deny the Space's own owner the credentials reserved for
+        # them (apps/api/model_routing.py).
+        payload["metadata"] = record_model_access(
+            payload.get("metadata") or {}, auth,
+            example_persona=(payload.get("metadata") or {}).get("examplePersona"))
         record, created = store.create_job(payload)
         if not created:
             response.status_code = status.HTTP_200_OK

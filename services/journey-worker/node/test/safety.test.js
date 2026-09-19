@@ -24,3 +24,40 @@ test("secrets are redacted and webpage text is explicitly bounded and untrusted"
   assert.match(sanitized, /^<untrusted_web_content>/);
   assert.ok(sanitized.length < 100);
 });
+
+// --- CAP-4: redacting an account, not just a typed secret ---------------------
+
+test("a sensitive element's accessible name is redacted, not only its value", () => {
+  const { redactSensitive } = require("../src/safety");
+  // The shape a walked element carries: sensitive is marked by the walk's own
+  // data (a password input), and the account-menu button below carries no such
+  // marker at all -- that is markSelectorsSensitive's job, tested separately.
+  const element = { selector: "#pw", type: "password", name: "Current password", value: "hunter2" };
+  const redacted = redactSensitive(element);
+  assert.equal(redacted.name, "[REDACTED]");
+  assert.equal(redacted.value, "[REDACTED]");
+  assert.equal(redacted.selector, "#pw", "the selector itself is not a secret and stays");
+});
+
+test("a selector this run was told to always redact is marked sensitive", () => {
+  const { markSelectorsSensitive, redactSensitive } = require("../src/safety");
+  const elements = [
+    { selector: ".account-menu", role: "button", name: "Signed in as jane.doe@example.com" },
+    { selector: "#buy-button", role: "button", name: "Buy now" },
+  ];
+
+  const marked = markSelectorsSensitive(elements, [".account-menu"]);
+  const redacted = marked.map((element) => redactSensitive(element));
+
+  assert.equal(redacted[0].name, "[REDACTED]");
+  assert.equal(redacted[1].name, "Buy now", "an element off the list is untouched");
+});
+
+test("no selector list and no sensitive marker is a no-op", () => {
+  const { markSelectorsSensitive, redactSensitive } = require("../src/safety");
+  const elements = [{ selector: "#buy-button", role: "button", name: "Buy now" }];
+
+  assert.deepEqual(markSelectorsSensitive(elements, []), elements);
+  assert.deepEqual(markSelectorsSensitive(elements, undefined), elements);
+  assert.equal(redactSensitive(elements)[0].name, "Buy now");
+});

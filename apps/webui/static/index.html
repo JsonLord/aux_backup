@@ -1,0 +1,81 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Model providers</title>
+<link rel="stylesheet" href="/webui/style.css">
+</head>
+<body>
+<header class="mast">
+  <p class="eyebrow">Developer mode</p>
+  <h1>Model providers</h1>
+  <p class="standfirst">
+    Which model does which part of a run, for this workspace. A provider is an
+    endpoint, a model and a key together — naming an alias without its token is a
+    401 on every call, so this takes all three or refuses the row.
+  </p>
+  <p id="access" class="banner" hidden></p>
+</header>
+
+<main class="wrap">
+  <section id="roles" aria-live="polite">
+    <p class="loading">Loading…</p>
+  </section>
+
+  <section class="add">
+    <h2>Add a provider</h2>
+    <form id="add-form">
+      <div class="field">
+        <label for="role">What it does</label>
+        <select id="role" name="role" required></select>
+        <p id="role-help" class="note"></p>
+      </div>
+      <div class="field">
+        <label for="label">Name</label>
+        <input id="label" name="label" required placeholder="My router" autocomplete="off">
+      </div>
+      <div class="field">
+        <label for="baseUrl">Endpoint</label>
+        <input id="baseUrl" name="baseUrl" required placeholder="https://router.example/v1"
+               inputmode="url" autocomplete="off">
+        <p class="note">OpenAI-compatible. The path ending in <code>/v1</code>, not the model URL.</p>
+      </div>
+      <div class="field">
+        <label for="model">Model</label>
+        <input id="model" name="model" required placeholder="auto" autocomplete="off">
+        <p class="note">Save the row first, then <b>List models</b> asks the endpoint what it serves.</p>
+      </div>
+      <fieldset class="field">
+        <legend>Key</legend>
+        <label class="radio">
+          <input type="radio" name="source" value="ref" checked>
+          <span><b>Space secret</b> — store only the variable's name. The value never leaves
+          the environment. Recommended.</span>
+        </label>
+        <label class="radio">
+          <input type="radio" name="source" value="key">
+          <span><b>Paste a key</b> — encrypted at rest, and refused outright when nothing can
+          encrypt it.</span>
+        </label>
+        <input id="secretRef" name="secretRef" placeholder="MY_ROUTER_KEY" autocomplete="off">
+        <input id="apiKey" name="apiKey" type="password" placeholder="sk-…" autocomplete="off" hidden>
+        <p id="encryption-note" class="note" hidden></p>
+      </fieldset>
+      <div class="actions">
+        <button type="submit" class="primary">Save provider</button>
+        <span id="add-status" class="status" role="status"></span>
+      </div>
+    </form>
+  </section>
+</main>
+
+<footer>
+  Providers are tried in the order they are listed: the first that answers serves the
+  run, and a request that never reached a server moves to the next. A 400 or a 401 is
+  that provider answering, and stops the chain.
+</footer>
+
+<script src="/webui/app.js"></script>
+</body>
+</html>

@@ -7,9 +7,12 @@ import os
 import random
 import re
 import time
+from urllib.parse import urlsplit
 from typing import Any, Protocol
 
 import requests
+
+from .providers import model_providers, unreachable, why
 
 
 # Real-world population-wide prevalence, used only as an unconditional sampling
@@ -96,18 +99,75 @@ class MockSemanticEngine:
         }
 
 
-class DirectLLMSemanticEngine:
+class DirectLLMSemanticEngine:  # noqa: D101 - documented below
     name = "openai-compatible-direct"
 
-    def __init__(self, api_key=None, base_url=None, model=None):
-        self.api_key = api_key or os.getenv("BLABLADOR_API_KEY") or os.getenv("OPENAI_API_KEY")
-        self.base_url = (base_url or os.getenv("BLABLADOR_BASE_URL")
-                         or os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
-                         or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
-        # The freellmapi router requires the literal model id "auto"; other ids 400.
-        self.model = model or os.getenv("OPENAI_MODEL", "auto")
+    # Where this engine can run, most preferred first. Each entry is a *set* --
+    # endpoint, model and key together -- because they are one setting and not
+    # three. Taking the endpoint from one provider and the model id from another
+    # is the failure this list exists to prevent: BLABLADOR_BASE_URL used to
+    # default to the primary router's URL, so when it became a real second
+    # endpoint this engine started sending the primary's model id ("auto") to
+    # Blablador, which answered 404 on every persona compile.
+    _PROVIDERS = (
+        ("SEMANTIC_BASE_URL", "SEMANTIC_MODEL", "SEMANTIC_API_KEY", ""),
+        ("OPENAI_COMPATIBLE_ENDPOINT", "OPENAI_MODEL", "OPENAI_API_KEY", "auto"),
+        ("OPENAI_BASE_URL", "OPENAI_MODEL", "OPENAI_API_KEY", "auto"),
+        # Blablador serves specific small models by name and has no "auto".
+        ("BLABLADOR_BASE_URL", "BLABLADOR_MODEL", "BLABLADOR_API_KEY", "alias-fast"),
+    )
+
+    DEFAULT_BASE_URL = "https://debian-devil.tail3f341b.ts.net/v1"
+
+    def __init__(self, api_key=None, base_url=None, model=None, *, providers=None):
+        # `providers` is a chain the caller has already resolved: this workspace's
+        # own model settings, plus the deployment's own only when that caller is
+        # allowed to spend them (apps/api/model_routing.py). Given one, this engine
+        # runs on it and on nothing else -- which is the whole point, because
+        # appending the deployment's providers to everybody's chain would make the
+        # admission gate decorative. Given none, it resolves from the environment
+        # exactly as it did before, so every existing caller is unaffected.
+        #
+        # An empty list is not the same as None: it means this caller has no
+        # provider at all, and __init__ then raises rather than quietly falling
+        # back onto credentials it may not use.
+        self.providers = [tuple(entry) for entry in providers] if providers is not None else None
+        # Set by _complete once something answers; read by callers that report it.
+        self.served_by: dict[str, str] | None = None
+        resolved = self._resolve(base_url, model, api_key, chain=self.providers)
+        self.base_url = resolved["base_url"].rstrip("/")
+        self.model = resolved["model"]
+        self.api_key = resolved["api_key"]
         if not self.api_key:
-            raise ValueError("OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
+            raise ValueError(
+                "no model provider is available for this caller: configure one in "
+                "Settings -> Model providers, or set OPENAI_API_KEY / BLABLADOR_API_KEY"
+                if self.providers is not None else
+                "OPENAI_API_KEY or BLABLADOR_API_KEY is required for the direct semantic engine")
+
+    @classmethod
+    def _resolve(cls, base_url=None, model=None, api_key=None, chain=None) -> dict:
+        """One provider's endpoint, model and key -- never a mixture of two.
+
+        Explicit arguments win, for tests and for callers that pin an endpoint.
+        Otherwise the deployment's own chain decides (providers.py), which is the
+        same chain generation and compilation walk -- keeping the endpoint, the
+        model and the key travelling together, which is the whole point.
+        """
+        explicit = {"base_url": base_url, "model": model, "api_key": api_key}
+        chain = model_providers() if chain is None else list(chain)
+        preferred = chain[0] if chain else (cls.DEFAULT_BASE_URL, "", "auto")
+        resolved = {"base_url": explicit["base_url"] or preferred[0],
+                    "model": explicit["model"] or preferred[2],
+                    "api_key": explicit["api_key"] or preferred[1]}
+        # A pinned endpoint with no pinned model must not borrow another
+        # provider's model id: sending "auto" to Blablador answers 404 on every
+        # compile, which is the failure _PROVIDERS was written to prevent.
+        if explicit["base_url"] and not explicit["model"]:
+            match = next((entry for entry in chain if entry[0].rstrip("/") == base_url.rstrip("/")), None)
+            if match:
+                resolved["model"], resolved["api_key"] = match[2], explicit["api_key"] or match[1]
+        return resolved
 
     @staticmethod
     def _parse_json_completion(content: str) -> dict:
@@ -151,23 +211,70 @@ class DirectLLMSemanticEngine:
             max_attempts = _int_env_override("SEMANTIC_ENGINE_MAX_ATTEMPTS") or 4
         if retry_wait_seconds is None:
             retry_wait_seconds = _float_env_override("SEMANTIC_ENGINE_RETRY_WAIT_SECONDS") or 2.0
-        payload = {"model": self.model, "temperature": temperature, "messages": messages}
         if response_format is not None:
-            payload["response_format"] = response_format
+            pass
         last_error: Exception | None = None
-        for attempt in range(1, max_attempts + 1):
-            try:
-                response = requests.post(f"{self.base_url}/chat/completions", headers={"authorization": f"Bearer {self.api_key}"}, json=payload, timeout=timeout)
-                response.raise_for_status()
-                content = response.json()["choices"][0]["message"]["content"]
-                if not content or not content.strip():
-                    raise ValueError("model returned an empty completion")
-                return content
-            except (requests.RequestException, ValueError, KeyError, IndexError) as error:
-                last_error = error
-                if attempt < max_attempts:
-                    time.sleep(retry_wait_seconds * attempt)
-        raise RuntimeError(f"semantic engine request failed after {max_attempts} attempts: {last_error}") from last_error
+        # _PROVIDERS was a preference list, not a fallback chain: _resolve returned
+        # the first configured entry and nothing ever tried the second. So when the
+        # primary stopped resolving, persona compilation retried the same dead name
+        # four times and gave up, while Blablador sat reachable and credentialed.
+        # Walking it here keeps the set intact -- endpoint, model and key move
+        # together, which is what the list was built to guarantee.
+        for where in self._chain():
+            payload = {"model": where["model"], "temperature": temperature, "messages": messages}
+            if response_format is not None:
+                payload["response_format"] = response_format
+            for attempt in range(1, max_attempts + 1):
+                try:
+                    response = requests.post(f"{where['base_url']}/chat/completions",
+                                             headers={"authorization": f"Bearer {where['api_key']}"},
+                                             json=payload, timeout=timeout)
+                    response.raise_for_status()
+                    content = response.json()["choices"][0]["message"]["content"]
+                    if not content or not content.strip():
+                        raise ValueError("model returned an empty completion")
+                    # Which provider actually answered. A run served by the second
+                    # entry is a run whose reproducibility claim is different, and
+                    # the report has no way to say so unless this is kept. Host and
+                    # model only -- a base URL can carry a key in a query string,
+                    # so only the scheme and host are ever recorded.
+                    split = urlsplit(where["base_url"])
+                    self.served_by = {"endpoint": f"{split.scheme}://{split.netloc}"
+                                      if split.netloc else where["base_url"],
+                                      "model": where["model"]}
+                    return content
+                except (requests.RequestException, ValueError, KeyError, IndexError) as error:
+                    last_error = error
+                    if attempt < max_attempts:
+                        time.sleep(retry_wait_seconds * attempt)
+            # Only a request that never reached a server is worth carrying to
+            # another endpoint. A 400 or a refusal is this provider answering, and
+            # asking the next one the same bad question spends a second budget on
+            # the same failure.
+            if not unreachable(last_error):
+                break
+            print(f"[persona] {where['base_url']} ({where['model']}) could not be reached "
+                  f"({why(last_error)}); trying the next configured provider", flush=True)
+        raise RuntimeError(f"semantic engine request failed after {max_attempts} attempts: "
+                           f"{why(last_error)}") from last_error
+
+    def _chain(self) -> list[dict]:
+        """Where this engine may run, starting with where it was configured to.
+
+        The engine is constructed with one provider and keeps it; this returns
+        that one first and then any others the deployment has, so a run does not
+        end because a single name stopped resolving.
+        """
+        chain = [{"base_url": self.base_url, "model": self.model, "api_key": self.api_key}]
+        # What else this caller may reach. A caller that brought its own chain is
+        # held to it; only one that brought none falls back to the deployment's.
+        rest = model_providers() if self.providers is None else self.providers
+        for url, key, model in rest:
+            url = url.rstrip("/")
+            if (url, model) == (self.base_url, self.model):
+                continue
+            chain.append({"base_url": url, "model": model, "api_key": key})
+        return chain
 
     def _complete_json(self, prompt: dict, max_attempts: int | None = None, retry_wait_seconds: float | None = None) -> dict:
         """Like _complete, but sends `prompt` as a JSON-encoded user message and
@@ -251,10 +358,14 @@ class DirectLLMSemanticEngine:
         }
 
 
-def semantic_engine() -> SemanticEngine:
-    selected = os.getenv("SEMANTIC_ENGINE", "direct" if (os.getenv("BLABLADOR_API_KEY") or os.getenv("OPENAI_API_KEY")) else "mock")
+def semantic_engine(providers=None) -> SemanticEngine:
+    # "Is there anything to call?" is one question, and providers.py is the only
+    # thing that should be answering it -- unless the caller was handed a chain,
+    # in which case that chain is the answer and the environment is not consulted.
+    selected = os.getenv("SEMANTIC_ENGINE",
+                         "direct" if (providers or model_providers()) else "mock")
     if selected == "direct":
-        return DirectLLMSemanticEngine()
+        return DirectLLMSemanticEngine(providers=providers)
     if selected == "mock":
         return MockSemanticEngine()
     raise ValueError(f"unsupported SEMANTIC_ENGINE: {selected}")

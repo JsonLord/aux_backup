@@ -15,8 +15,14 @@ textdistance>=4.6,<5
 pyjwt[crypto]>=2.10,<3
 # Explicit, not relying on an incidental transitive pull -- crops the specific
 # element region a vision-critique finding refers to out of a full JourneyTest
-# screenshot (apps/api/executor.py's _vision_critique_journeys).
+# screenshot (apps/api/executor.py's _vision_critique_journeys), and carries the
+# whole of the perception service: a persona's optics are applied to the capture
+# as real pixel operations, so what they cannot see is not detected at all.
 pillow>=10.4,<12
+# The arithmetic behind that: colour matrices, contrast slopes, the frame
+# differencing that finds what is moving on the page. It arrives transitively
+# today, which is not a reason for a direct dependency to stay unnamed.
+numpy>=1.26,<3
 llama-index-core>=0.14,<0.15
 llama-index-embeddings-openai>=0.6,<0.7
 llama-index-readers-web>=0.6,<0.7

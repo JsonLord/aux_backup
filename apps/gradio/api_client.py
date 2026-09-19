@@ -98,7 +98,11 @@ class ControlPlaneClient:
             if job["status"] in {"succeeded", "failed", "cancelled"}:
                 return job
             time.sleep(poll_interval)
-        raise TimeoutError(f"job {job_id} did not finish within {timeout}s")
+        # Said as what it is: the wait ended, not the work. The job is still
+        # running on the control plane and will still write its artifacts, so a
+        # caller that gives up has abandoned a result rather than lost one.
+        raise TimeoutError(f"job {job_id} did not finish within {timeout}s -- it may still be "
+                           f"running; its artifacts will appear against this job id if it does")
 
     def get_artifact_content(self, artifact_id):
         response = requests.get(f"{self.base_url}/v1/artifacts/{artifact_id}/content", headers=self.headers, timeout=30)
@@ -133,12 +137,18 @@ class PersonaRuntimeClient:
         authorization = authorization or os.getenv("PERSONA_AUTHORIZATION") or (f"Bearer {os.environ['HF_OIDC_TOKEN']}" if os.getenv("HF_OIDC_TOKEN") else None)
         if authorization: self.headers["Authorization"] = authorization
 
-    def generate(self, theme, customer_profile, count, scenario="", seed=1, allow_offline_fallback=False):
-        response = requests.post(f"{self.base_url}/v1/personas/generate", headers=self.headers, json={"theme": theme, "customer_profile": customer_profile, "count": int(count), "scenario": scenario, "seed": int(seed), "allow_offline_fallback": bool(allow_offline_fallback)}, timeout=float(os.getenv("PERSONA_GENERATION_TIMEOUT", "900")))
+    # `models` is the chain the caller resolved for this workspace and role
+    # (apps/api/model_routing.py). Omitted, the persona service resolves from its
+    # own environment, which is what every caller not yet routed does.
+    def generate(self, theme, customer_profile, count, scenario="", seed=1, allow_offline_fallback=False, models=None):
+        body = {"theme": theme, "customer_profile": customer_profile, "count": int(count), "scenario": scenario, "seed": int(seed), "allow_offline_fallback": bool(allow_offline_fallback)}
+        if models is not None:
+            body["models"] = models
+        response = requests.post(f"{self.base_url}/v1/personas/generate", headers=self.headers, json=body, timeout=float(os.getenv("PERSONA_GENERATION_TIMEOUT", "900")))
         response.raise_for_status()
         return response.json()
 
-    def compile(self, persona, scenario="", seed=1, source="preset"):
+    def compile(self, persona, scenario="", seed=1, source="preset", models=None):
         # The compile endpoint runs its own internal retry/backoff against the
         # model router (services/persona_service/semantic.py's _complete, up to
         # SEMANTIC_ENGINE_MAX_ATTEMPTS attempts with growing backoff) for two
@@ -148,7 +158,10 @@ class PersonaRuntimeClient:
         # answer even a single compile call). Matches generate()'s pattern of a
         # generous, overridable timeout rather than a tight hardcoded one.
         timeout = float(os.getenv("PERSONA_COMPILE_TIMEOUT", "180"))
-        response = requests.post(f"{self.base_url}/v1/personas/compile", headers=self.headers, json={"persona": persona, "scenario": scenario, "seed": int(seed), "source": source}, timeout=timeout)
+        body = {"persona": persona, "scenario": scenario, "seed": int(seed), "source": source}
+        if models is not None:
+            body["models"] = models
+        response = requests.post(f"{self.base_url}/v1/personas/compile", headers=self.headers, json=body, timeout=timeout)
         response.raise_for_status()
         return response.json()
 

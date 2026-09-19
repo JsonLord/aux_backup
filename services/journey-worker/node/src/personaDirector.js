@@ -1,0 +1,1218 @@
+"use strict";
+/**
+ * A director that runs the journey as a person rather than as an agent.
+ *
+ * journeytest-core takes any `AgentDirector` -- `{name, model?, run(context)}` --
+ * so this replaces the Pi director without forking anything, and keeps the
+ * browser driver, the event recorder, the artifact directories, the video and the
+ * UI-change recording exactly as they are.
+ *
+ * What it adds is the persona. Two pieces of this repository already model one
+ * and neither was ever reachable on a live run: behavior.js keeps frustration,
+ * anger, confusion, trust and fatigue and samples a coping strategy from the
+ * persona's own traits, and physical.js turns abilities into pointer scatter,
+ * working-memory limits and reading time. Both sat below the early `return` in
+ * index.js. Here they decide what happens.
+ *
+ * The consequence that matters is that coping is control flow, not description.
+ * When the model says `abandon`, the run stops and the verdict says the persona
+ * gave up -- because a synthetic user who would have left and did not is not a
+ * synthetic user, it is a script. Where the old director produced an
+ * "inconclusive" fallback because nothing called journey_finish, this produces a
+ * verdict either way: someone either got what they came for or they did not.
+ *
+ * Everything the persona thinks and feels goes through `context.recorder`, which
+ * already writes events.ndjson and run.json. The experience record therefore
+ * ships as a normal run artifact, which is what a later UX-reasoning layer reads
+ * alongside the screenshots and the DOM.
+ */
+
+const { createHash } = require("node:crypto");
+const { writeFile } = require("node:fs/promises");
+const path = require("node:path");
+
+const { AdherenceGate } = require("./adherence");
+const { BehaviorController } = require("./behavior");
+const { browsingFaculty } = require("./faculty");
+const { PersonaMemoryBank } = require("./memoryBank");
+const { PerceptionClient, frameImage, intoCaptureSpace, lookAtPage,
+  motionFramesFrom } = require("./perception");
+
+// How many times a measurement of the page is worth attempting.
+//
+// Every reason look() falls back -- a walk that threw, a picture that did not
+// come back, a page that moved or grew under the walk, a capture the perception
+// service will not stand behind -- says one thing: there is no measurement of
+// this page yet. None of them is an answer *about* the page, which is exactly
+// the class where asking again gets a different and better answer. Cycle 37 lost
+// 32 steps to these and retried none of them.
+const CAPTURE_ATTEMPTS = 3;
+
+// Between attempts. A page that was still assembling itself wants time more than
+// it wants anything else, and on a two-core box it wants more of it.
+const CAPTURE_BACKOFF_MS = 600;
+const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
+const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
+const { holdRevealKeeper, releaseRevealKeeper, revealOnce } = require("./revealKeeper");
+const { latestFrame, recentFrames } = require("./viewportStream");
+const { markSelectorsSensitive, redactSensitive } = require("./safety");
+
+const DEFAULT_MAX_STEPS = 40;
+
+// CAP-4: a run given a session file started signed in. A "Sign in"/"Log in"
+// prompt appearing where the walk did not see one before is the one signal
+// this codebase has that the session it started with no longer holds --
+// journeytest-core has no other notion of "still authenticated" to check
+// against. Matched on the whole accessible name/text so it does not also
+// catch "Sign in with Google" on a page that offers it as one of several
+// options while already signed in some other way.
+const SIGNED_OUT_PROMPT = /^(sign|log)\s*in$/i;
+
+/**
+ * How much of the persona's simulated time is actually spent waiting.
+ *
+ * A slow reader takes a long time over a wordy page, and that has to bear on
+ * their patience -- but paying it in real seconds makes a run unusable. Measured
+ * on a live run: 83 seconds of real sleep per turn at 260 words per minute, and
+ * 180 at 120, which is two hours for a forty-step journey spent doing nothing.
+ *
+ * So simulated time is *accounted* rather than *slept*: the full duration goes
+ * into the behaviour model, where it drives fatigue, elapsed time and wait
+ * tolerance exactly as before, while the wall clock advances by this fraction of
+ * it. Set AUX_PERSONA_TIME_SCALE to 1 to watch a run in real time.
+ */
+function timeScale(env = process.env) {
+  const configured = Number.parseFloat(String(env.AUX_PERSONA_TIME_SCALE || ""));
+  return Number.isFinite(configured) && configured >= 0 ? Math.min(configured, 1) : 0;
+}
+
+// Even with time accounted rather than slept, a run should not spin: this is the
+// floor between actions, and it is also what keeps a live viewer's frames moving.
+const MIN_STEP_MS = 120;
+// However slow the reader, no single page is worth this much of the wall clock.
+const MAX_REAL_WAIT_MS = 8000;
+
+/**
+ * The most time a person spends taking in a page before doing something.
+ *
+ * readingDurationMs() answers "how long to read this text", which is right for
+ * text somebody reads. It is wrong for a page somebody is deciding about: nobody
+ * reads a landing page end to end before clicking, they skim. Charged in full it
+ * came to 83 seconds per view, which drove fatigue up by 0.138 a turn and had
+ * every persona worn out after eight pages regardless of what the page did.
+ *
+ * Capping it is an approximation of skimming and is meant to be replaced: once a
+ * scan path exists, the charge becomes the fixations actually made rather than a
+ * guess bounded by a constant.
+ */
+const MAX_SCAN_MS = 20000;
+// A scroll animation is over long before this. Long enough that a walk which
+// caught the page mid-motion gets a still one on the second try, short enough
+// that a step does not notice paying it.
+const LET_IT_COME_TO_REST_MS = 700;
+
+const sleep = (ms) => new Promise((resolve) => {
+  const timer = setTimeout(resolve, Math.max(0, ms));
+  if (typeof timer.unref === "function") timer.unref();
+});
+
+/**
+ * How badly an action went, in the terms behavior.js reduces over.
+ *
+ * A driver call that throws is an outright failure. One that returns but changes
+ * nothing is worse than it looks: "I clicked and the page ignored me" is the
+ * shape of most real frustration, and it is invisible if only exceptions count.
+ */
+function outcomeEvent(action, { failed, changed, error, matched }) {
+  const repeatKey = `${action.type}:${action.target}`;
+  if (failed) {
+    return { type: "user_error", severity: 0.75, goalBlocked: true, repeatKey,
+      attribution: { software: 0.6, user: 0.4 }, detail: String(error || "").slice(0, 200) };
+  }
+  // What the persona expected against what arrived. This is the signal that
+  // separates "I clicked Pricing and got a contact form" from "I clicked Pricing
+  // and got the prices" -- mechanically identical, and about as different as two
+  // experiences can be.
+  if (matched && MATCH_OUTCOMES[matched]) {
+    return { ...MATCH_OUTCOMES[matched], repeatKey };
+  }
+  // Nothing to compare against -- fall back to whether the page answered at all.
+  if ((action.type === "CLICK" || action.type === "TYPE") && !changed) {
+    return { type: "ambiguous_feedback", severity: 0.45, goalBlocked: false, repeatKey,
+      attribution: { interface: 0.8 } };
+  }
+  return { type: "success", severity: 0, recoveryQuality: 0.6, repeatKey: action.type };
+}
+
+/**
+ * A task as words, whatever shape it arrived in.
+ *
+ * Journeys carry tasks as plain strings, but nothing guarantees that, and
+ * `String(task)` on an object yields "[object Object]" -- which would be handed
+ * to the persona as the thing they came to do, and would then be what the eye
+ * hunts for. Silent nonsense is worse than a missing task, so an object with no
+ * text in any of the usual fields becomes nothing at all.
+ */
+function taskText(task) {
+  if (typeof task === "string") return task.trim();
+  if (!task || typeof task !== "object") return "";
+  for (const field of ["instruction", "description", "task", "text", "goal", "name"]) {
+    if (typeof task[field] === "string" && task[field].trim()) return task[field].trim();
+  }
+  return "";
+}
+
+/** What the persona can see of the page, bounded by what they can hold in mind. */
+/**
+ * What the thing acted on says on it, according to the eyes that chose it.
+ *
+ * The perception walk already carries a name for every element it resolved, and
+ * the selectors it uses are the same strings the actor targets -- so the run has
+ * always known that "e18" is the "Monthly" button and never told anyone.
+ */
+function seenElements(perception) {
+  return [...(perception?.perceived || []), ...(perception?.notLookedAt || [])];
+}
+
+function seenElement(target, perception) {
+  if (!target || !perception) return null;
+  return seenElements(perception).find((item) => item && item.selector === target) || null;
+}
+
+function nameOf(target, perception) {
+  const found = seenElement(target, perception);
+  return found && typeof found.name === "string" ? found.name.trim() : "";
+}
+
+/**
+ * Where the thing acted on sat, as the walk measured it.
+ *
+ * The report crops its evidence to the element a finding is about -- but only
+ * when the finding knows the box, and the one finding built from what a person
+ * actually did carried no box at all. So the best-evidenced finding in the
+ * report illustrated itself with a whole-page screenshot captioned "page
+ * context", leaving the reader to hunt for the control under discussion. The
+ * walk has measured this box on every step since perception existed.
+ */
+function boxOf(target, perception) {
+  const found = seenElement(target, perception);
+  const box = found && found.box;
+  if (!box || !Number.isFinite(Number(box.width)) || !Number.isFinite(Number(box.height))) return null;
+  return { x: Number(box.x) || 0, y: Number(box.y) || 0,
+           width: Number(box.width), height: Number(box.height) };
+}
+
+function observationFrom(snapshotText, abilities) {
+  const lines = String(snapshotText || "").split("\n").map((line) => line.trim()).filter(Boolean);
+  // Working memory is about what a person carries forward, so the newest lines
+  // are the ones kept -- but a page list is read top-down, so keep the head.
+  const limit = Math.max(8, Math.floor((abilities?.cognition?.workingMemoryItems || 5) * 6));
+  const kept = lines.slice(0, limit);
+  const dropped = lines.length - kept.length;
+  return kept.join("\n") + (dropped > 0 ? `\n... and ${dropped} more things on the page` : "");
+}
+
+class PersonaDirector {
+  /**
+   * @param {object} options
+   * @param {function} options.actor       decides the next action (see personaActor.js)
+   * @param {object}   options.profile     the simulation profile: {id, persona, behavior, abilities}
+   * @param {object}   [options.model]     what to report as the deciding model
+   * @param {number}   [options.maxSteps]
+   */
+  constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
+    scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
+    frames = recentFrames, frame = latestFrame, faculty, gate, memory,
+    redactSelectors, authenticatedSession = false } = {}) {
+    if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
+    this.name = "persona";
+    this.model = model;
+    this.actor = actor;
+    this.profile = profile || {};
+    this.abilities = this.profile.abilities || {};
+    this.maxSteps = maxSteps;
+    // CAP-4: only a run that started signed in has a session to lose. A
+    // signed-out run seeing "Sign in" is the ordinary page, not an expiry.
+    this.authenticatedSession = Boolean(authenticatedSession);
+    // CAP-4: elements this run always treats as sensitive by selector, regardless
+    // of what a walked element's own data says -- an account menu, an invoice
+    // table. Applied to every element list before it leaves this process, at the
+    // point of capture rather than the point of render.
+    this.redactSelectors = redactSelectors || [];
+    this.sleep = sleepFn;
+    this.scale = scale;
+    this.shots = [];
+    this.perception = perception;
+    this.walk = walk;
+    this.frames = frames;
+    this.frame = frame;
+    // CAP-0: every selector this person has fixated on an earlier look, this
+    // run only -- not PersonaMemoryBank, which is about standing lessons across
+    // runs, and not the page in front of them right now. Sent back on each
+    // perceive() call so the scan deprioritises what it has already shown this
+    // person instead of re-ranking the page from nothing every step.
+    this.everSeen = new Set();
+    // What this person has already been told about themselves, kept across runs.
+    // Every judged action goes in; recurring criticism is consolidated into
+    // standing lessons that reach the next step through the faculty.
+    this.memory = memory === undefined
+      ? new PersonaMemoryBank({ personaId: this.profile.id,
+          // The same small model that judges also puts a recurring criticism
+          // into this person's own voice. A raw flaw shown back to the persona
+          // measured worse than showing nothing at all.
+          rewrite: actor.judgeAdherence,
+          // Names only. The full vocabulary carries an example ref, and the
+          // rewriter copied it into a lesson verbatim.
+          vocabulary: browsingFaculty().actionTypes.join(", ") })
+      : memory;
+    this.faculty = faculty || browsingFaculty({ abilities: this.abilities,
+      seed: Number(this.profile.behavior?.seed) || 1, memory: this.memory || undefined });
+    // An action that does not sound like this person is sent back with the
+    // reason, TinyTroupe-style. Without a judge the gate is simply off.
+    this.gate = gate || new AdherenceGate({ judge: actor.judgeAdherence });
+  }
+
+  /** Run the page's scroll-reveals through once and wait for them. A seam, so a
+   * test can assert the capture waits for it without a live browser. */
+  async settle() {
+    try {
+      await revealOnce();
+    } catch {
+      // A reveal pass that fails is not worth losing the capture over; the
+      // picture is then of whatever has revealed itself so far, which is what it
+      // was before this existed.
+    }
+  }
+
+  /** Stop the page being scrolled under a measurement. Seams, so a test can
+   * assert the hold without a live keeper. */
+  hold() { return holdRevealKeeper(); }
+
+  release() { return releaseRevealKeeper(); }
+
+  /** Spend a slice of simulated time on the wall clock, bounded. */
+  async spend(simulatedMs) {
+    await this.sleep(Math.min(MAX_REAL_WAIT_MS, Math.max(MIN_STEP_MS, simulatedMs * this.scale)));
+  }
+
+  async run(context) {
+    const { journey, browser, recorder } = context;
+    const controller = new BehaviorController(this.profile);
+    const tasks = (journey.tasks || []).map(taskText).filter(Boolean);
+    const history = [];
+    let steps = 0;
+    let ending = null;              // {type: "done"|"gave_up"|"abandoned"|"exhausted"|"diagnostic", detail}
+    let lastUrl = "";
+    let skipAction = false;         // a re-read spends a turn looking, not acting
+    let pending = null;             // the page as it was left, reused next turn
+    let pendingSeen = null;         // and how it looked through this person's eyes
+
+    await recorder.record("agent.start", "Persona director started", {
+      persona: this.profile.id, behavior: this.profile.behavior, abilities: this.abilities,
+      // What this person already knew about themselves when they arrived.
+      memory: this.memory ? this.memory.describe() : null });
+
+    await browser.open(journey.app.baseUrl);
+    lastUrl = await browser.getUrl().catch(() => journey.app.baseUrl);
+    await this.capture(browser, context, "arrived");
+
+    // Did the page arrive at all? Cycle 36 sent a persona to a tab that had
+    // nothing in it: the accessibility tree was empty, the walk found no
+    // elements, and it spent all sixteen of its steps scrolling -- 800, 800,
+    // 1000 -- saying "the visible area appears empty" each time. The report
+    // then called that inconclusive *about the site*, which is the same mistake
+    // as calling a blank capture an unreadable page. A journey that never
+    // reached the product has nothing to say about it.
+    const arrival = await this.observe(browser);
+    if (!String(arrival.text || "").trim()) {
+      await recorder.record("journey.page_never_arrived",
+        "The page never arrived, so this run has nothing to say about it", {
+          url: journey.app.baseUrl, landedOn: lastUrl });
+      ending = { type: "abandoned", detail: `nothing was ever on the page at ${journey.app.baseUrl}` };
+    }
+    pending = ending ? null : arrival;
+
+    let reportedGateFailure = false;
+    let reportedPerceptionFailure = false;
+    while (steps < this.maxSteps && !ending) {
+      if (context.signal?.aborted) { ending = { type: "abandoned", detail: "the run was cancelled" }; break; }
+      steps += 1;
+
+      const page = pending || await this.observe(browser);
+      pending = null;
+      // The walk that followed the last action, when there was one. Looking again
+      // here would describe the same page twice and charge a second perception
+      // pass for it; the point of carrying it is that reflection and the next
+      // decision are then reasoning about one act of seeing rather than two.
+      let seen = pendingSeen || await this.look(page, tasks);
+      pendingSeen = null;
+      // One more chance, for the same reason the post-action look gets one: the
+      // things that stop a walk being usable are transient. Cycle 24 lost the
+      // walk on the scroll that revealed the prices and again on the step after,
+      // and the persona concluded -- and the report published -- that the page
+      // does not state a cost, about a page three earlier runs read
+      // "£200 / user / year" off. A view this person could not obtain is not
+      // evidence of what is not on the page.
+      // A window pointing past the end of the page is the one cause of a blank
+      // capture this run can repair itself, and waiting does not repair it.
+      // Cycle 33 lost 22 captures to it: the persona scrolled down a tall page,
+      // the page re-rendered into a short one, and the position it had been left
+      // at no longer existed.
+      if (!seen.perception && seen.standing?.pastTheEnd && this.perception?.available) {
+        await this.returnToTheDocument(browser, seen.standing);
+        seen = await this.look(page, tasks);
+      }
+      if (!seen.perception && this.perception?.available) {
+        await this.sleep(LET_IT_COME_TO_REST_MS);
+        seen = await this.look(page, tasks);
+      }
+      const { observation, perception } = seen;
+      // CAP-4: a run that started signed in and now sees a sign-in prompt is
+      // reviewing the logged-out product without knowing it -- the worst
+      // failure available, because nothing else here would say so. Checked
+      // before anything below spends a turn reasoning about this page as if
+      // the session still held.
+      if (this.authenticatedSession) {
+        const droppedSession = (seen.elements || [])
+          .find((element) => SIGNED_OUT_PROMPT.test(String(element?.name || element?.text || "").trim()));
+        if (droppedSession) {
+          await recorder.record("journey.session_expired",
+            "The session this run started signed in with no longer reads as signed in", {
+              reason: `saw a "${droppedSession.name || droppedSession.text}" prompt where the session `
+                     + "was expected to still be authenticated",
+              sinceStep: steps, selector: droppedSession.selector, url: lastUrl });
+          ending = { type: "diagnostic", detail: "the authenticated session expired mid-run" };
+          break;
+        }
+      }
+      // One failed call disables the perception client for the rest of the run
+      // (perception.js: `this.disabled = true`). That is the right behaviour --
+      // retrying a dead service every step would only slow the run down -- but it
+      // was silent: the run continued on the accessibility tree, produced a report
+      // with no eyesight findings at all, and nothing anywhere said the eyes had
+      // stopped working. An absence of findings has to be distinguishable from an
+      // absence of measurement.
+      if (!perception && !reportedPerceptionFailure && this.perception?.lastError) {
+        reportedPerceptionFailure = true;
+        await recorder.record("persona.perception_unavailable",
+          "Stopped seeing the page through this person's eyes", {
+            reason: this.perception.lastError, sinceStep: steps });
+      }
+      // Only when there were eyes to lose. A run with no perception service is a
+      // deliberate mode, already described by the absence of perception events;
+      // saying so every step would bury the runs where the walk really did fail.
+      if (!perception && seen.why && this.perception?.available) {
+        await recorder.record("persona.perception_fallback",
+          `Looked, and could not use what came back: ${seen.why}`,
+          // How many times it was asked, and what it was looking at. §55.6e:
+          // the instrumentation that explains a failure is worth nothing unless
+          // the failure carries it, and a picture beats a count.
+          { reason: seen.why, step: steps, attempts: seen.captureAttempts,
+            capture: await this.keepRefusedCapture(context, seen.refused, steps),
+            // What the browser said was under those pixels, read in the same
+            // batch as the picture. Text where the image is white means the page
+            // painted and the capture missed it; nothing under any of the three
+            // sample points means the window really is on empty page.
+            beneath: seen.beneath, paint: seen.paintCheck });
+      }
+      if (perception) {
+        const seenImage = await this.keepSeenImage(context, perception, steps);
+        await recorder.record("persona.perception",
+          `looked at ${perception.counts.fixated} of ${perception.counts.elements} things`, {
+            scan: perception.scan, eyes: perception.eyes, counts: perception.counts,
+            // Which picture this was measured on. The viewport frame is what the
+            // person is looking at; the page screenshot is the top of the
+            // document, which is the same thing only at the top of a page.
+            capturedFrom: seen.capturedFrom,
+            // What this capture measured that a claim about the page can be
+            // tested against: how much of it did not resolve, how many elements
+            // ran past its edge, and how small the smallest type on it is. The
+            // vision critique reads the same picture and says "the cards are cut
+            // off", "the text is too small" and "there are empty sections"; each
+            // of those is a statement about one of these numbers.
+            capture: perception.capture,
+            // How many attempts this measurement took. A step that resolved
+            // first time and a step that resolved on the third are the same
+            // reading of the page and different readings of the machine, and
+            // only this tells them apart.
+            attempts: seen.captureAttempts,
+            // Present, and nothing legible where it lives. This is a defect in
+            // the page, and no check against the DOM can find it.
+            notPerceived: perception.notPerceived,
+            // Everything that did resolve on this capture, by selector. Cheap to
+            // carry and it settles a question nothing else can: a heading is not
+            // drawn black on one step and invisible on the next, so when the same
+            // element reads legible on one capture and blank on another, the blank
+            // one caught it mid-render. Without this the report had no way to tell
+            // a page that never draws something from a capture taken while it was
+            // still arriving -- and published "Fails WCAG AA contrast: 'Individual'
+            // -- 1.05:1" against a pricing-card heading that is plainly dark.
+            legible: [...(perception.perceived || []).map((item) => item.selector),
+                      ...(perception.notLookedAt || []).map((item) => item.selector)],
+            // Legible, and this person never got to it. Not a defect by itself:
+            // it is the answer to "why did they not click the thing that was
+            // right there", which is the question a report exists to answer.
+            notLookedAt: perception.notLookedAt.map((item) => item.selector),
+            // The strongest thing this measurement can say: what they came for
+            // was legible, on the screen, and they still did not get to it.
+            // Every part of that is measured rather than asserted.
+            missedWhatTheyCameFor: perception.notLookedAt
+              .filter((item) => Number(item.goalAffinity) >= 0.5)
+              .map((item) => ({ selector: item.selector, name: item.name,
+                goalAffinity: item.goalAffinity })),
+            undeclared: perception.detector?.undeclared || undefined,
+            // What this person's eyes actually delivered, when the step found
+            // something they could not read.
+            seenImage: seenImage || undefined,
+          });
+      }
+      // Taking a page in costs a person time, and how much depends on how fast
+      // they read: that is what makes a slow reader run out of patience on a
+      // wordy page and a fast one not. The cost is charged to the behaviour
+      // model; only a slice of it is spent on the wall clock.
+      const readMs = Math.min(MAX_SCAN_MS, readingDurationMs(observation, this.abilities));
+      await this.spend(readMs);
+
+      const ask = {
+        profile: this.profile, tasks, observation,
+        // Everything the persona's capabilities have to say about how to use
+        // them -- including what the memory bank has learned about this person.
+        constraints: this.faculty.actionsConstraintsPrompt(),
+        // How they feel is given to them, never asked of them: it is derived from
+        // what the page has done to them so far.
+        affect: affectInWords(controller.state),
+        history: filterWorkingMemory(history, this.abilities),
+      };
+      const proposed = await this.actor(ask);
+      // Does that sound like this person? TinyTroupe scores the action against
+      // the persona and, when it scores badly, hands the criticism back and asks
+      // for another. That is what makes a persona a constraint on the output
+      // rather than an instruction it may drift away from.
+      const settled = await this.gate.settle(this.profile, proposed,
+        (flaw) => this.actor(ask, { notLikeYou: flaw }));
+      const decision = settled.decision;
+      if (this.gate.unavailableReason && !reportedGateFailure) {
+        reportedGateFailure = true;
+        // Said once, not every step. A run where nothing held the persona to
+        // itself looks identical to one where everything passed, and the
+        // difference matters more than any single step does.
+        await recorder.record("persona.adherence_unavailable",
+          "nothing checked whether these actions sound like this person",
+          { reason: this.gate.unavailableReason });
+      }
+      if (settled.adherence && this.memory) {
+        // Stored before the action is carried out, so the lesson is available on
+        // the very next step rather than only on the next run. That is what
+        // makes the persona better with each action instead of each session.
+        this.memory.store({ ...settled.adherence, action: decision.action,
+          visible: decision.visible, expectation: decision.expectation });
+        // Said in their own words before the next step asks for constraints.
+        // Cached per lesson, so this costs one call the first time a criticism
+        // becomes a standing lesson and nothing on the steps after.
+        await this.memory.consolidate();
+      }
+      if (settled.adherence) {
+        await recorder.record("persona.adherence",
+          settled.adherence.passed
+            ? `that is like them (${settled.adherence.score}/10)`
+            : `still not quite like them (${settled.adherence.score}/10)`,
+          { ...settled.adherence, threshold: this.gate.threshold });
+      }
+
+      // What they see and what they expect, before anything happens. Committing
+      // to an expectation is what makes the next step falsifiable.
+      await recorder.record("persona.expectation",
+        decision.expectation || `${decision.action.type}`, {
+          visible: decision.visible, expectation: decision.expectation,
+          action: decision.action,
+          // What the thing acted on says on it, from the walk rather than from
+          // the sentence. The report had been recovering this by reading the
+          // persona's prose, which works right up until the persona writes "The
+          // Pricing page will load" instead of naming a control -- and then a
+          // report headline reads "Promised more than it did: e6".
+          targetName: nameOf(decision.action.target, perception) || undefined,
+          // Where it sat, so a finding about it can show it rather than the page
+          // it was somewhere on.
+          targetBox: boxOf(decision.action.target, perception) || undefined,
+          malformed: decision.malformed || undefined });
+
+      if (skipAction) {
+        skipAction = false;
+        history.push(`re-read the page`);
+        continue;
+      }
+
+      const performed = await this.perform(decision.action, browser, context, pendingSeen || seen);
+      // Whether the page answered is observed, never assumed. Asserting that a
+      // click changed something made every action a success, so frustration
+      // stayed at 0.00 for a whole live run and the coping model never fired --
+      // an affect simulation that cannot be disappointed models nothing.
+      const after = performed.acted ? await this.observe(browser) : page;
+      const changed = after.url !== page.url || after.digest !== page.digest;
+      // Look at what the action produced, now, with the same eyes that chose it.
+      // Reflection used to be asked "did what you expected appear?" while holding
+      // the accessibility tree, when the expectation had been formed from what
+      // this person could actually see -- two different views of one page, and a
+      // question that compares across them manufactures gaps. A live run put the
+      // monthly prices in front of the persona, reflected against the tree, and
+      // concluded three times over that "the paragraph detailing the £20 per user
+      // per month pricing was not present". Frustration reached 1.00 and the
+      // report led on a fault the page does not have.
+      let afterSeen = null;
+      if (performed.acted) {
+        afterSeen = await this.look(after, tasks);
+        // A walk that lands on a moving page falls back, correctly. But the thing
+        // moving it is usually a scroll animation that is over in a moment, and a
+        // step that scrolled is exactly the step most likely to hit this. Wait
+        // once and look again rather than spend the turn without eyes.
+        if (!afterSeen.perception && perception) {
+          await this.sleep(LET_IT_COME_TO_REST_MS);
+          afterSeen = await this.look(after, tasks);
+        }
+        // Same rule as the pre-action look: only when there were eyes to lose.
+        // Losing the second half of the comparison matters only if the first
+        // half had it.
+        if (!afterSeen.perception && afterSeen.why && perception) {
+          await recorder.record("persona.perception_fallback",
+            `Looked after acting, twice, and could not use what came back: ${afterSeen.why}`,
+            { reason: afterSeen.why, step: steps, afterActing: true,
+              attempts: afterSeen.captureAttempts,
+              capture: await this.keepRefusedCapture(context, afterSeen.refused, steps),
+              beneath: afterSeen.beneath, paint: afterSeen.paintCheck });
+        }
+        pending = after;
+        // Only worth carrying if it is worth more than looking again. A walk taken
+        // the instant an action lands can catch the page still moving, and then it
+        // falls back to the tree -- correctly, that is the guard working. Carrying
+        // that forward spent the next turn's look as well: cycle 15 scrolled three
+        // times and four consecutive steps went by with no perception at all, two
+        // of them on a page that had long since come to rest. A failed look costs
+        // this step. It must not cost the next one.
+        if (afterSeen.perception) pendingSeen = afterSeen;
+      }
+      if (after.url && after.url !== lastUrl) {
+        await this.capture(browser, context, `page-${steps}`);
+      }
+      lastUrl = after.url || lastUrl;
+      history.push(`${decision.action.type}${decision.action.target ? ` ${decision.action.target}` : ""}`
+        + (performed.failed ? " (it did not work)" : ""));
+
+      if (decision.action.type === "DONE") { ending = { type: "done", detail: decision.action.content }; break; }
+      if (decision.action.type === "GIVE_UP") { ending = { type: "gave_up", detail: decision.action.content }; break; }
+
+      // Reflect: did what arrived match what was expected? A separate, factual
+      // question, so the answer can be wrong -- which is what makes the feeling
+      // that follows it mean something.
+      // An expectation formed from what this person could see, tested against the
+      // accessibility tree, is not a test -- it is two descriptions of different
+      // things, and the difference between them arrives as disappointment. Cycle
+      // 16 lost the run to it: two scrolls whose post-action walk fell back
+      // produced "No description of the company's product or target audience is
+      // present" about a page whose opening paragraph describes exactly that, and
+      // three consecutive false failures took the persona past its tolerance.
+      // When there is no comparable view, the honest answer is that nothing was
+      // observed -- not that the page disappointed someone.
+      const judgedAgainst = (performed.acted ? afterSeen : { perception })?.perception
+        ? "perceived" : "tree";
+      const decidedFrom = perception ? "perceived" : "tree";
+      const comparable = judgedAgainst === decidedFrom;
+      if (!comparable && decision.expectation) {
+        await recorder.record("persona.reflection_unavailable",
+          "Could not see the page the same way twice, so nothing was concluded from it",
+          { expected: decision.expectation, decidedFrom, judgedAgainst, step: steps });
+      }
+      const reflection = comparable && decision.expectation && typeof this.actor.reflect === "function"
+        ? await this.actor.reflect({ profile: this.profile, expectation: decision.expectation,
+            action: decision.action, targetName: nameOf(decision.action.target, perception),
+            observation: (performed.acted ? afterSeen?.observation : observation)
+              || observationFrom(after.text, this.abilities) })
+        : null;
+      if (reflection) {
+        await recorder.record("persona.reflection",
+          reflection.gap || reflection.observed || `expectation ${reflection.matched}`, {
+            expected: decision.expectation, observed: reflection.observed,
+            matched: reflection.matched, gap: reflection.gap,
+            // Which view answered the question. Both sides are the same kind of
+            // looking or the reflection does not happen at all, but the record
+            // says so rather than leaving it to be inferred: this comparison was
+            // wrong for fourteen cycles precisely because nothing anywhere said
+            // where either side came from.
+            judgedAgainst, decidedFrom });
+      }
+
+      const applied = controller.apply(
+        { ...outcomeEvent(decision.action, { ...performed, changed, matched: reflection?.matched }),
+          durationMs: readMs },
+        { taskImportance: 0.6, progressVisible: changed });
+      await recorder.record("persona.affect", `frustration ${applied.after.frustration.toFixed(2)}, `
+        + `confusion ${applied.after.confusion.toFixed(2)}, coping ${applied.coping.decision.type}`, {
+        state: applied.after, coping: applied.coping.decision, feeling: affectInWords(applied.after),
+        probabilities: applied.coping.probabilities, waitToleranceMs: applied.waitTolerance.thresholdMs });
+
+      // Coping is control flow. This is the whole point: a persona who would have
+      // walked away has to actually walk away.
+      const coping = applied.coping.decision;
+      if (coping.type === "abandon" && this.wouldReallyLeave(applied.after)) {
+        ending = { type: "abandoned", detail: coping.reason
+          || "frustration and effort exceeded what this person will spend" };
+      } else if (coping.type === "abandon") {
+        // Sampled, but not earned. Coping is drawn from a distribution, so
+        // "abandon" comes up occasionally even for someone who is perfectly
+        // content -- 1.4% a turn for a fresh persona, which over a long run is a
+        // coin toss on whether the journey ends for no reason. A verdict of
+        // "walked away" has to be able to point at why. Feeling like leaving and
+        // staying anyway is worth recording, though: it is the shape of a page
+        // someone is tolerating rather than enjoying.
+        await recorder.record("persona.nearly_left",
+          "Felt like giving up, but had no real reason to yet", { state: applied.after });
+      } else if (coping.type === "wait") {
+        await this.spend(coping.durationMs || 0);
+      } else if (coping.type === "reread") {
+        skipAction = true;
+      } else if (coping.type === "impulsive_retry") {
+        for (let repeat = 1; repeat < (coping.repetitions || 2) && !ending; repeat += 1) {
+          const again = await this.perform(decision.action, browser, context, afterSeen || seen);
+          history.push(`${decision.action.type} again${again.failed ? " (still nothing)" : ""}`);
+          // The page moved after it was carried, so what was carried describes a
+          // page that no longer exists. Drop it and let the next turn look.
+          if (again.acted) { pending = null; pendingSeen = null; }
+        }
+      } else if (coping.type === "backtrack") {
+        await browser.press("Alt+ArrowLeft").catch(() => {});
+      }
+    }
+
+    if (!ending) ending = { type: "exhausted", detail: `stopped after ${steps} actions` };
+    // What they were looking at when they stopped -- the single most useful frame
+    // in the run, and the one the verdict cites.
+    await this.capture(browser, context, `left-${ending.type}`);
+    await recorder.record("agent.end", `Persona finished: ${ending.type}`, { ...ending, steps,
+      finalState: controller.state,
+      // What this run leaves behind for the next one. Recorded at the end as well
+      // as the start, because "the persona gets better with each action" is a
+      // claim about a difference between two runs, and only the start was ever
+      // written down -- so there was nothing to compare it against.
+      memory: this.memory ? this.memory.describe() : null,
+      // How often an action had to be sent back for not sounding like this person.
+      // A gate that never fires and a gate that is switched off look identical in
+      // a report that does not say which.
+      adherence: this.gate?.stats ? { ...this.gate.stats } : null });
+    return this.verdict(ending, controller, journey, steps, lastUrl);
+  }
+
+  /**
+   * Whether this person has actually been given a reason to leave.
+   *
+   * The same condition behavior.js uses to enter its "abandoning" mode: it takes
+   * more than one failure in a row, and frustration past what this profile will
+   * put up with. Someone who is simply bored does not storm off.
+   */
+  wouldReallyLeave(state) {
+    const behavior = this.profile.behavior || {};
+    const tolerance = (Number(behavior.repeatFailureTolerance) || 0.5)
+      + (Number(behavior.persistence) || 0.5) * 0.35;
+    return state.consecutiveFailures > 1 && state.frustration > tolerance;
+  }
+
+  /**
+   * Take a picture of what the persona is looking at.
+   *
+   * Evidence is not bookkeeping. journeytest-core requires each criterion to cite
+   * a screenshot, and the UX layer that reads this run afterwards has nothing to
+   * reason about without one -- so a capture is taken when the persona arrives
+   * somewhere new and again at the end, which is when a person would remember
+   * what they saw.
+   */
+  async capture(browser, context, label) {
+    const directory = context.artifacts?.screenshotsDir;
+    if (!directory) return null;
+    const name = `${String(this.shots.length + 1).padStart(3, "0")}-${label}.png`;
+    const target = path.join(directory, name);
+    try {
+      // Scroll the whole document through before photographing it. `full: true`
+      // stitches a capture as tall as the page, and everything below the fold on a
+      // site that reveals content on scroll is still in its un-revealed state the
+      // moment a document loads -- so the first capture of a run, taken straight
+      // after open(), is mostly blank. Measured on a live run: 7,921 of 8,620 rows
+      // near-uniform, 92% of the image. The vision critique looked at it and filed
+      // "Massive empty vertical sections ... a major rendering bug", severity
+      // critical, as the most serious finding in the report. It was describing our
+      // capture, not the site.
+      //
+      // The reveal keeper does this every 1500ms, which is no help to a capture
+      // taken in the first second of a document or to a run that finishes in three
+      // actions. Awaited here so the picture is of a settled page.
+      await this.settle();
+      await browser.screenshot({ path: target, full: true });
+    } catch {
+      return null;      // a capture that fails is not worth ending a journey over
+    }
+    this.shots.push(target);
+    await context.recorder.record("browser.screenshot", `Captured screenshot ${target}`, { path: target });
+    return target;
+  }
+
+  /**
+   * What the page is right now: its address, its contents, and a digest of them.
+   *
+   * The digest is what makes "did anything happen?" answerable. A person knows
+   * whether the page responded; a run that assumes it did cannot tell a working
+   * control from a dead one, which is the single most common real complaint.
+   */
+  async observe(browser) {
+    const snapshot = await browser.snapshot({ compact: false }).catch(() => ({ stdout: "" }));
+    const text = String(snapshot.stdout || snapshot.summary || "");
+    const url = await browser.getUrl().catch(() => "");
+    return { url, text, digest: createHash("sha1").update(url + "\n" + text).digest("hex") };
+  }
+
+  /**
+   * What this person took in, as opposed to what is on the page.
+   *
+   * The accessibility tree is complete, which is exactly what is wrong with it
+   * as a model of seeing: handed all of it, every persona reads all of it, and a
+   * short-sighted one in a hurry behaves identically to a patient one with
+   * perfect vision. The perception service answers the narrower question --
+   * these pixels, these eyes, this way of scanning -- and returns only what was
+   * actually looked at.
+   *
+   * When it is not configured or not reachable the tree-based observation stands.
+   * Perception is meant to make a run truer, not to make a run fail.
+   */
+  /**
+   * Put the page back inside its own content.
+   *
+   * A viewport below the last pixel of the document photographs blank space,
+   * and cycle 33 lost 22 captures that way: the persona scrolled down a tall
+   * page, the page then re-rendered into a short one, and the position it had
+   * been left at no longer existed. Nothing is wrong with the page and nothing
+   * is wrong with the eyes -- the window is pointing past the end, and
+   * scrolling back is the whole repair.
+   */
+  async returnToTheDocument(browser, standing) {
+    const furthest = Math.max(0, (standing?.documentHeight || 0) - (standing?.viewportHeight || 0));
+    await browser.eval(`(() => { scrollTo(0, ${furthest}); return String(Math.round(scrollY)); })()`)
+      .catch(() => {});
+  }
+
+  /**
+   * What this person took in -- attempted until there is a measurement to report.
+   *
+   * A failed capture is not a fact about the page. It is the absence of a fact,
+   * and publishing it as one is how cycle 37 came to describe a working site as
+   * unreadable thirty-two times. So the page is asked again, having been given
+   * time to finish showing itself, and only a page that will not resolve after
+   * three attempts falls back to the tree.
+   */
+  async look(page, tasks = []) {
+    // Why it fell back, when it does. Every one of these paths used to return the
+    // same silent object, so a run that lost half its comparisons looked exactly
+    // like a run that never tried -- and cycle 19 could not say which of five
+    // reasons cost it six. An absence of measurement has to be distinguishable
+    // from an absence of findings, and that applies to the walk as much as to the
+    // service it feeds.
+    // `standing` travels with the fallback: where the page was when the capture
+    // was taken is what tells a caller whether it can repair the step itself.
+    let measured = [];
+    const fellBack = (why, standing, attempts, refused, beneath, paintCheck) => ({
+      observation: observationFrom(page.text, this.abilities), perception: null, why, standing,
+      captureAttempts: attempts, refused, beneath, paintCheck, elements: measured });
+    if (!this.perception?.available) return fellBack("no perception service configured", undefined, 0);
+    let unresolved = { why: "the page was never measured", standing: undefined };
+    let spent = 0;
+    for (let attempt = 1; attempt <= CAPTURE_ATTEMPTS; attempt += 1) {
+      spent = attempt;
+      if (attempt > 1) await this.sleep(CAPTURE_BACKOFF_MS * (attempt - 1));
+      // The screenshot first, now that it can reach the whole page.
+      //
+      // The frame was preferred because it is what the person is looking at and
+      // the screenshot was of the document's top rows. Shifting the document into
+      // the camera closed that gap -- the screenshot is the viewport too now --
+      // and left the frame with the one fault the screenshot has never had: it
+      // comes back blank. Cycle 50 refused 34 captures and every kept picture was
+      // a frame, 1280x577 of a single colour, on pages the DOM showed fully
+      // drawn. Asking first for the source that is sometimes empty spent two of
+      // every three attempts on it.
+      //
+      // The frame still gets the middle attempt, because when it does arrive it
+      // is the compositor's own account of the page and owes nothing to a
+      // transform we applied ourselves.
+      const tried = await this.lookOnce(page, tasks, { preferFrame: attempt === 2 });
+      // How many it took is part of the measurement: a step that needed three
+      // goes and a step that needed one are different reports on the same page.
+      if (!tried.again) return { ...tried.result, captureAttempts: attempt };
+      unresolved = tried;
+      if (tried.elements?.length) measured = tried.elements;
+      // One failure is not an open question: a window parked below the last
+      // pixel of the document photographed blank space, and it will photograph
+      // the same blank space however many times it is asked. It is handed back
+      // at once, because the caller is the one holding the browser and the
+      // repair is to scroll back into the document -- and then to look again,
+      // which it does. Asking again from here would spend the attempts proving
+      // where the window is.
+      if (tried.standing?.pastTheEnd) break;
+    }
+    // Said with the count, because "it could not be measured" and "it could not
+    // be measured three times over" are different claims about a page -- and so
+    // is "it was measured once and the answer was where the window is".
+    return fellBack(spent > 1 ? `${unresolved.why} -- still, after ${spent} attempts` : unresolved.why,
+      unresolved.standing, spent, unresolved.refused, unresolved.beneath, unresolved.paintCheck);
+  }
+
+  /** One attempt at a measurement: either a reading, or the reason there is none. */
+  async lookOnce(page, tasks = [], { preferFrame = true } = {}) {
+    // The pixels travel with the refusal. A capture the service will not stand
+    // behind is the one picture nobody has ever looked at -- five cycles were
+    // spent reasoning about why these fail, from logs, while the image that
+    // would have answered it was decoded, judged and thrown away every time.
+    const again = (why, standing, refused, beneath, paintCheck) =>
+      ({ again: true, why, standing, refused, beneath, paintCheck, elements: seen?.elements });
+    let seen;
+    // Hold the page still for the walk and the capture. The reveal keeper scrolls
+    // the whole document every 1500ms and a perception pass takes longer than
+    // that, so without this the boxes and the pixels describe the page at two
+    // different scroll positions -- which is how a live run came to report the
+    // entire navigation bar as failing WCAG AA at 1:1 for someone with 0.95
+    // acuity: the crops had landed on blank page.
+    const startedWalking = Date.now();
+    this.hold();
+    try {
+      // Let the page finish showing itself before measuring it.
+      //
+      // capture() has done this since the reveal pass existed and look() never
+      // did, and that difference is the whole of cycle 37's blank captures. A
+      // site that reveals its sections on scroll keeps them in the DOM at
+      // opacity 0 until an IntersectionObserver fires, so the walk finds boxes
+      // where there is no ink and the perception service -- correctly -- refuses
+      // the capture. The record says it plainly: every untrustworthy capture in
+      // cycle 37 was taken while the document measured 1444-1465px, and the same
+      // page in the same cycle measures 8620px once it has revealed itself.
+      //
+      // The keeper runs a pass every 1500ms, which is no help to a measurement
+      // taken inside that window, and the busier the machine the more of a run's
+      // steps land inside it. That is why this looked like a limit of the
+      // hardware rather than a step this code never took.
+      //
+      // It costs one round trip on a document already revealed; the pass itself
+      // no-ops.
+      await this.settle();
+      seen = await this.walk();
+      // CAP-4: redacted here, once, right after the walk -- so every downstream
+      // use of these elements (what is sent to the perception service, what a
+      // pointer is aimed from, what lands in the step's own record) sees the
+      // same already-redacted list. An element already marked sensitive by the
+      // walk's own data is caught by redactSensitive alone; an account menu or
+      // an invoice table that carries no such marker is caught by this run's own
+      // redactSelectors, applied first.
+      if (seen?.elements?.length) {
+        seen = { ...seen, elements: redactSensitive(
+          markSelectorsSensitive(seen.elements, this.redactSelectors)) };
+      }
+    } catch (error) {
+      // A page walk can fail for reasons that have nothing to do with the run --
+      // a navigation mid-batch, a browser still settling. The tree is still there.
+      return again(`the walk failed: ${String(error?.message || error).slice(0, 120)}`);
+    } finally {
+      this.release();
+    }
+    // Only a frame this measurement caused. The walk nudges the page a pixel to
+    // make the compositor commit one, so a frame older than the walk is a frame
+    // from before that nudge -- which is the stale blank one this is here to
+    // avoid. A frame that cannot be shown to be fresh is not used at all.
+    const presented = preferFrame ? this.frame() : null;
+    const fresh = presented && Number(presented.receivedAt) >= startedWalking;
+    const shown = fresh ? frameImage(presented) : "";
+    // A picture from either source will do. This asked only about the walk's,
+    // which was the only one when it was written -- so a step whose walk came
+    // back without a picture was given up on while a perfectly good frame sat
+    // unread.
+    if (!seen?.elements?.length || !(shown || seen.screenshotBase64)) {
+      return again(seen?.elements?.length
+        ? "the walk came back without a picture" : "the walk found nothing on the page");
+    }
+    // Something moved the page anyway -- the page's own script, an animation, a
+    // navigation landing mid-batch. Boxes from one scroll position against pixels
+    // from another measure nothing, and the failure mode is not a gap in the
+    // report but a confident false finding. Fall back to the tree for this step.
+    // Two ways the boxes and the pixels can describe different pages: it
+    // scrolled between them, or it was still building itself. Said apart,
+    // because a scroll settles on its own and a page still arriving wants
+    // waiting for.
+    if (seen.moved) {
+      return again(seen.layoutCheck === "growing"
+        ? `the page was still building itself under the walk (it grew ${seen.grewBy}px between `
+          + "the boxes and the picture)"
+        : "the page moved under the walk");
+    }
+    // Photograph what this person is looking at, not the top of the document.
+    //
+    // agent-browser's screenshot draws the page at its document position: a page
+    // standing at 112 comes back with 112 rows of blank above its content, and a
+    // page standing at 600 comes back showing document rows 0 to 577 -- none of
+    // which the person can see. Translating the boxes lines them up with that
+    // picture, and at 600 it lines them up with nothing: eleven of cycle 43's
+    // forty-five captures measured elements and found none of them in frame.
+    //
+    // The screencast frame is the compositor's presented viewport -- literally
+    // what a live viewer watching this run sees -- and it was already arriving,
+    // for the motion map, on 44 of those 45 steps. It is in viewport coordinates,
+    // because that is what a viewport is, so its boxes need no moving.
+    const perception = await this.perception.perceive({
+      screenshotBase64: shown || seen.screenshotBase64,
+      // In the capture's coordinates. The walk measures against the viewport,
+      // because that is what getBoundingClientRect returns; the capture draws the
+      // page at its document position inside a viewport-sized frame, so a page
+      // standing at 112 comes back with 112 rows of blank above its content --
+      // measured exactly, on a kept refusal: rows 0 to 111 pure white, first ink
+      // at 112. Every crop was taken scrollY pixels too high, and the service was
+      // right every time it said the region had no ink in it.
+      //
+      // Both kinds of refusal cycle 40 kept follow from this: at 112 part of the
+      // page still overlaps its boxes and some regions resolve, while at 600 and
+      // 888 every box lands past the bottom of a 577px frame and the whole
+      // capture reads blank. So does the shape every run had -- clean at the top
+      // of a page, degrading from the first scroll and never recovering.
+      //
+      // Translated here rather than in the walk: these boxes have other readers,
+      // and the capture is the only image whose coordinates this is known to be.
+      // A frame is the viewport, so its boxes are already where they belong. The
+      // screenshot is the document, so theirs have to be moved by how far down it
+      // the viewport is standing.
+      // By however much the picture and the viewport still disagree. A frame is
+      // the viewport, so nothing moves. A screenshot is the document's top rows,
+      // and the walk shifts the document up by the scroll offset to put the
+      // viewport into them -- so what is left to correct is only what the shift
+      // did not manage, which is nothing when it worked and the whole offset when
+      // it did not.
+      elements: shown ? seen.elements
+        : intoCaptureSpace(seen.elements, (seen.scrollY || 0) - (seen.shiftedBy || 0)),
+      abilities: this.abilities,
+      behavior: this.profile.behavior,
+      motionFrames: motionFramesFrom(this.frames()),
+      viewport: seen.viewport,
+      // What they came for pulls the eye harder than anything else on a page,
+      // which is why an impatient visitor finds a price and reads nothing else.
+      goal: (this.profile.persona?.goals || []).concat(tasks).join(". "),
+      // The page as this person's eyes delivered it. The honest thing to put
+      // beside a finding that says they could not see something -- and until now
+      // the service could produce it and nobody ever asked.
+      returnSeenImage: true,
+      // CAP-0: what this person has fixated on an earlier look this run, so the
+      // scan does not fixate the identical six candidates on every step.
+      alreadySeen: [...this.everSeen],
+    });
+    // A capture the service itself does not believe describes the page. It says
+    // so, and until now nobody asked: the run took the empty view at face value,
+    // told the persona it could see nothing, and the persona reported that the
+    // site was unreadable. Cycle 30 ended three journeys that way -- 104 regions
+    // measuring as flat colour with no ink in them at all, on a page two earlier
+    // cycles had read prices off.
+    //
+    // This is the distinction the empty-observation fix missed. Nothing legible
+    // on a capture we trust is the strongest finding this system makes. Nothing
+    // legible on a capture we do not trust is a failed measurement, and the only
+    // honest thing to do with it is put it down.
+    const captureTrusted = !(perception?.capture && perception.capture.trustworthy === false);
+    // CAP-0: only a trustworthy capture's fixations join the running total. This
+    // step is retried whole when the capture is not trusted (see below), and
+    // `everSeen` is instance state that outlives one attempt -- folding in a
+    // discarded measurement's selectors would decay elements this person has
+    // never actually seen, permanently, from data the run itself threw away.
+    if (captureTrusted) {
+      for (const item of perception?.perceived || []) {
+        if (item?.selector) this.everSeen.add(item.selector);
+      }
+    }
+    if (perception?.capture && perception.capture.trustworthy === false) {
+      // Where the page was standing, when we know. A renderer that painted
+      // nothing and a viewport parked past the end of the document produce the
+      // same blank pixels and want different fixes, and the reason alone cannot
+      // tell them apart.
+      const stood = seen.standing;
+      const where = stood
+        ? ` (page at ${stood.y} of ${stood.documentHeight}px${stood.pastTheEnd ? ", past the end" : ""}`
+          + `${stood.painted ? "" : ", body not painted"})`
+        : "";
+      return again(`the capture did not describe the page: ${
+        String(perception.capture.reason || "it could not be trusted").slice(0, 160)}${where}`,
+        // The picture that was refused is the one that was measured -- not
+        // whichever happened to be to hand. Cycle 44 kept the page screenshot
+        // beside refusals of the viewport frame, so the evidence of the failure
+        // was a picture of something else.
+        stood, shown || seen.screenshotBase64, seen.beneath, seen.paintCheck);
+    }
+    // Absent, not empty. An empty observation is a person who looked and took
+    // nothing in -- which is the strongest eyesight finding here, not a failure
+    // -- and testing it for truthiness threw the whole measurement away: the
+    // counts, the notPerceived list, every legibility finding on the capture.
+    if (perception?.observation === undefined || perception?.observation === null) {
+      return again(`the perception service returned nothing`
+        + (this.perception.lastError ? `: ${String(this.perception.lastError).slice(0, 120)}` : ""));
+    }
+    // Absent and empty part company here. An empty observation is a measurement:
+    // someone looked at a capture we trust and took nothing in, which is the
+    // strongest eyesight finding this system makes. Asking again would only
+    // replace it with itself.
+    const capturedFrom = shown ? "viewport frame" : "page screenshot";
+    // The boxes travel with the reading. They are what a hand is aimed from, and
+    // they are measured whether or not the picture of them can be trusted.
+    const measured = seen.elements;
+    if (!perception.observation) {
+      return { again: false, result: { observation: "You cannot make out anything here.",
+        perception, capturedFrom, elements: measured } };
+    }
+    return { again: false, result: { observation: perception.observation, perception,
+      capturedFrom, elements: measured } };
+  }
+
+  /**
+   * Keep the degraded capture, but only when it is evidence of something.
+   *
+   * Written for a step that found an element present and not perceivable, so a
+   * report can show what this person's eyes actually delivered next to the claim
+   * that they could not read it. Kept off every other step because a JPEG per
+   * step of a forty-step run is a lot of bytes to store for a picture nothing
+   * will cite.
+   */
+  /**
+   * Keep the capture the perception service would not stand behind.
+   *
+   * Every other picture this run writes is one it believes. This is the only one
+   * that is evidence *about the measurement* rather than about the page, and it
+   * is the one that was never kept: five cycles of hypotheses about renderers,
+   * scroll positions and machine capacity were argued from log lines while the
+   * image that settles them was decoded, judged and dropped on every step.
+   *
+   * Written under the step it belongs to and the reason it was refused, so the
+   * picture and the verdict on it can be read side by side.
+   */
+  async keepRefusedCapture(context, base64, step) {
+    const directory = context.artifacts?.screenshotsDir;
+    if (!directory || !base64) return null;
+    const target = path.join(directory, `${String(step).padStart(3, "0")}-capture-refused.png`);
+    try {
+      await writeFile(target, Buffer.from(base64, "base64"));
+    } catch {
+      return null;      // evidence that cannot be written is not worth ending a run over
+    }
+    return target;
+  }
+
+  async keepSeenImage(context, perception, step) {
+    const directory = context.artifacts?.screenshotsDir;
+    if (!directory || !perception?.seenImageBase64) return null;
+    if (!(perception.notPerceived || []).length) return null;
+    const target = path.join(directory, `${String(step).padStart(3, "0")}-as-they-saw-it.jpg`);
+    try {
+      await writeFile(target, Buffer.from(perception.seenImageBase64, "base64"));
+    } catch {
+      return null;      // evidence that cannot be written is not worth ending a run over
+    }
+    return target;
+  }
+
+  /**
+   * Carry out one ACTION, by offering it to the tools the persona has.
+   *
+   * The director used to hold a switch over action types, and the prompt held a
+   * separate list of what those types were. TinyTroupe's arrangement is better
+   * and this now follows it: each tool declares the actions it offers and
+   * carries them out, the vocabulary the persona is given is generated from
+   * those declarations, and an action nothing claims comes back unhandled
+   * instead of falling through to a silent no-op.
+   */
+  perform(action, browser, context, seen) {
+    // The boxes this person's own walk measured, by ref. The faculty needs one to
+    // aim a hand at a control, and the only other way it had to ask was a driver
+    // method that does not exist: 62 clicks in one run, 62 silent nulls, and not
+    // a single pointer ever recorded. The walk measures every element on screen
+    // anyway, so the measurement was already in hand and simply never handed
+    // over.
+    const boxes = {};
+    // From the walk, not from perception. The walk measures every element on
+    // screen whether or not the capture of it can be trusted, and taking the
+    // boxes from perception meant that a refused capture also cost the hand its
+    // aim: 42 pointer events in cycle 45 and 34 of them with nothing to aim at,
+    // on a run with 72 refusals.
+    for (const element of seen?.elements || seenElements(seen?.perception)) {
+      if (element?.selector && element.box) boxes[element.selector] = element.box;
+    }
+    return this.faculty.processAction(action,
+      { browser, recorder: context.recorder, context, boxes });
+  }
+
+  /**
+   * What happened, as a verdict.
+   *
+   * A person who gave up is a result, not an absence of one. The old fallback
+   * reported "inconclusive" whenever nothing called journey_finish, which read as
+   * a harness problem when it was often the product's.
+   */
+  verdict(ending, controller, journey, steps, url = "") {
+    const passCriterion = (journey.passCriteria || [])[0]?.id || "tasks-completed";
+    const failCriterion = (journey.failCriteria || [])[0]?.id || "tasks-blocked";
+    const state = controller.state;
+    const completed = ending.type === "done";
+    // CAP-4: a run-harness condition, not a claim about the product -- the
+    // account matches _instrument_diagnostics' own reason for existing
+    // (services/report_service/helpers.py): an absence of findings here means
+    // nothing was checked, not that nothing was wrong. Excluded from status,
+    // criteria and blockers the same way "done" is, so it never reads as a
+    // failed or blocked journey.
+    const isDiagnostic = ending.type === "diagnostic";
+    const evidence = this.shots.at(-1) || this.shots[0] || undefined;
+    const summary = {
+      done: `Completed what they came to do. ${ending.detail || ""}`.trim(),
+      gave_up: `Gave up: ${ending.detail || "not worth any more time"}.`,
+      abandoned: `Walked away after ${steps} actions -- ${ending.detail}.`,
+      exhausted: `Still going after ${steps} actions without finishing.`,
+      diagnostic: `Stopped after ${steps} actions -- ${ending.detail}.`,
+    }[ending.type];
+
+    return {
+      status: completed ? "passed" : (isDiagnostic || ending.type === "exhausted") ? "inconclusive" : "failed",
+      confidence: (isDiagnostic || ending.type === "exhausted") ? "low" : "high",
+      summary: `${summary} Frustration ended at ${state.frustration.toFixed(2)}, `
+        + `confusion at ${state.confusion.toFixed(2)}, trust at ${state.trust.toFixed(2)}.`,
+      // Each criterion cites the frame the persona was looking at when they
+      // stopped: the journey contract requires screenshot evidence, and a
+      // conclusion about a page should be able to show the page.
+      criteria: [
+        { id: passCriterion, result: completed ? "met" : isDiagnostic ? "not-observed" : "not-met",
+          explanation: completed ? summary
+            : isDiagnostic ? `${summary} Whether the tasks would have been completed under the intended `
+                             + "session is not established."
+            : `${summary} The tasks were not completed.`,
+          evidence: { screenshot: evidence, url, observation: summary } },
+        // "Blocked" is a claim about the page, and only two of the four product
+        // endings support it: they gave up, or they walked away. Running out of
+        // the harness's own step budget is not one -- a live report headlined
+        // "The journey was blocked before completion", severity critical, over a
+        // run whose record says "Still going after 16 actions without
+        // finishing". Nothing had blocked that person; the budget ran out while
+        // they were still working. A run-harness diagnostic is not one either,
+        // for the same reason: the harness stopped it, not the page.
+        { id: failCriterion, result: (ending.type === "exhausted" || isDiagnostic) ? "not-observed"
+            : completed ? "not-met" : "met",
+          explanation: completed ? "Nothing blocked this person."
+            : ending.type === "exhausted"
+              ? `${summary} They had not given up when the run's action budget ran out, so `
+                + "whether the page would have blocked them is not established."
+            : isDiagnostic ? `${summary} The run-harness condition, not the page, ended this run.`
+              : summary,
+          evidence: { screenshot: evidence, url, observation: summary } },
+      ],
+      blockers: (completed || isDiagnostic) ? [] : [{
+        id: "persona-stopped", severity: ending.type === "exhausted" ? "minor" : "major",
+        category: "blocker", title: `The visitor ${ending.type === "gave_up" ? "gave up" : "did not get there"}`,
+        evidence: { screenshot: evidence, url },
+        description: `${summary} This is what the page cost this particular person: `
+          + `frustration ${state.frustration.toFixed(2)}, confusion ${state.confusion.toFixed(2)}, `
+          + `${steps} actions, ${state.consecutiveFailures} of them in a row that went nowhere.`,
+      }],
+      uxFindings: [], suggestedImprovements: [],
+    };
+  }
+}
+
+module.exports = { DEFAULT_MAX_STEPS, PersonaDirector, boxOf, nameOf, observationFrom, outcomeEvent };

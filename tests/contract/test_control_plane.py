@@ -1,6 +1,9 @@
+import base64
 from pathlib import Path
 import sqlite3
 from datetime import datetime, timedelta, timezone
+
+import pytest
 
 from fastapi.testclient import TestClient
 
@@ -306,7 +309,11 @@ def test_report_pain_points_are_derived_from_real_journeytest_verdict_not_hardco
 
     blocker = next(item for item in findings if item["title"] == "Checkout spinner never resolves")
     assert blocker["severity"] == "critical"
-    assert "screenshot: 003.png" in blocker["evidence"]
+    # Cited by the name the session lists the capture under, so the reader can
+    # find it -- not by the file name the run happened to write ("003.png"),
+    # which no artifact in the session is called.
+    assert JobExecutor._download_name("browser.screenshot", job["job_id"], "003") in blocker["evidence"]
+    assert "screenshot: 003.png" not in blocker["evidence"]
     assert blocker["recommendation"] == "Add a timeout and error state to the checkout request."
 
     ux_finding = next(item for item in findings if item["title"] == "Low-contrast price label")
@@ -363,6 +370,50 @@ def test_passed_run_with_unblocked_fail_criterion_reports_no_pain_point(tmp_path
     findings = report["critical_pain_points"]
     assert not any(item["source"] == "criteria" for item in findings), findings
     assert findings[0]["title"] == "No pain points detected"
+
+
+def test_vision_image_payload_fits_a_proxy_body_limit():
+    """A full-page capture must not be sent at its original size.
+
+    A live run failed with HTTP 413 "request entity too large" because the
+    screenshot went to the model router as raw base64 PNG. JourneyTest writes
+    full-page captures (one was 2.4 MB / 12000px), and base64 adds a third on
+    top, so the body passed the proxy's cap before the model ever saw it.
+    """
+    pytest.importorskip("PIL")
+    from io import BytesIO
+    from PIL import Image
+
+    # Photographic density: the case PNG cannot squeeze, which is how a real
+    # capture reaches megabytes. A flat synthetic page would not reproduce it.
+    import random
+    random.seed(11)
+    tall = Image.new("RGB", (1440, 6000))
+    tall.putdata([(random.randrange(256), random.randrange(256), random.randrange(256))
+                  for _ in range(1440 * 6000)])
+    buffer = BytesIO()
+    tall.save(buffer, format="PNG")
+    raw = buffer.getvalue()
+
+    budget = JobExecutor._vision_image_budget()
+    assert len(raw) > budget, "fixture must be large enough to exercise the shrink path"
+
+    encoded, mime = JobExecutor._vision_image_payload(raw)
+
+    assert mime == "image/jpeg"
+    assert len(encoded) * 3 // 4 <= budget
+    # base64 of the original would have been several MB; the sent body is the
+    # thing the proxy measures.
+    assert len(encoded) < len(base64.b64encode(raw))
+
+
+def test_vision_image_payload_leaves_a_small_capture_alone():
+    """Nothing to gain from re-encoding a screenshot already under budget."""
+    pytest.importorskip("PIL")
+    small = b"x" * 128
+    encoded, mime = JobExecutor._vision_image_payload(small)
+    assert mime == "image/png"
+    assert encoded == base64.b64encode(small).decode("ascii")
 
 
 def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path, monkeypatch):
@@ -466,7 +517,7 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     assert finding["title"] == "Ambiguous button label"
     assert finding["severity"] == "high"
     assert finding["affectedPersonas"] == 2
-    assert "2 observation(s) across 2 persona(s)" in finding["evidence"]
+    assert "2 observations across 2 people" in finding["evidence"]
     assert finding["recommendation"] == "Use 'Complete purchase'."
     assert finding["screenshotCrop"].startswith("data:image/png;base64,")
     # Real knowledge grounding (WCAG/Nielsen-Norman references) is computed per
@@ -792,13 +843,13 @@ def test_executive_summary_reports_what_was_found_not_what_was_prepared():
         [{"severity": "critical", "title": "Broken"}, {"severity": "low", "title": "Nit"}],
         [{"title": "Consistent buttons"}])
 
-    assert "2 usability issue(s) were identified" in summary
+    assert "2 usability issues were identified" in summary
     assert "1 of them high-severity or blocking" in summary
-    assert "1 design decision(s) are working" in summary
+    assert "1 design decision is working" in summary
 
     empty = JobExecutor._executive_summary("https://example.com", ["Buy"], [{"id": "p1"}],
                                            [{"title": "No pain points detected", "severity": "low"}], [])
-    assert "0 usability issue(s) were identified" in empty
+    assert "0 usability issues were identified" in empty
 
 
 def test_persona_thoughts_fall_back_to_verdict_prose_when_provider_hides_reasoning():
@@ -875,6 +926,48 @@ def test_page_wide_finding_falls_back_to_the_full_screenshot():
     assert JobExecutor._screenshot_data_uri(b"not an image") is None
 
 
+def test_deck_bounds_evidence_images_to_the_slide():
+    """An evidence image must not be taller than the slide showing it.
+
+    .slide is exactly 100vh with overflow-y:auto, so an image with only a width
+    rule renders at its natural height and scrolls off a landscape screen -- a
+    600x3000 crop measured 3020px tall inside a 900px slide. The sibling
+    iframe.redesign was already capped; the img was not.
+    """
+    deck = JobExecutor._slide_deck({
+        "url": "https://example.com", "executive_summary": "s",
+        "critical_pain_points": [{
+            "title": "Nav is unclear", "summary": "s", "severity": "high",
+            "screenshotCrop": "data:image/png;base64,Zm9v", "screenshotIsRegion": True,
+        }],
+        "synthetic_users": [{"id": "p1"}],
+    })
+
+    image_rule = next(rule for rule in deck.split("}") if rule.strip().startswith(".shot img{"))
+    assert "max-height" in image_rule, "evidence image needs a height bound"
+    # Without object-fit the height clamp squashes the image instead of scaling it.
+    assert "object-fit:contain" in image_rule
+
+
+def test_element_crop_is_capped_so_a_large_region_cannot_dominate_a_slide():
+    pytest.importorskip("PIL")
+    from io import BytesIO
+    from PIL import Image
+
+    buffer = BytesIO()
+    Image.new("RGB", (1600, 4000), (10, 20, 30)).save(buffer, format="PNG")
+    box = {"x": 0, "y": 0, "width": 1600, "height": 4000}
+
+    uri = JobExecutor._crop_element_data_uri(buffer.getvalue(), box, max_edge=1200)
+
+    assert uri is not None
+    payload = base64.b64decode(uri.split(",", 1)[1])
+    with Image.open(BytesIO(payload)) as cropped:
+        assert max(cropped.width, cropped.height) <= 1200
+        # Proportions must survive the cap.
+        assert abs((cropped.width / cropped.height) - (1600 / 4000)) < 0.01
+
+
 def test_finding_slide_labels_a_full_page_shot_distinctly_from_a_region_crop():
     region = JobExecutor._finding_slide(
         {"title": "Bad button", "summary": "s", "screenshotCrop": "data:image/png;base64,Zm9v",
@@ -900,7 +993,7 @@ def test_redesign_is_rendered_as_live_html_beside_the_current_screenshot():
     }, 1, "Observed user issue")
 
     assert "Current design" in html
-    assert "Re-design (live HTML)" in html
+    assert "Re-design" in html and "working code, not a mockup" in html
     assert "<iframe" in html and 'sandbox="allow-same-origin"' in html
     assert "srcdoc=" in html
     # The fragment is escaped into srcdoc, not injected raw into the deck.
@@ -926,7 +1019,7 @@ def test_redesign_generation_is_bounded_and_targets_the_worst_findings(monkeypat
     monkeypatch.setenv("EYESON_REDESIGN_LIMIT", "2")  # opt back in (conftest disables it)
     asked = []
 
-    def fake_fragment(finding, url):
+    def fake_fragment(finding, url, providers=None):
         asked.append(finding["title"])
         return f'<div>fix for {finding["title"]}</div>'
 
@@ -960,7 +1053,8 @@ def test_redesign_fragment_rejects_a_full_document_or_prose(monkeypatch):
     for reply, expected in [("<html><body>whole page</body></html>", None),
                             ("Sorry, I cannot do that.", None),
                             ("```html\n<div>ok</div>\n```", "<div>ok</div>")]:
-        monkeypatch.setattr(semantic, "DirectLLMSemanticEngine", lambda r=reply: Engine(r))
+        monkeypatch.setattr(semantic, "DirectLLMSemanticEngine",
+                            lambda r=reply, **kwargs: Engine(r))
         assert JobExecutor._generate_redesign_fragment({"title": "t"}, "https://example.com") == expected
 
 
@@ -1224,6 +1318,244 @@ def test_a_verdict_finding_shows_the_screenshot_journeytest_cited(tmp_path):
     assert findings[2]["screenshotCrop"] == "data:image/png;base64,Zm9v"
 
 
+# --- CAP-4: redacting a screenshot's sensitive boxes before it ships -----------
+
+def _decoded_data_uri(data_uri):
+    from io import BytesIO
+    from PIL import Image
+    header, encoded = data_uri.split(",", 1)
+    return Image.open(BytesIO(base64.b64decode(encoded)))
+
+
+def test_redact_boxes_in_image_blanks_only_the_given_region():
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (200, 100), color="white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    redacted_bytes = JobExecutor._redact_boxes_in_image(
+        buffer.getvalue(), [{"x": 10, "y": 10, "width": 40, "height": 20}])
+    redacted = Image.open(BytesIO(redacted_bytes))
+
+    assert redacted.getpixel((20, 20)) == (0, 0, 0), "inside the box is blanked"
+    assert redacted.getpixel((100, 80)) == (255, 255, 255), "outside the box is untouched"
+    # No boxes: the original bytes come back unchanged, not a re-encode.
+    assert JobExecutor._redact_boxes_in_image(buffer.getvalue(), []) == buffer.getvalue()
+
+
+def test_boxes_to_redact_matches_by_selector_and_needs_a_box():
+    elements = [
+        {"selector": ".account-menu", "box": {"x": 1, "y": 2, "width": 3, "height": 4}},
+        {"selector": ".no-box-here"},
+        {"selector": "#buy-button", "box": {"x": 9, "y": 9, "width": 9, "height": 9}},
+    ]
+
+    assert JobExecutor._boxes_to_redact(elements, [".account-menu", ".no-box-here"]) == [
+        {"x": 1, "y": 2, "width": 3, "height": 4}]
+    assert JobExecutor._boxes_to_redact(elements, []) == []
+    assert JobExecutor._boxes_to_redact(elements, None) == []
+
+
+def test_redact_element_fields_blanks_name_text_value_for_listed_selectors_only():
+    elements = [
+        {"selector": ".account-menu", "role": "button", "name": "Signed in as jane.doe@example.com",
+         "text": "jane.doe@example.com", "value": "jane.doe@example.com"},
+        {"selector": "#buy-button", "role": "button", "name": "Buy now"},
+    ]
+
+    redacted = JobExecutor._redact_element_fields(elements, [".account-menu"])
+
+    assert redacted[0]["name"] == redacted[0]["text"] == redacted[0]["value"] == "[REDACTED]"
+    assert redacted[0]["selector"] == ".account-menu", "the selector itself is not a secret"
+    assert redacted[0]["role"] == "button", "an unrelated field is untouched"
+    assert redacted[1]["name"] == "Buy now", "an element off the list is untouched"
+    assert JobExecutor._redact_element_fields(elements, []) == elements
+
+
+def test_a_verdict_screenshot_is_blanked_before_it_is_cropped_when_its_region_is_listed(tmp_path):
+    from PIL import Image
+    import json as json_module
+
+    screenshot = tmp_path / "final-view.png"
+    Image.new("RGB", (200, 100), color="red").save(screenshot)
+    snapshot = tmp_path / "final-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": ".account-menu", "role": "button", "name": "Signed in as jane.doe@example.com",
+         "box": {"x": 0, "y": 0, "width": 200, "height": 100}}]}))
+
+    findings = [{"title": "Account menu shows the wrong state", "source": "uxFindings", "runId": "run_1",
+                "evidenceScreenshot": None, "elementBox": {"x": 0, "y": 0, "width": 200, "height": 100}}]
+    JobExecutor._attach_verdict_screenshots(
+        findings, [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)], "snapshots": [str(snapshot)]}}],
+        redact_selectors=[".account-menu"])
+
+    decoded = _decoded_data_uri(findings[0]["screenshotCrop"]).convert("RGB")
+    assert decoded.getpixel((decoded.width // 2, decoded.height // 2)) == (0, 0, 0), (
+        "the whole cited region was the redacted box, so no red survives")
+
+    # The same run, with no redact selectors, keeps the real pixels.
+    findings_unredacted = [{"title": "Account menu shows the wrong state", "source": "uxFindings", "runId": "run_1",
+                            "evidenceScreenshot": None, "elementBox": {"x": 0, "y": 0, "width": 200, "height": 100}}]
+    JobExecutor._attach_verdict_screenshots(
+        findings_unredacted, [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)],
+                                                                "snapshots": [str(snapshot)]}}])
+    decoded_unredacted = _decoded_data_uri(findings_unredacted[0]["screenshotCrop"]).convert("RGB")
+    assert decoded_unredacted.getpixel((decoded_unredacted.width // 2, decoded_unredacted.height // 2)) == (255, 0, 0)
+
+
+# --- RPT-5/E7: annotating the evidence -----------------------------------------
+
+def test_a_numbered_marker_is_drawn_on_the_elements_own_box():
+    from io import BytesIO
+    from PIL import Image
+
+    image = Image.new("RGB", (200, 100), color="white")
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    crop = JobExecutor._crop_element_data_uri(
+        buffer.getvalue(), {"x": 100, "y": 40, "width": 40, "height": 20}, number=3)
+
+    decoded = _decoded_data_uri(crop).convert("RGB")
+    # The badge is centred on the box's own top-left corner (offset by the crop's
+    # own padding), not the crop's -- a badge in the crop's corner would point at
+    # empty margin rather than the control itself.
+    pad = 12
+    badge_x, badge_y = pad, pad
+    # A few pixels off centre: solid marker colour, clear of the number glyph's
+    # own anti-aliased edge at the exact centre pixel.
+    sample = (badge_x - 8, badge_y)
+    assert decoded.getpixel(sample) == JobExecutor._EVIDENCE_MARKER_COLOR
+    # No number: no marker drawn, and the crop is otherwise unchanged.
+    plain = _decoded_data_uri(JobExecutor._crop_element_data_uri(
+        buffer.getvalue(), {"x": 100, "y": 40, "width": 40, "height": 20})).convert("RGB")
+    assert plain.getpixel(sample) == (255, 255, 255)
+
+
+def test_evidence_numbers_are_unique_across_verdict_and_vision_findings(tmp_path):
+    """The deck prints the same number beside a finding's title that its image
+    carries, so two findings in one report must never draw the same digit --
+    proven here by continuing the counter from a start other than 1, the way
+    executor.py continues it past whatever _synthesize_pain_points already used."""
+    from PIL import Image
+    import json as json_module
+
+    screenshot = tmp_path / "final-view.png"
+    Image.new("RGB", (200, 100), color="white").save(screenshot)
+    snapshot = tmp_path / "final-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": "#a", "box": {"x": 0, "y": 0, "width": 20, "height": 20}},
+        {"selector": "#b", "box": {"x": 40, "y": 0, "width": 20, "height": 20}}]}))
+    findings = [
+        {"title": "First issue", "source": "uxFindings", "runId": "run_1", "evidenceScreenshot": None,
+         "elementBox": {"x": 0, "y": 0, "width": 20, "height": 20}},
+        {"title": "Second issue", "source": "uxFindings", "runId": "run_1", "evidenceScreenshot": None,
+         "elementBox": {"x": 40, "y": 0, "width": 20, "height": 20}},
+    ]
+    JobExecutor._attach_verdict_screenshots(
+        findings, [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)],
+                                                     "snapshots": [str(snapshot)]}}],
+        start_evidence_number=5)
+
+    assert [item["evidenceNumber"] for item in findings] == [5, 6]
+
+
+def test_the_deck_prints_the_same_number_beside_the_title():
+    html = JobExecutor._presentation({
+        "critical_pain_points": [{"title": "Ambiguous label", "severity": "medium", "category": "ux",
+                                  "summary": "s", "evidenceNumber": 2}],
+        "elements_to_preserve": [], "impact_analysis": {}, "url": "https://example.com",
+        "executive_summary": "", "evidence_language": "observed", "limitations": []})
+
+    assert ">2<" in html
+
+
+# --- RPT-5/C4: the re-design drawn in the page's own palette --------------------
+
+def test_the_redesign_prompt_is_grounded_in_the_screenshots_own_colours(tmp_path, monkeypatch):
+    from PIL import Image
+
+    screenshot = tmp_path / "shot.png"
+    image = Image.new("RGB", (200, 100), color=(30, 60, 90))
+    image.paste((0, 0, 0), (0, 0, 40, 40))
+    image.save(screenshot)
+
+    monkeypatch.setenv("OPENAI_API_KEY", "fixture")
+    captured = {}
+
+    class FakeEngine:
+        def __init__(self, **kwargs): pass
+        def complete_text(self, system_prompt, user_prompt):
+            captured["user_prompt"] = user_prompt
+            return "<div>fixed</div>"
+
+    import services.persona_service.semantic as semantic
+    monkeypatch.setattr(semantic, "DirectLLMSemanticEngine", FakeEngine)
+
+    finding = {"title": "Generic button", "summary": "s", "elements": [
+        {"elementId": "#buy", "role": "button", "box": {"x": 0, "y": 0, "width": 40, "height": 40}}],
+        "screenshotRef": str(screenshot), "alternatives": [{"proposedChange": "Make it blue"}]}
+
+    fragment = JobExecutor._generate_redesign_fragment(finding, "https://example.com")
+
+    assert fragment == "<div>fixed</div>"
+    assert "#000000" in captured["user_prompt"], "the element's own measured colour reaches the prompt"
+    assert "#1e3c5a" in captured["user_prompt"], "the page background, sampled from a corner, reaches the prompt"
+
+
+def test_the_redesign_is_labelled_as_working_code_not_a_mockup():
+    html = JobExecutor._finding_slide({
+        "title": "Generic link text", "summary": "The link says only 'Learn more'.",
+        "screenshotCrop": "data:image/png;base64,Zm9v", "screenshotIsRegion": True,
+        "redesignHtml": '<div class="fix"><style>.fix a{font-weight:600}</style>'
+                        '<a href="#">Read the IANA domain policy</a></div>',
+    }, 1, "Observed user issue")
+
+    assert "working code, not a mockup" in html
+
+
+def test_a_redacted_element_never_leaves_this_process_in_the_vision_critique_request(tmp_path, monkeypatch):
+    """The vision-critique request body is the one thing built here that
+    actually leaves the deployment. An account name in its element list, or
+    its sensitive region still visible in the pixels, is exactly the leak
+    CAP-4 exists to close."""
+    import json as json_module
+    from PIL import Image
+
+    screenshot = tmp_path / "step1.png"
+    Image.new("RGB", (200, 100), color="red").save(screenshot)
+    snapshot = tmp_path / "step1-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": ".account-menu", "role": "button", "name": "Signed in as jane.doe@example.com",
+         "box": {"x": 0, "y": 0, "width": 200, "height": 100}}]}))
+
+    captured = {}
+
+    def urlopen(call, timeout):
+        class Response:
+            def __enter__(self_): return self_
+            def __exit__(self_, *args): pass
+            def read(self_): return json_module.dumps({"painPoints": []}).encode()
+        captured["payload"] = json_module.loads(call.data)
+        return Response()
+
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+    journeys = [{"runId": "run_1", "artifacts": {"screenshots": [str(screenshot)], "snapshots": [str(snapshot)]}}]
+    JobExecutor._collect_vision_pain_points(
+        journeys, ["Buy an item"], [{"id": "persona_ada"}], "https://example.com",
+        vision=[("https://mine.example/v1", "sk-mine", "vision-model")], send_options=True,
+        redact_selectors=[".account-menu"])
+
+    payload = captured["payload"]
+    assert payload["elements"][0]["name"] == "[REDACTED]"
+    assert "jane.doe" not in json_module.dumps(payload)
+    decoded = _decoded_data_uri(f"data:{payload['imageMimeType']};base64,{payload['imageBase64']}").convert("RGB")
+    assert decoded.getpixel((decoded.width // 2, decoded.height // 2)) == (0, 0, 0), (
+        "the sensitive region is blanked in the pixels the model actually receives")
+
+
 def test_one_issue_described_two_ways_merges_on_its_description():
     """A live run against leon4gr45-nova-test published "Ambiguous navigation
     hierarchy" and "Redundant and confusing navigation layers" as two findings.
@@ -1269,6 +1601,29 @@ def test_capture_references_read_as_names_not_container_paths():
     assert "screenshot: initial-view.png" in summary
     assert "snapshot: 005-snapshot.txt" in summary
     assert summary.startswith("Initial snapshot shows more than 15 buttons")
+
+
+def test_a_cited_capture_names_the_artifact_a_reader_can_download():
+    """A live report's only finding cited "snapshot: 003-snapshot.txt". The session
+    held that capture -- as "browser-snapshot-<job>-003-snapshot.json" -- and no
+    artifact was called what the report called it. Evidence a reader cannot resolve
+    from the citation is evidence the report did not really produce."""
+    from apps.api.executor import _evidence_reference_summary
+
+    summary = _evidence_reference_summary({
+        "screenshot": "/run/screenshots/003-click-e2-after.png",
+        "snapshot": "/run/snapshots/003-snapshot.txt",
+        "uiChangeTimeline": "/run/ui-changes/003-click-e2.json",
+    }, "job_abc")
+
+    for kind, stem in (("browser.screenshot", "003-click-e2-after"),
+                       ("browser.snapshot", "003-snapshot"),
+                       ("browser.ui-change", "003-click-e2")):
+        expected = JobExecutor._download_name(kind, "job_abc", stem)
+        assert expected in summary, f"{expected} is how the session lists it"
+    # The run-local name is not what the artifact is called, so it must not be
+    # what the report cites.
+    assert "003-snapshot.txt" not in summary
 
 
 def test_a_slide_never_heads_a_capture_reference_as_root_cause_analysis():
@@ -1431,3 +1786,1840 @@ def test_verdict_prose_is_still_used_when_no_reasoning_was_captured():
 
     assert sources == {"verdict", "verdict.uxFindings"}
     assert "model.reasoning" not in sources
+
+
+def _run_journey_job(tmp_path, monkeypatch, worker_payload, *, tasks=("Judge the offers",)):
+    """Drive one combined_test job against a stubbed Journey worker and return the report."""
+    import json as json_module
+    from urllib import error as error_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+
+    class WorkerResponse:
+        def __init__(self, request): self.request = request
+        def __enter__(self):
+            payload = json_module.loads(self.request.data)
+            body = dict(worker_payload)
+            body.setdefault("runId", payload["runId"])
+            body.setdefault("profileId", "persona_fw")
+            body.setdefault("simulationProfile", payload["profile"])
+            self.payload = json_module.dumps(body).encode()
+            return self
+        def __exit__(self, *args): pass
+        def read(self): return self.payload
+
+    def urlopen(call, timeout):
+        # The vision stage has its own worker and its own URL. It is best-effort by
+        # design, so an unreachable one exercises the Journey path on its own.
+        if "/v1/runs" not in call.full_url:
+            raise error_module.URLError("vision worker not configured for this test")
+        return WorkerResponse(call)
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.delenv("EYESON_WORKER_URL", raising=False)
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": list(tasks)},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    report = (json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+              if completed["output_artifacts"] else None)
+    return completed, report
+
+
+def test_run_that_errored_after_recording_its_verdict_is_still_reported(tmp_path, monkeypatch):
+    """A live run browsed for 19 minutes, produced a verdict, and then failed at
+    `agent-browser record stop` because ffmpeg was missing from the image. The
+    verdict was already written to run.json, yet the job reported nothing but the
+    error -- the whole run was thrown away over a bookkeeping step that runs after
+    the browsing is done. The verdict is the run's own answer and must survive."""
+    verdict = {
+        "status": "failed", "confidence": "high", "summary": "The offers were never explained.",
+        "criteria": [{"id": "tasks-completed", "result": "not-met", "explanation": "No pricing was found."},
+                     {"id": "tasks-blocked", "result": "not-met", "explanation": "Nothing blocked the run."}],
+        "blockers": [], "suggestedImprovements": [],
+        "uxFindings": [{"id": "finding-1", "severity": "major", "category": "content",
+                        "title": "Offers are never priced",
+                        "description": "No page states what any plan costs."}],
+    }
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "error",
+        "error": {"message": "agent-browser command failed: record stop -- ffmpeg not found"},
+        "verdict": verdict,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert "Offers are never priced" in {item["title"] for item in report["critical_pain_points"]}
+    # The run is not presented as a whole one: the status and a limitation both
+    # say it was cut short, and the limitation names the failure.
+    assert report["journey_outcome"]["status"] == "partial"
+    assert report["evidence_language"] == "observed"
+    cut = [line for line in report["limitations"] if "did not finish cleanly" in line]
+    assert cut and "ffmpeg not found" in cut[0]
+    assert "its verdict was recorded before the failure and is included" in cut[0]
+
+
+def test_run_that_died_before_any_verdict_keeps_its_screenshots(tmp_path, monkeypatch):
+    """The director's connection dropped 14 minutes in ("Pi director provider error:
+    terminated"), so no verdict was reached -- but 37 screenshots and a video were
+    already on disk. Those are still real evidence for the vision critique, and a
+    report that says "no pain points detected" about them would be a false clean
+    bill of health."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "error",
+        "error": {"message": "Pi director provider error: terminated"},
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png", "/tmp/run/screenshots/002.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert report["journey_outcome"]["status"] == "partial"
+    titles = {item["title"] for item in report["critical_pain_points"]}
+    assert "Journey ended early -- no findings collected" in titles
+    assert "No pain points detected" not in titles
+    cut = [line for line in report["limitations"] if "did not finish cleanly" in line]
+    assert cut and "no verdict was reached" in cut[0]
+
+
+def test_run_that_produced_neither_verdict_nor_evidence_fails_the_job(tmp_path, monkeypatch):
+    """Salvage is not a licence to report on nothing. A run that never reached a
+    page has no evidence to stand on, and a report built from it would be fiction."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "error",
+        "error": {"message": "agent-browser failed to launch: no usable Chromium"},
+        "artifacts": {"screenshots": []},
+    })
+
+    assert completed["status"] == "failed"
+    assert report is None
+    assert "no usable Chromium" in completed["error"]["message"]
+
+
+def test_a_never_looked_at_finding_carries_the_scan_memory_caveat(tmp_path, monkeypatch):
+    """CAP-0: before the scan carried alreadySeen across steps, "on screen and
+    never looked at" partly measured the scan re-fixating the same few elements
+    every step rather than the page's prominence. The report says so, in both
+    directions, whenever it publishes one of these findings."""
+    missed = {"selector": "p.price", "name": "From EUR 49 per month", "goalAffinity": 0.85,
+              "box": {"x": 40, "y": 73, "width": 300, "height": 26}}
+    perception_step = {"eyes": {"acuity": 1.0, "contrastSensitivity": 1.0, "blurPx": 0.0},
+                       "scan": {"pattern": "spotted", "fixationBudget": 6,
+                                "why": ["little patience, so they hunt for the one thing they came for"]},
+                       "counts": {"elements": 15, "fixated": 6},
+                       "notPerceived": [], "notLookedAt": ["e2", "e4"],
+                       "missedWhatTheyCameFor": [missed]}
+    timeline = [{"type": "persona.perception", "data": perception_step} for _ in range(2)]
+    timeline.append({"type": "persona.reflection", "data": {"matched": "no", "gap": "No price seen."}})
+    verdict = {"status": "failed", "criteria": [], "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict, "timeline": timeline,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert "On screen and never looked at" in {item["title"].split(": ")[0]
+                                               for item in report["critical_pain_points"]}
+    caveat = [line for line in report["limitations"] if "remembers what each persona" in line]
+    assert caveat, "a report publishing this finding class must say what changed about it"
+    assert "same few elements on every step" in caveat[0]
+
+
+def test_no_scan_memory_caveat_when_nothing_from_that_class_is_published(tmp_path, monkeypatch):
+    """The caveat is not boilerplate on every report -- only on the ones that
+    actually carry a finding it is about."""
+    verdict = {"status": "passed", "criteria": [{"id": "tasks-completed", "result": "met"}],
+              "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert not [line for line in report["limitations"] if "remembers what each persona" in line]
+
+
+def test_a_mid_run_session_expiry_is_a_run_diagnostic_not_a_finding_about_the_page(tmp_path, monkeypatch):
+    """CAP-4: a run whose authenticated session stopped holding reviewed the
+    logged-out product without knowing it. The director ends the run there
+    (personaDirector.js) rather than continuing, with an "inconclusive" verdict
+    and no blocker -- this proves the report reads that as a harness diagnostic,
+    the same class as persona.perception_unavailable, never as a usability
+    finding about the page."""
+    timeline = [{"type": "journey.session_expired",
+                "data": {"reason": 'saw a "Sign in" prompt where the session was expected to still be '
+                                   "authenticated", "sinceStep": 3, "url": "https://example.com/account"}}]
+    verdict = {"status": "inconclusive", "confidence": "low",
+              "summary": "Stopped after 3 actions -- the authenticated session expired mid-run.",
+              "criteria": [{"id": "tasks-completed", "result": "not-observed"},
+                           {"id": "tasks-blocked", "result": "not-observed"}],
+              "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict, "timeline": timeline,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    diagnostics = report["run_diagnostics"]
+    expired = [item for item in diagnostics if item["title"].startswith("The authenticated session")]
+    assert expired, "the expiry must reach the reader as a diagnostic, not silence"
+    assert expired[0]["category"] == "harness"
+    assert "signed in" in expired[0]["summary"] or "logged-out" in expired[0]["summary"]
+    # Never counted or titled as a usability problem with the page itself.
+    assert not any("session" in item.get("title", "").lower() for item in report["critical_pain_points"])
+
+
+def test_clean_run_is_still_reported_as_completed(tmp_path, monkeypatch):
+    """The salvage path must not relabel healthy runs."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed",
+        "verdict": {"status": "passed", "confidence": "high", "summary": "All good.",
+                    "criteria": [{"id": "tasks-completed", "result": "met", "explanation": "Done."}],
+                    "blockers": [], "uxFindings": [], "suggestedImprovements": []},
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert report["journey_outcome"]["status"] == "completed"
+    assert not any("did not finish cleanly" in line for line in report["limitations"])
+    assert "No pain points detected" in {item["title"] for item in report["critical_pain_points"]}
+
+
+def test_verdict_is_read_from_disk_when_the_worker_answer_times_out(tmp_path, monkeypatch):
+    """A live two-task journey took 855s and another took 1159s, both past the old
+    600s client timeout. The run keeps going and writes its result to disk either
+    way, so a timed-out socket is not a lost verdict -- the artifact tree is shared
+    between the API and the worker in the Space, and the file is right there."""
+    import json as json_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Judge the offers"]},
+        "idempotency_key": None})
+
+    # The layout journeytest-core actually writes: a timestamp-prefixed directory,
+    # and a runId inside the file that carries the same prefix.
+    run_id = f"{job['job_id']}_persona_fw"
+    root = tmp_path / "journeys"
+    (root / f"2026-09-10T00-33-40-422Z-{run_id}").mkdir(parents=True)
+    (root / f"2026-09-10T00-33-40-422Z-{run_id}" / "run.json").write_text(json_module.dumps({
+        "runId": f"2026-09-10T00-33-40-422Z-{run_id}", "runStatus": "completed",
+        "artifacts": {"screenshots": []},
+        "verdict": {"status": "failed", "confidence": "high", "summary": "No pricing anywhere.",
+                    "criteria": [{"id": "tasks-completed", "result": "not-met", "explanation": "No pricing."}],
+                    "blockers": [{"id": "b1", "severity": "major", "category": "content",
+                                  "title": "Plans are never priced",
+                                  "description": "No page states what a plan costs."}],
+                    "uxFindings": [], "suggestedImprovements": []},
+    }))
+    monkeypatch.setenv("JOURNEY_ARTIFACT_ROOT", str(root))
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+
+    def urlopen(call, timeout):
+        raise TimeoutError("timed out")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+    assert "Plans are never priced" in {item["title"] for item in report["critical_pain_points"]}
+    # Salvaged from disk, but the run itself finished cleanly -- nothing to caveat.
+    assert report["journey_outcome"]["status"] == "completed"
+    # The persona the job asked for is re-attached, since the file records the run
+    # and not who the caller was running it as.
+    assert report["journey_outcome"]["runs"][0]["profileId"] == "persona_fw"
+
+
+def test_timeout_with_nothing_on_disk_fails_with_an_actionable_message(tmp_path, monkeypatch):
+    """No file means the run never got to write one. Say what to turn up rather than
+    reporting a bare socket error."""
+    import json as json_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Judge the offers"]},
+        "idempotency_key": None})
+    monkeypatch.setenv("JOURNEY_ARTIFACT_ROOT", str(tmp_path / "empty"))
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen",
+                        lambda call, timeout: (_ for _ in ()).throw(TimeoutError("timed out")))
+
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "failed"
+    assert "JOURNEY_RUN_TIMEOUT" in completed["error"]["message"]
+
+
+def test_a_refused_connection_is_not_treated_as_a_timeout(tmp_path, monkeypatch):
+    """Only "the answer did not arrive in time" justifies going to disk. A refused
+    or unresolvable worker never started a run, and its own error is the useful one."""
+    from urllib import error as error_module
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_fw", "persona": {"name": "Friedrich Wolf"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+    ids = [persona["artifact_id"]]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Judge the offers"]},
+        "idempotency_key": None})
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen",
+                        lambda call, timeout: (_ for _ in ()).throw(
+                            error_module.URLError(ConnectionRefusedError("connection refused"))))
+
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "failed"
+    assert "refused" in completed["error"]["message"]
+    assert "JOURNEY_RUN_TIMEOUT" not in completed["error"]["message"]
+
+
+def test_journey_run_timeout_default_covers_measured_run_lengths(monkeypatch):
+    """Both live runs of the sample journey outlasted the old 600s default."""
+    monkeypatch.delenv("JOURNEY_RUN_TIMEOUT", raising=False)
+    assert JobExecutor._journey_run_timeout() >= 1159
+    monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "45")
+    assert JobExecutor._journey_run_timeout() == 45
+    monkeypatch.setenv("JOURNEY_RUN_TIMEOUT", "not-a-number")
+    assert JobExecutor._journey_run_timeout() >= 1159
+
+
+def _png(image):
+    from io import BytesIO
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+    return buffer.getvalue()
+
+
+def test_a_capture_that_repeats_one_band_is_trimmed_to_the_band_that_is_real():
+    """A live run against a real customer site produced a 1280x8620 full-page
+    capture holding the same header-and-hero band about fourteen times -- what a
+    stitched screenshot does when the page pins its layout to the viewport. The
+    vision model reported a CRITICAL "infinite repeating page content ... makes
+    the site look completely broken" defect, and it went into the report as the
+    single thing to fix first. The site is fine; the capture was not."""
+    from io import BytesIO
+    from PIL import Image
+    from apps.api.executor import JobExecutor
+
+    band = Image.new("RGB", (1280, 600), (250, 250, 250))
+    band.paste(Image.new("RGB", (1280, 64), (12, 40, 90)), (0, 0))          # a header
+    band.paste(Image.new("RGB", (900, 200), (30, 120, 70)), (190, 180))     # a hero
+    stitched = Image.new("RGB", (1280, 600 * 14))
+    for index in range(14):
+        stitched.paste(band, (0, index * 600))
+
+    trimmed, original_height = JobExecutor._trim_repeated_capture(_png(stitched))
+    assert original_height == 8400
+    with Image.open(BytesIO(trimmed)) as kept:
+        assert kept.width == 1280
+        # One band, give or take the resolution the detector works at.
+        assert 500 <= kept.height <= 700
+
+
+def test_a_page_that_merely_repeats_its_own_cards_is_left_alone():
+    """Repetition is not the signature -- plenty of real pages stack identical
+    rows. What identifies a stitch is that the image resembles itself more a whole
+    band apart than one row apart, which a page with a header and varied content
+    cannot do."""
+    from PIL import Image
+    from apps.api.executor import JobExecutor
+
+    page = Image.new("RGB", (1280, 5000), (250, 250, 250))
+    page.paste(Image.new("RGB", (1280, 300), (12, 40, 90)), (0, 0))         # header, once
+    for y in range(300, 5000, 200):
+        page.paste(Image.new("RGB", (1100, 160), (220, 225, 235)), (90, y))  # identical cards
+    assert JobExecutor._trim_repeated_capture(_png(page))[1] is None
+
+    varied = Image.new("RGB", (1280, 6000))
+    for y in range(0, 6000, 40):
+        varied.paste(Image.new("RGB", (1280, 40), (y % 255, (y * 3) % 255, (y * 7) % 255)), (0, y))
+    assert JobExecutor._trim_repeated_capture(_png(varied))[1] is None
+
+
+def test_an_ordinary_viewport_screenshot_is_never_considered():
+    """The artifact only exists in stitched full-page captures, and the check
+    should cost nothing on the screenshots that are not."""
+    from PIL import Image
+    from apps.api.executor import JobExecutor
+    assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 720), (30, 40, 50))))[1] is None
+    # A blank capture repeats nothing, rather than repeating everything.
+    assert JobExecutor._trim_repeated_capture(_png(Image.new("RGB", (1280, 6000), (255, 255, 255))))[1] is None
+
+
+# A profile in the bottom few percent of corrected vision, and a typical one.
+RARE_EYES = {"acuity": 0.35, "contrastSensitivity": 0.25, "blurPx": 1.95}
+TYPICAL_EYES = {"acuity": 1.0, "contrastSensitivity": 1.0, "blurPx": 0.0}
+
+# The same element, measured on the page as drawn, either side of the WCAG line.
+FAILS_WCAG = {"selector": "p.fine", "role": "text",
+              "name": "Prices exclude VAT. Enterprise terms apply to seats over 50.",
+              "box": {"x": 40, "y": 223, "width": 460, "height": 18},
+              "reason": "too little contrast to make anything out",
+              "internalContrast": 0.035, "edgeContrast": 0.0028, "ink": 0.0,
+              "contrast": {"ratio": 2.85, "required": 4.5, "passes": False,
+                           "measured": "text against its own background"}}
+PASSES_WCAG = {**FAILS_WCAG, "selector": "p.ok", "name": "Choose the plan that fits how you work",
+               "contrast": {"ratio": 7.1, "required": 4.5, "passes": True,
+                            "measured": "text against its own background"}}
+MISSED_PRICE = {"selector": "p.price", "name": "From EUR 49 per month", "goalAffinity": 0.85,
+                "box": {"x": 40, "y": 73, "width": 300, "height": 26}}
+
+
+def _perception_journey(run_id="run_1", persona="friedrich_wolf", eyes=None,
+                        unreadable=(), missed=(), gap="No price was visible anywhere.",
+                        steps=2, seen_image=None):
+    """One run that looked at a page, repeated over `steps` steps."""
+    step = {"eyes": eyes or RARE_EYES,
+            "scan": {"pattern": "spotted", "fixationBudget": 6,
+                     "why": ["little patience, so they hunt for the one thing they came for"]},
+            "counts": {"elements": 15, "fixated": 6},
+            "notPerceived": list(unreadable), "notLookedAt": ["e2", "e4"],
+            "missedWhatTheyCameFor": list(missed), "seenImage": seen_image}
+    timeline = [{"type": "persona.perception", "data": step} for _ in range(steps)]
+    timeline.append({"type": "persona.reflection", "data": {"matched": "no", "gap": gap}})
+    return {"runId": run_id, "profileId": persona, "timeline": timeline}
+
+
+def test_an_element_that_fails_wcag_is_an_accessibility_defect_whoever_found_it():
+    """The contrast is measured on the page as drawn, so it is a fact about the
+    site and true for every visitor. It stands on its own however rare the profile
+    that happened to surface it."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG], eyes=RARE_EYES)])
+    assert len(findings) == 1
+    finding = findings[0]
+
+    assert finding["severity"] == "high" and finding["category"] == "accessibility"
+    assert "Fails WCAG AA contrast" in finding["title"]
+    assert "2.85:1" in finding["summary"] and "4.5:1" in finding["summary"]
+    assert finding["wcagPasses"] is False and finding["contrastRatio"] == 2.85
+    # And a fix that says where not to look.
+    assert "declared CSS colours is not enough" in finding["recommendation"]
+    # Backed by what the persona actually said.
+    assert finding["personaEvidence"][0]["quote"] == "No price was visible anywhere."
+
+
+def test_a_compliant_element_missed_by_one_rare_profile_is_not_called_a_defect():
+    """The rule that keeps the report believable. A run that happened to include
+    one very short-sighted profile must not turn a compliant page into a failing
+    one -- so it is said, and kept out of the numbered problems."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[PASSES_WCAG], eyes=RARE_EYES)])
+    finding = findings[0]
+
+    assert finding["severity"] == "info", "never ranked or counted among the problems"
+    assert finding["category"] == "profile-specific"
+    assert "one low-vision profile only" in finding["title"]
+    assert "0.35" in finding["summary"], "and it says which profile"
+    assert "No change is required for compliance" in finding["recommendation"]
+    assert JobExecutor._SEVERITY_RANK["info"] < JobExecutor._SEVERITY_RANK["low"]
+    assert "info" in JobExecutor._NOT_A_PROBLEM
+
+
+def test_a_compliant_element_missed_by_several_profiles_is_a_finding_about_the_page():
+    """Consistency is what turns one visitor's trouble into evidence about the
+    element -- and it is still not a compliance claim."""
+    findings = JobExecutor._pain_points_from_perception([
+        _perception_journey("r1", "low_vision", RARE_EYES, [PASSES_WCAG], gap="Could not read it."),
+        _perception_journey("r2", "typical", TYPICAL_EYES, [PASSES_WCAG], gap="Hard to make out."),
+        _perception_journey("r3", "hurried", {"acuity": 0.8, "contrastSensitivity": 0.7},
+                            [PASSES_WCAG], gap="Missed the terms."),
+    ])
+    assert len(findings) == 1, "one element, one finding, however many personas met it"
+    finding = findings[0]
+
+    assert finding["severity"] == "medium" and finding["category"] == "legibility"
+    assert finding["affectedPersonas"] == 3
+    assert set(finding["affectedPersonaIds"]) == {"low_vision", "typical", "hurried"}
+    assert "3 different personas" in finding["summary"]
+    assert "about the element rather than about one visitor" in finding["summary"]
+    assert "Meeting the minimum is not the same as being easy to read" in finding["recommendation"]
+
+
+def test_a_typical_profile_missing_something_compliant_is_a_hint_not_an_info_note():
+    """Only an unusual profile earns the "not a defect" downgrade. A typical
+    visitor failing to read compliant text is worth more attention, not less."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[PASSES_WCAG], eyes=TYPICAL_EYES)])
+    assert findings[0]["severity"] == "low"
+    assert findings[0]["category"] == "legibility"
+
+
+def test_something_they_came_for_and_missed_gets_worse_as_more_people_miss_it():
+    one = JobExecutor._pain_points_from_perception(
+        [_perception_journey(missed=[MISSED_PRICE])])[0]
+    assert one["severity"] == "medium" and one["category"] == "findability"
+    assert "prominence problem, not a wording one" in one["recommendation"]
+
+    several = JobExecutor._pain_points_from_perception([
+        _perception_journey("r1", "a", RARE_EYES, missed=[MISSED_PRICE]),
+        _perception_journey("r2", "b", TYPICAL_EYES, missed=[MISSED_PRICE]),
+    ])[0]
+    assert several["severity"] == "high", "several people coming for it and not seeing it is worse"
+    assert "2 different personas missed it" in several["summary"]
+
+
+def test_the_same_element_across_every_step_and_run_is_one_finding():
+    """A low-contrast caption is unreadable on every step of every visit. Reported
+    per step it would bury everything else in the report."""
+    findings = JobExecutor._pain_points_from_perception([
+        _perception_journey("r1", "a", RARE_EYES, [FAILS_WCAG], steps=20),
+        _perception_journey("r2", "b", TYPICAL_EYES, [FAILS_WCAG], steps=20),
+    ])
+    assert len(findings) == 1
+    assert "40 steps" in findings[0]["evidence"]
+    assert findings[0]["affectedPersonas"] == 2
+
+
+def test_a_run_that_saw_everything_produces_no_perception_findings():
+    """The model has to find real problems, not make every page a defect."""
+    assert JobExecutor._pain_points_from_perception([_perception_journey()]) == []
+    assert JobExecutor._pain_points_from_perception([{"runId": "old", "timeline": []}]) == []
+
+
+def test_an_element_with_no_name_is_still_reportable():
+    nameless = {**FAILS_WCAG, "selector": "div.badge", "role": "img", "name": "",
+                "box": {"x": 950, "y": 760, "width": 300, "height": 100}}
+    finding = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[nameless])])[0]
+    assert "950,760" in finding["title"], "located by where it is when it cannot be named"
+
+
+def test_an_eyesight_finding_cites_the_page_as_they_actually_saw_it():
+    """A clean screenshot beside "they could not read this" invites the reader to
+    disagree with the finding, correctly."""
+    finding = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG],
+                             seen_image="/tmp/aux/shots/003-as-they-saw-it.jpg")])[0]
+    assert finding["evidenceScreenshot"] == "/tmp/aux/shots/003-as-they-saw-it.jpg"
+    assert finding["evidenceIsAsTheySawIt"] is True
+    # And the box, so the report can crop to the element rather than show the page.
+    assert finding["elementBox"] == FAILS_WCAG["box"]
+
+
+def test_the_summary_names_the_worst_finding_rather_than_only_counting():
+    """"12 issues, 3 high-severity" is true of almost any report and tells a
+    reader nothing they can act on."""
+    findings = [
+        {"severity": "high", "title": 'On screen and never looked at: "From EUR 49 per month"',
+         "source": "perception.missed"},
+        {"severity": "high", "title": "Not readable to this person: \"Prices exclude VAT\"",
+         "source": "perception.notPerceived"},
+        {"severity": "medium", "title": "Vague call to action", "source": "uxFindings"},
+    ]
+    summary = JobExecutor._executive_summary("https://example.test/", ["a", "b"],
+                                             [{"id": "fw"}], findings, [{"title": "Clear value"}])
+
+    assert "The most serious is: On screen and never looked at" in summary
+    # The two classes a reader would not know to look for are called out by name.
+    assert "not legible once these users' eyesight is applied" in summary
+    assert "never looked at -- a prominence problem" in summary
+    assert "3 usability issues" in summary and "2 of them high-severity" in summary
+
+
+def test_the_summary_of_a_clean_run_does_not_invent_a_worst_finding():
+    summary = JobExecutor._executive_summary("https://example.test/", ["a"], [{"id": "fw"}],
+                                             [{"title": "No pain points detected"}], [])
+    assert "The most serious is" not in summary
+    assert "0 usability issues" in summary
+
+
+def test_a_run_from_before_the_degraded_capture_existed_still_reports():
+    """Old runs carry no seenImage. The finding is still worth making; it just
+    falls back to a run screenshot like every other finding."""
+    finding = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG])])[0]
+    assert finding["evidenceScreenshot"] is None
+    assert finding["evidenceIsAsTheySawIt"] is False
+
+
+def test_a_report_quotes_the_person_not_the_models_working():
+    """A live report published this as Friedrich Wolf's evidence for its only
+    finding: "We have completed the tasks: 1. ... We read the homepage ... However,
+    the snapshot does not show any price numbers. So we can say the page does not
+    tell you the exact cost." That is the model arguing with itself about refs and
+    evidence capture, in the first person plural. The persona director records the
+    person's own account -- what they expected, what arrived, how it left them --
+    and it was ignored in favour of the completion tokens."""
+    journey = {
+        "profileId": "persona_1",
+        "reasoning": [{"elapsedMs": 4687, "model": "some-router",
+                       "text": "We need screenshot evidence. We'll click the Pricing link (ref=e6). "
+                               "However, the snapshot does not show any price numbers."}],
+        "timeline": [
+            {"type": "persona.expectation", "elapsedMs": 2400,
+             "data": {"expectation": "The Pricing link should take me to the numbers."}},
+            {"type": "persona.reflection", "elapsedMs": 4700,
+             "data": {"matched": False, "observed": "A pricing page with plan names.",
+                      "gap": "The page loaded, but the prices I came for are not on it."}},
+            {"type": "persona.affect", "elapsedMs": 4800,
+             "data": {"feeling": "mildly irritated and unsure where to look next"}},
+            {"type": "agent.message.end", "elapsedMs": 5000, "data": {"text": "Assistant working."}},
+        ],
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+    quoted = [item["text"] for item in thoughts if item["kind"] == "reasoning"]
+
+    assert "The page loaded, but the prices I came for are not on it." in quoted
+    assert "The Pricing link should take me to the numbers." in quoted
+    assert "mildly irritated and unsure where to look next" in quoted
+    # The machinery is not the person, and must not be published as them.
+    assert not any("ref=e6" in text for text in quoted)
+    assert not any(text.startswith("We ") for text in quoted)
+    assert "Assistant working." not in quoted
+    # Every quote says which event it came from, so nothing presents an expectation
+    # as a reflection.
+    assert {item["source"] for item in thoughts if item["kind"] == "reasoning"} == {
+        "persona.expectation", "persona.reflection", "persona.affect"}
+
+
+def test_an_agent_run_still_quotes_the_models_reasoning():
+    """The persona voice is a preference, not a requirement. A run driven by the
+    competent-agent director records no persona.* events at all, and its completion
+    tokens remain the only account it has -- dropping them there would leave every
+    finding from such a run with no evidence."""
+    journey = {
+        "profileId": "persona_1",
+        "reasoning": [{"elapsedMs": 900, "model": "some-router",
+                       "text": "The pricing page shows plan names but no amounts."}],
+        "timeline": [{"type": "browser.click", "summary": "Clicked 'Pricing'", "elapsedMs": 800}],
+    }
+
+    thoughts = JobExecutor._persona_thoughts(journey)
+
+    assert [item["text"] for item in thoughts if item["kind"] == "reasoning"] == [
+        "The pricing page shows plan names but no amounts."]
+    assert {item["source"] for item in thoughts if item["kind"] == "reasoning"} == {"model.reasoning"}
+
+
+def test_an_instrument_that_stopped_answering_is_reported_not_inferred():
+    """A live report came back with `run_diagnostics: []` for a run in which the
+    entire perception path never executed. The mechanism was not broken: it filters
+    *findings* by their wording, and an instrument that stops answering produces no
+    finding to filter. The reader was left unable to tell "this page has no eyesight
+    problems" from "nothing looked"."""
+    from apps.api.executor import _instrument_diagnostics
+
+    diagnostics = _instrument_diagnostics([{
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            {"type": "persona.perception_unavailable", "elapsedMs": 3000,
+             "data": {"reason": "perception service returned HTTP 503", "sinceStep": 2}},
+            {"type": "persona.adherence_unavailable", "elapsedMs": 4000,
+             "data": {"reason": "two consecutive judge failures", "sinceStep": 3}},
+            {"type": "browser.click", "summary": "Clicked 'Pricing'", "elapsedMs": 5000},
+        ]}])
+
+    titles = [item["title"] for item in diagnostics]
+    assert "The run stopped seeing the page through this person's eyes" in titles
+    assert "Nothing checked whether the actions sounded like this person" in titles
+    # The reason the service gave is the actionable part, so it is carried through.
+    assert any("HTTP 503" in item["summary"] for item in diagnostics)
+    # An absence of findings after the instrument died must not read as a clean page.
+    assert any("not evidence that the page has none" in item["summary"] for item in diagnostics)
+    # A diagnostic is about the harness, never numbered among the product's issues.
+    assert {item["category"] for item in diagnostics} == {"harness"}
+    assert all(item["runId"] == "run_1" for item in diagnostics)
+    # A healthy run reports nothing.
+    assert _instrument_diagnostics([{"runId": "run_2", "timeline": [
+        {"type": "persona.reflection", "data": {"gap": "no prices"}}]}]) == []
+
+
+def test_a_plural_and_its_singular_stem_to_the_same_word():
+    """The stemmer's whole job, and it got this pair wrong. "prices" is six letters,
+    so it cleared `len > len("es") + 3` and stemmed to "pric"; "price" is five,
+    cleared nothing, and stayed "price". A live report discarded the one quote that
+    was genuinely about its finding -- "No price was visible anywhere." under a
+    finding about text reading "Prices exclude VAT" -- because the two shared no
+    stem."""
+    from apps.api.executor import _stem
+
+    for singular, plural in [("price", "prices"), ("control", "controls"), ("link", "links"),
+                             ("button", "buttons"), ("box", "boxes"), ("class", "classes"),
+                             ("address", "addresses"), ("pass", "passes"),
+                             ("policy", "policies"), ("heading", "headings")]:
+        assert _stem(singular) == _stem(plural), f"{singular}/{plural} must compare equal"
+    # A word that is not a plural keeps its own stem: "access" and "is" end in s.
+    assert _stem("access") == "access"
+    assert _stem("is") == "is"
+
+
+def test_a_perception_finding_only_quotes_what_the_persona_said_about_it():
+    """A live report put "Clicking 'How it works' did not navigate to a detailed
+    service explanation" and "No price or selection indicator appeared after
+    clicking the annual button" under a contrast finding about the site's own logo.
+    An irrelevant quote under a finding does not read as unrelated -- it reads as
+    evidence."""
+    findings = JobExecutor._pain_points_from_perception([{
+        "runId": "run_1", "profileId": "persona_1",
+        "simulationProfile": {"persona": {"name": "Friedrich Wolf"}},
+        "timeline": [
+            {"type": "persona.perception", "data": {
+                "eyes": RARE_EYES,
+                "scan": {"pattern": "spotted", "fixationBudget": 6, "why": ["in a hurry"]},
+                "counts": {"elements": 15, "fixated": 6},
+                "notPerceived": [FAILS_WCAG], "notLookedAt": [], "missedWhatTheyCameFor": []}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "Clicking 'How it works' did not navigate anywhere new."}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "No price was visible anywhere."}},
+        ]}])
+
+    assert len(findings) == 1
+    quotes = [item["quote"] for item in findings[0]["personaEvidence"]]
+    assert quotes == ["No price was visible anywhere."], (
+        "only the quote about this element's text may be published under it")
+    # And it is said by somebody: personaName was never set, so the presentation
+    # rendered every persona quote as "Synthetic user".
+    assert findings[0]["personaEvidence"][0]["personaName"] == "Friedrich Wolf"
+
+
+def test_a_report_says_so_when_a_capture_it_cites_was_never_kept():
+    """Evidence a reader cannot resolve from its citation is worse than no
+    citation: it reads as corroborated. A live report cited "snapshot:
+    003-snapshot.txt" for its only finding and no artifact in the session was
+    called that."""
+    from apps.api.executor import cited_captures, unresolvable_citations
+
+    report = {
+        "critical_pain_points": [
+            {"title": "Spinner never resolves",
+             "evidence": f"screenshot: {JobExecutor._download_name('browser.screenshot', 'job_a', '003')}"},
+            {"title": "Low-contrast label",
+             "evidence": f"snapshot: {JobExecutor._download_name('browser.snapshot', 'job_a', '004-snapshot')}"},
+        ],
+        "elements_to_preserve": [{"description": "nothing cited here"}],
+    }
+    kept = {JobExecutor._download_name("browser.screenshot", "job_a", "003")}
+
+    # Citations are read off the rendered prose, wherever in the report it sits.
+    assert cited_captures(report) == {
+        JobExecutor._download_name("browser.screenshot", "job_a", "003"),
+        JobExecutor._download_name("browser.snapshot", "job_a", "004-snapshot"),
+    }
+    missing = unresolvable_citations(report, kept)
+    assert missing == [JobExecutor._download_name("browser.snapshot", "job_a", "004-snapshot")]
+    # Nothing is flagged when everything cited was kept.
+    assert unresolvable_citations(report, cited_captures(report)) == []
+    # A report citing nothing has nothing to resolve.
+    assert unresolvable_citations({"executive_summary": "All clear."}, set()) == []
+
+
+def test_a_contrast_fix_names_the_change_rather_than_the_guideline():
+    """"Raise the contrast to at least 4.5:1" restates the minimum the finding has
+    already quoted. It is not a fix. The measurement knows both luminances and the
+    WCAG definition gives the target exactly, so the report can say how far the
+    darker side has to move."""
+    from apps.api.executor import contrast_fix
+
+    fix = contrast_fix({"inkLuminance": 0.45, "paperLuminance": 1.0,
+                        "needsLuminanceBelow": 0.1833})
+
+    assert "0.45" in fix and "0.1833" in fix
+    assert "#767676" in fix, "and offer a colour that actually gets there"
+    # Offered as a worked example, not as the colour the page must use: many
+    # colours share one luminance.
+    assert "any colour at or below that luminance does" in fix
+
+
+def test_a_suggested_colour_always_clears_the_bar_it_was_derived_from():
+    """Rounding to nearest returned #777777 for a target of 0.1833 -- one step
+    above it, at 0.1845 -- so the colour offered as the fix would itself have
+    failed the check it was calculated to pass."""
+    from apps.api.executor import _grey_at_luminance
+
+    def luminance(hex_colour: str) -> float:
+        channel = int(hex_colour[1:3], 16) / 255
+        channel = channel / 12.92 if channel <= 0.04045 else ((channel + 0.055) / 1.055) ** 2.4
+        return channel
+
+    for target in (0.1833, 0.3, 0.05, 0.5, 1.0, 0.0):
+        suggested = _grey_at_luminance(target)
+        assert luminance(suggested) <= target + 1e-9, (
+            f"{suggested} is above the {target} it was derived from, so it fails too")
+    # The canonical grey for 4.5:1 on white, as a sanity check against the spec.
+    assert _grey_at_luminance(0.1833) == "#767676"
+
+
+def test_a_background_no_text_colour_can_survive_is_said_as_such():
+    """When black itself would fall short, "darken the text" is advice that cannot
+    be taken."""
+    from apps.api.executor import contrast_fix
+
+    fix = contrast_fix({"inkLuminance": 0.02, "paperLuminance": 0.15,
+                        "needsLuminanceBelow": None})
+
+    assert "black text would still fall short" in fix
+    assert "background is what has to change" in fix
+
+
+def test_pixels_that_were_never_drawn_are_not_a_contrast_ratio():
+    """A live report filed "Fails WCAG AA contrast: 'Sourcing' -- 1.01:1" against a
+    486x21 region that was blank page below a chat bubble: an element of the site's
+    animated mock-up conversation that had not painted yet. The same element was
+    reported 200px higher one step later, which is what an animation looks like
+    from here.
+
+    The DOM saying there is text and the capture having no ink at all is the two
+    sources disagreeing about what exists. Reporting it as a measured ratio states
+    a number about pixels that are not there."""
+    blank = {"selector": "span@316,533", "role": "span", "name": "Sourcing",
+             "box": {"x": 316, "y": 533, "width": 486, "height": 21},
+             "reason": "the region and everything around it are the same flat colour",
+             "internalContrast": 0.0078, "edgeContrast": 0.0099, "ink": 0.0,
+             "nothingDrawn": True,
+             "contrast": {"ratio": 1.01, "required": 4.5, "passes": False,
+                          "measured": "text against its own background"}}
+
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[blank], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "Fails WCAG AA contrast" not in finding["title"]
+    assert finding["title"] == 'Declared but not drawn: "Sourcing"'
+    # No ratio is claimed, because there are no pixels to measure.
+    assert finding["contrastRatio"] is None and finding["wcagPasses"] is None
+    assert "1.01" not in finding["summary"]
+    # And it is said quietly: mid-animation is the likelier explanation than a defect.
+    assert finding["severity"] == "info"
+    assert "still animating" in finding["summary"]
+    # Still worth saying: text a page declares and never draws is real.
+    assert "never sees" in finding["recommendation"]
+
+
+def test_faint_but_real_ink_is_still_a_contrast_finding():
+    """The guard must not swallow the thing it sits next to. Text that is genuinely
+    drawn and genuinely too pale is exactly what the WCAG finding is for."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[FAILS_WCAG], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    assert "Fails WCAG AA contrast" in findings[0]["title"]
+    assert findings[0]["contrastRatio"] == 2.85
+
+
+def test_a_blocked_journey_says_where_the_patience_went():
+    """A live report's most serious finding was "The journey was blocked before
+    completion", severity critical, recommendation None. A critical finding with no
+    fix is one a reader cannot act on -- and the run knew exactly what had happened:
+    the persona clicked the same pricing toggle three separate times expecting a
+    price, was told each time that nothing appeared, and left."""
+    journey = {
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            {"type": "persona.expectation", "data": {
+                "expectation": "Clicking the 'Annual · save 17%' button will reveal the price.",
+                "action": {"type": "CLICK", "target": "e17"}}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "Click did not reveal any annual price information."}},
+            {"type": "persona.expectation", "data": {
+                "expectation": "Scrolling will show the plan details.",
+                "action": {"type": "SCROLL", "content": "down"}}},
+            {"type": "persona.reflection", "data": {"matched": "yes", "gap": ""}},
+            {"type": "persona.expectation", "data": {
+                "expectation": "Clicking the 'Annual · save 17%' button will reveal the price.",
+                "action": {"type": "CLICK", "target": "e17"}}},
+            {"type": "persona.reflection", "data": {
+                "matched": "no", "gap": "The expected price information or modal did not appear."}},
+        ],
+    }
+
+    said = JobExecutor._what_stopped_them(journey)
+
+    # Named the way a person would, not by the ref the agent used: nobody reading a
+    # report knows what e17 is, and the persona said what it was.
+    assert '"Annual · save 17%"' in said
+    assert "e17" not in said
+    assert "3 times" not in said and "2 times" in said
+    assert "The expected price information or modal did not appear" in said
+    # The quote's own full stop is not doubled.
+    assert 'appear".' in said and 'appear.".' not in said
+    # An action that worked is not the cause.
+    assert "scroll" not in said.lower()
+    # A control is somewhere to go and look.
+    assert "Start there" in said
+
+
+def test_what_stopped_them_reads_right_for_something_that_is_not_a_control():
+    """"Start there -- that is where this visitor's patience went" points at a
+    control. It does not parse for a scroll, where what the run shows is somebody
+    hunting and not finding. A SCROLL also carries "down" as its target, which is
+    not a thing on the page to go and look at, so the wording is chosen from the
+    verb rather than from whether a target string happens to be present."""
+    runs = [_expectation_run("run_1", "friedrich", [
+        ("Scrolling down will reveal the prices.",
+         {"type": "SCROLL", "content": "down"}, "no", "No prices appeared.", 0.20),
+        ("Scrolling down will reveal the prices.",
+         {"type": "SCROLL", "content": "down"}, "no", "Still no prices.", 0.40)])]
+
+    said = JobExecutor._what_stopped_them(runs[0])
+
+    assert "Start there" not in said
+    assert "scroll their way to it 2 times" in said
+    assert "not where they kept looking for it" in said
+    # And never "the down control".
+    assert "down" not in said.split("expected")[0]
+
+
+def test_a_journey_that_did_not_repeat_itself_gets_no_invented_cause():
+    """There is no honest single cause to name when nothing was tried twice, and a
+    guess is worse than the silence it replaces."""
+    journey = {"runId": "run_1", "timeline": [
+        {"type": "persona.expectation", "data": {"expectation": "A price.",
+                                                 "action": {"type": "CLICK", "target": "e1"}}},
+        {"type": "persona.reflection", "data": {"matched": "no", "gap": "No price."}},
+        {"type": "persona.expectation", "data": {"expectation": "A plan.",
+                                                 "action": {"type": "CLICK", "target": "e2"}}},
+        {"type": "persona.reflection", "data": {"matched": "no", "gap": "No plan."}},
+    ]}
+
+    assert JobExecutor._what_stopped_them(journey) == ""
+    assert JobExecutor._what_stopped_them({"timeline": []}) == ""
+
+
+def _expectation_run(run_id, persona, steps):
+    """A run as the persona director records it: expectation, reflection, affect."""
+    timeline = []
+    for expectation, action, matched, gap, frustration in steps:
+        timeline.append({"type": "persona.expectation",
+                         "data": {"expectation": expectation, "action": action}})
+        timeline.append({"type": "persona.reflection", "data": {"matched": matched, "gap": gap}})
+        timeline.append({"type": "persona.affect", "data": {"state": {"frustration": frustration}}})
+    return {"runId": run_id, "profileId": persona,
+            "simulationProfile": {"persona": {"name": persona.title()}}, "timeline": timeline}
+
+
+def test_a_control_that_promised_more_than_it_did_becomes_a_finding():
+    """Three consecutive live runs against the same page each recorded that
+    clicking "How it works" did not navigate anywhere and that the "Annual - save
+    17%" toggle showed no price -- one of them abandoning the journey over it --
+    and all three reports said nothing about either. One said "No pain points
+    detected" over a run that ended at 0.49 frustration and 0.52 confusion.
+
+    A reflection that comes back `matched: "no"` is a first-hand, falsifiable
+    observation of a control that promised something and did not deliver, which is
+    the most common real usability defect and one no check against the DOM can
+    find."""
+    runs = [
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'How it works' link will explain the product.",
+             {"type": "CLICK", "target": "e3"}, "no",
+             "Click did not navigate anywhere; the landing page remained.", 0.20),
+            ("Scrolling will reveal the prices.",
+             {"type": "SCROLL", "content": "down"}, "yes", "", 0.20),
+        ]),
+        _expectation_run("run_2", "sophie", [
+            ("Clicking the 'How it works' link will explain the product.",
+             {"type": "CLICK", "target": "e6"}, "no",
+             "Nothing happened when I clicked it.", 0.24),
+        ]),
+    ]
+
+    findings = JobExecutor._pain_points_from_expectations(runs)
+
+    assert len(findings) == 1, "one control, one finding, however many runs hit it"
+    finding = findings[0]
+    assert finding["title"] == "Promised more than it did: How it works"
+    # Two different people losing patience over one control is the page, not them.
+    assert finding["severity"] == "high"
+    assert finding["affectedPersonas"] == 2
+    # Priced by what it actually cost, read from the run's own affect rather than
+    # assigned from a table.
+    assert "0.44" in finding["evidence"] or "0.44" in finding["summary"]
+    # Both halves, in the persona's own words: what they expected before touching
+    # it, and what arrived.
+    assert "will explain the product" in finding["summary"]
+    assert "Nothing happened when I clicked it" in finding["summary"]
+    # An expectation that was met is not a finding.
+    assert "Scrolling" not in finding["summary"]
+
+
+def test_only_a_control_can_promise_something():
+    """A READ that returns something unexpected is about what the persona could
+    take in, which the perception findings measure properly. A SCROLL that does not
+    reveal what was hoped for is a guess about a page, not a promise it made.
+    Reporting those here files "the paragraph at 321,417 promised more than it
+    did", which is not a sentence about the product."""
+    runs = [_expectation_run("run_1", "friedrich", [
+        ("I will see the full paragraph describing what this does.",
+         {"type": "READ", "target": "p@321,417"}, "no", "The paragraph was not there.", 0.20),
+        ("Scrolling down will reveal pricing.",
+         {"type": "SCROLL", "content": "down"}, "no", "No pricing appeared.", 0.40),
+    ])]
+
+    assert JobExecutor._pain_points_from_expectations(runs) == []
+
+
+def test_one_control_named_two_ways_is_one_finding():
+    """One persona quotes "Annual - save 17%" and the next writes "the Annual
+    button", and the page has one toggle. Left split, the report says a control was
+    hit once when it was hit twice, and prices each half at half the patience it
+    actually cost -- which is what severity is read from."""
+    runs = [
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'Annual · save 17%' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "No price appeared.", 0.28)]),
+        _expectation_run("run_2", "sophie", [
+            ("Clicking the Annual button will display the annual price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Only the button remains.", 0.21)]),
+    ]
+
+    findings = JobExecutor._pain_points_from_expectations(runs)
+
+    assert len(findings) == 1
+    # The specific label survives -- it is the one a reader can find on the page.
+    assert findings[0]["title"] == "Promised more than it did: Annual · save 17%"
+    assert findings[0]["affectedPersonas"] == 2
+
+    # But two genuinely different controls stay two findings: "Annual" and
+    # "Monthly" are close by most string measures and are not the same toggle.
+    apart = JobExecutor._pain_points_from_expectations([
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "No price.", 0.20),
+            ("Clicking the 'Monthly' button will show the price.",
+             {"type": "CLICK", "target": "e18"}, "no", "Still no price.", 0.40)]),
+    ])
+    assert len(apart) == 2
+
+
+def test_a_deck_table_renders_an_em_dash_not_the_word_for_one():
+    """`escape(... or "&mdash;")` escapes the entity it was trying to emit, so the
+    Personas column of a live deck's summary table read "&mdash;" as literal text
+    where the finding affected nobody countable."""
+    report = {
+        "url": "https://example.test/", "executive_summary": "One issue.",
+        "critical_pain_points": [
+            {"severity": "critical", "category": "blocker", "title": "The journey was blocked",
+             "summary": "They left.", "affectedPersonas": 0},
+            {"severity": "high", "category": "expectation", "title": "Promised more than it did",
+             "summary": "It did not.", "affectedPersonas": 2},
+        ],
+        "elements_to_preserve": [], "journey_outcome": {"runs": []}, "limitations": [],
+        # The table the entity appears in is built from the priority order.
+        "impact_analysis": {"priorityOrder": [
+            {"title": "The journey was blocked", "severity": "critical", "affectedPersonas": 0},
+            {"title": "Promised more than it did", "severity": "high", "affectedPersonas": 2},
+        ]},
+    }
+
+    deck = JobExecutor._slide_deck(report)
+
+    assert "&amp;mdash;" not in deck, "the dash is markup and must not be escaped"
+    assert "&mdash;" in deck
+    assert "<td>2</td>" in deck
+
+
+def test_a_broken_promise_summary_does_not_double_the_full_stop():
+    """Both quotes carry the persona's own full stop; adding another reads as a
+    typo, and a live deck rendered `as expected.".`"""
+    runs = [_expectation_run("run_1", "friedrich", [
+        ("Clicking the 'Annual' button will reveal the price.",
+         {"type": "CLICK", "target": "e17"}, "no",
+         "Clicking the button did not reveal any annual price as expected.", 0.25)])]
+
+    summary = JobExecutor._pain_points_from_expectations(runs)[0]["summary"]
+
+    assert '.".' not in summary
+    assert 'as expected."' in summary
+    assert 'reveal the price."' in summary
+
+
+def test_a_quote_is_attributed_to_whoever_actually_said_it():
+    """Quotes and names were kept in two parallel lists and zipped by position, so
+    one persona's sentence appeared under another's name as soon as they
+    contributed unequal numbers of them."""
+    runs = [
+        _expectation_run("run_1", "friedrich", [
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Friedrich saw no price.", 0.20),
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Friedrich still saw no price.", 0.40)]),
+        _expectation_run("run_2", "sophie", [
+            ("Clicking the 'Annual' button will show the price.",
+             {"type": "CLICK", "target": "e17"}, "no", "Sophie saw no price either.", 0.30)]),
+    ]
+
+    quotes = JobExecutor._pain_points_from_expectations(runs)[0]["personaEvidence"]
+
+    assert quotes, "a finding this well evidenced must carry the evidence"
+    for quote in quotes:
+        said_by = quote["quote"].split()[0]
+        assert quote["personaName"].startswith(said_by), (
+            f'{quote["personaName"]} is credited with "{quote["quote"]}"')
+
+
+def test_an_element_that_resolved_on_another_capture_is_not_called_unreadable():
+    """A heading is not drawn black on one step and invisible on the next. When the
+    same element reads legible on one capture and blank on another, the blank one
+    caught it mid-render -- and the one that found text is the one to believe.
+
+    A live report published "Fails WCAG AA contrast: 'Individual' -- 1.05:1, high"
+    against a pricing-card heading that is plainly dark, from a capture taken while
+    the card was still fading in: ink luminance 0.9437 against paper at 0.993, both
+    near-white, and no marks found at all."""
+    mid_animation = {"selector": "e19", "role": "heading", "name": "Individual",
+                     "box": {"x": 172, "y": 426, "width": 262, "height": 36},
+                     "reason": "too little contrast to make anything out",
+                     "internalContrast": 0.0235, "edgeContrast": 0.0353, "ink": 0.0,
+                     "contrast": {"ratio": 1.05, "required": 3, "passes": False,
+                                  "measured": "text against its own background"}}
+
+    def step(unreadable, legible):
+        return {"type": "persona.perception", "data": {
+            "eyes": RARE_EYES,
+            "scan": {"pattern": "spotted", "fixationBudget": 6, "why": ["in a hurry"]},
+            "counts": {"elements": 15, "fixated": 6},
+            "notPerceived": unreadable, "notLookedAt": [], "missedWhatTheyCameFor": [],
+            "legible": legible}}
+
+    # Blank on one capture, resolved on another: no finding.
+    settled = JobExecutor._pain_points_from_perception([{
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [step([mid_animation], []), step([], ["e19"])]}])
+    assert settled == []
+
+    # Never resolved anywhere: still reported, because that is a page that never
+    # draws it and the guard must not swallow the real case.
+    never = JobExecutor._pain_points_from_perception([{
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [step([mid_animation], []), step([mid_animation], ["e20"])]}])
+    assert len(never) == 1
+    assert "Individual" in never[0]["title"]
+
+    # And a different run resolving it is enough: the page is the same page.
+    across = JobExecutor._pain_points_from_perception([
+        {"runId": "run_1", "profileId": "persona_1", "timeline": [step([mid_animation], [])]},
+        {"runId": "run_2", "profileId": "persona_2", "timeline": [step([], ["e19"])]},
+    ])
+    assert across == []
+
+
+def test_findings_about_different_elements_are_not_merged_into_one():
+    """Every measured finding titles itself the same way -- "Fails WCAG AA
+    contrast: X" -- so the boilerplate alone clears the title-similarity threshold.
+    A live run's nineteen perception findings collapsed into three, losing "£200"
+    and "Let's talk" into "Individual". Three different elements, three different
+    fixes, and a page with ten pale labels has ten of them."""
+    findings = [
+        {"title": 'Fails WCAG AA contrast: "Individual"', "elementName": "Individual",
+         "summary": "It is too pale.", "severity": "high"},
+        {"title": 'Fails WCAG AA contrast: "£200"', "elementName": "£200",
+         "summary": "It is too pale.", "severity": "high"},
+        {"title": 'Fails WCAG AA contrast: "Let\'s talk"', "elementName": "Let's talk",
+         "summary": "It is too pale.", "severity": "high"},
+    ]
+
+    assert len(JobExecutor._merge_similar_findings(findings)) == 3
+
+    # Findings that name no element still merge on wording, which is what that
+    # machinery was built for: a live run published "Generic link text", "Ambiguous
+    # link text" and "Non-descriptive link text" as three numbered issues.
+    worded = [
+        {"title": "Generic link text", "summary": "Links say 'Learn more' everywhere."},
+        {"title": "Ambiguous link text", "summary": "Links say 'Learn more' everywhere."},
+    ]
+    assert len(JobExecutor._merge_similar_findings(worded)) == 1
+
+
+def test_a_screenful_of_undrawn_elements_is_one_observation():
+    """A live run produced twelve "Declared but not drawn" entries -- the entire
+    navigation bar, one at a time -- from a single capture taken mid-render. Each
+    was individually correct, and together they buried the three findings a reader
+    needed. Twelve elements blank on one capture is a fact about the capture."""
+    def undrawn(name):
+        return {"source": "perception.notDrawn", "severity": "info",
+                "category": "profile-specific", "title": f'Declared but not drawn: "{name}"',
+                "summary": "Nothing was painted there.", "elementName": name,
+                "affectedPersonaIds": ["persona_1"], "personaEvidence": []}
+
+    many = JobExecutor._fold_undrawn([undrawn(name) for name in
+                                      ["Home", "Install", "Research", "Pricing", "Sign in"]]
+                                     + [{"source": "perception.notPerceived", "title": "Too pale",
+                                         "severity": "high"}])
+
+    titles = [item["title"] for item in many]
+    assert "5 elements were declared and not drawn" in titles
+    assert not any(title.startswith("Declared but not drawn") for title in titles)
+    assert "Too pale" in titles, "the fold must not touch anything else"
+    folded = next(item for item in many if item["title"].endswith("declared and not drawn"))
+    assert '"Home"' in folded["summary"] and "one event" in folded["summary"]
+
+    # Two or three are worth naming individually -- that is the case the finding
+    # was written for.
+    few = JobExecutor._fold_undrawn([undrawn("Home"), undrawn("Install")])
+    assert [item["title"] for item in few] == [
+        'Declared but not drawn: "Home"', 'Declared but not drawn: "Install"']
+
+
+def _finished_run(legible_per_capture, summary="Completed what they came to do. It costs £200."):
+    return {"runId": "run_1", "profileId": "persona_1",
+            "verdict": {"status": "passed", "summary": summary,
+                        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+            "timeline": [{"type": "persona.perception", "data": {"legible": items}}
+                         for items in legible_per_capture]}
+
+
+def test_a_vision_claim_the_run_disproves_does_not_lead_the_report():
+    """A live report led with "Repeated page layout rendering bug", critical -- "the
+    entire header and hero section repeats three times vertically ... looks highly
+    broken" -- and second with "Pricing cards are cut off ... preventing users from
+    seeing the actual price", high. The capture was correct, every section
+    rendered, and the same run's verdict reads "The page does state the pricing
+    clearly. £200 per user per year".
+
+    A confident, specific, wrong claim at critical severity is the most damaging
+    thing this report can carry."""
+    findings = [
+        {"source": "eyeson-vision-synthesis", "severity": "critical",
+         "title": "Repeated page layout rendering bug",
+         "summary": "The entire header and hero section repeats three times vertically."},
+        {"source": "eyeson-vision-synthesis", "severity": "high",
+         "title": "Pricing cards are cut off and hide actual costs",
+         "summary": "The cards are cut off, preventing users from seeing the actual price."},
+        {"source": "eyeson-vision-synthesis", "severity": "high",
+         "title": "Vague value proposition",
+         "summary": "The hero copy is abstract and hard to act on."},
+    ]
+    run = _finished_run([["e1", "e2", "e3"], ["e1", "e2", "e3", "e4"]])
+
+    notes = JobExecutor._temper_contradicted_findings(findings, [run])
+
+    assert [item["severity"] for item in findings] == ["medium", "medium", "high"], (
+        "only the contradicted claims are capped; the rest of the critique stands")
+    assert "rendered more than once" in findings[0]["summary"]
+    assert "completed the tasks it came to do" in findings[1]["summary"]
+    # Kept, not deleted: the visual observation may still be worth a look.
+    assert "repeats three times" in findings[0]["summary"]
+    # And the report says what it did, rather than quietly rewriting a severity.
+    assert len(notes) == 2
+    assert all("reported as" in note and "carried at medium" in note for note in notes)
+
+
+def test_a_duplication_claim_stands_when_the_walk_saw_a_duplicate():
+    """The guard must not swallow a real one. If an element really is on the page
+    twice, the walk lists it twice, and the claim is corroborated rather than
+    contradicted."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Header repeats", "summary": "The header is duplicated on the page."}
+    doubled = _finished_run([["e1", "e2", "e1"]])
+
+    JobExecutor._temper_contradicted_findings([finding], [doubled])
+
+    assert finding["severity"] == "critical"
+    assert "not supported by this run" not in finding["summary"]
+
+
+def test_a_blocking_claim_stands_when_the_run_did_not_finish():
+    """And a page that really did stop somebody keeps its severity."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Cards hide the price",
+               "summary": "The cards are cut off, preventing users from seeing the actual price."}
+    gave_up = {"runId": "run_1", "verdict": {
+        "status": "failed", "summary": "Walked away.",
+        "criteria": [{"id": "tasks-completed", "result": "not-met"}]}, "timeline": []}
+
+    JobExecutor._temper_contradicted_findings([finding], [gave_up])
+
+    assert finding["severity"] == "high"
+
+    # A finding from anywhere but the vision critique is never touched: the other
+    # sources are measurements, not readings of a picture.
+    measured = {"source": "perception.notPerceived", "severity": "high",
+                "title": "Fails WCAG AA contrast", "summary": "It repeats and prevents reading."}
+    JobExecutor._temper_contradicted_findings([measured], [_finished_run([["e1"]])])
+    assert measured["severity"] == "high"
+
+
+def _run_that_read_a_price(prices=("£200 / user / year", "£100 / user / year")):
+    """A run whose persona said, before acting, that it could see these sums."""
+    return {"runId": "run_1", "profileId": "persona_1",
+            "verdict": {"status": "passed",
+                        "summary": "Completed what they came to do.",
+                        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+            "timeline": [{"type": "persona.expectation",
+                          "data": {"visible": f"a paragraph: 3-day free trial, then {price}."}}
+                         for price in prices]}
+
+
+def test_a_missing_price_claim_falls_to_what_the_persona_read_off_the_page():
+    """Cycle 14 shipped "Missing pricing details on pricing cards" at critical --
+    "they do not display any actual prices ... cut off at the bottom, making it
+    impossible for users to determine cost" -- in a run whose own verdict reads
+    "it lists two options -- £200 per user per year ... and £100 per user per
+    year", and whose persona had read both off the page before acting.
+
+    A report that contradicts itself in two directions is worth less than one
+    that says nothing."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Missing pricing details on pricing cards",
+               "summary": "The cards do not display any actual prices or currency amounts."}
+
+    notes = JobExecutor._temper_contradicted_findings([finding], [_run_that_read_a_price()])
+
+    assert finding["severity"] == "medium"
+    assert "£200" in finding["summary"] and "persona\'s own eyes" in finding["summary"]
+    assert len(notes) == 1
+    # Kept, not deleted: the cards may well be worth redrawing.
+    assert "do not display any actual prices" in finding["summary"]
+
+
+def test_a_missing_price_claim_stands_when_nobody_ever_saw_a_price():
+    """The guard must not swallow a real one. A page that genuinely never shows a
+    number leaves no number in anything the persona said it could see."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Missing pricing details on pricing cards",
+               "summary": "The cards do not display any actual prices or currency amounts."}
+    priceless = {"runId": "run_1", "verdict": {
+        "status": "passed", "summary": "Never found what it costs.",
+        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+        "timeline": [{"type": "persona.expectation",
+                      "data": {"visible": "a heading and a 'Contact sales' button"}}]}
+
+    JobExecutor._temper_contradicted_findings([finding], [priceless])
+
+    assert finding["severity"] == "critical"
+
+
+def test_an_absence_claim_about_something_other_than_money_is_left_alone():
+    """The rebuttal is only as good as the thing it can spot. A price is
+    unambiguous in free text; "the trust signals are missing" is not, and a
+    guard that cannot check a claim must not temper it."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "No social proof", "summary": "Customer logos are missing from the page."}
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_read_a_price()])
+
+    assert finding["severity"] == "high"
+
+
+def test_a_finding_cannot_claim_more_distress_than_the_page_ever_caused():
+    """The vision reviewer estimates frustration, confusion and trust erosion from
+    a single screenshot, and those numbers reach the report as the finding's stated
+    impact. Measured against the runs that produced them they are not close: a run
+    whose peak frustration was 0.29, and which passed, carried three findings
+    claiming 0.90, 0.90 and 0.60. A run that peaked at 0.20 carried a finding
+    claiming 0.90 -- and that was the finding the element walk disproved."""
+    run = {"runId": "run_1", "timeline": [
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.19, "confusion": 0.17}}},
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.29, "confusion": 0.31}}},
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.22, "confusion": 0.20}}},
+    ]}
+    findings = [
+        {"title": "Repeated page layout rendering bug", "observations": 1, "affectedPersonas": 1,
+         "claimedImpact": {"frustration": 0.90, "confusion": 0.90, "trust": 0.95}},
+        {"title": "Vague value proposition", "observations": 1, "affectedPersonas": 1,
+         "claimedImpact": {"frustration": 0.10, "confusion": 0.20, "trust": 0.10}},
+    ]
+
+    assert JobExecutor._what_the_page_actually_cost([run]) == {"frustration": 0.29, "confusion": 0.31}
+    notes = JobExecutor._cap_claimed_impact(findings, [run])
+
+    # Held to what the page was measured to cost anyone, across every step.
+    assert findings[0]["claimedImpact"]["frustration"] == 0.29
+    assert findings[0]["claimedImpact"]["confusion"] == 0.31
+    # Capped, not replaced: a claim inside the ceiling is the model's to make.
+    assert findings[1]["claimedImpact"] == {"frustration": 0.10, "confusion": 0.20, "trust": 0.10}
+    # The prose is written from the numbers after the cap, so it cannot disagree.
+    assert "frustration 0.29" in findings[0]["evidence"]
+    assert "0.90" not in findings[0]["evidence"]
+    assert "frustration 0.10" in findings[1]["evidence"]
+    # And the report says it did this.
+    assert len(notes) == 1
+    assert "estimated frustration at 0.90" in notes[0]
+    assert "measured at most 0.29" in notes[0]
+
+
+def test_with_no_measured_affect_there_is_no_ceiling_to_impose():
+    """A ceiling nobody measured is not a ceiling. An agent-director run records no
+    affect at all, and capping its findings against zero would report every one of
+    them as costing nothing."""
+    findings = [{"title": "Low contrast", "observations": 2, "affectedPersonas": 1,
+                 "claimedImpact": {"frustration": 0.80, "confusion": 0.60, "trust": 0.40}}]
+
+    notes = JobExecutor._cap_claimed_impact(findings, [{"runId": "run_1", "timeline": []}])
+
+    assert notes == []
+    assert findings[0]["claimedImpact"]["frustration"] == 0.80
+    # The evidence line is still written, so every finding states its impact the
+    # same way whether or not there was anything to cap it against.
+    assert "frustration 0.80" in findings[0]["evidence"]
+    assert "2 observations across 1 person" in findings[0]["evidence"]
+
+
+def test_a_summary_says_when_the_runs_did_not_finish():
+    """A live report opened "1 synthetic user(s) attempted 2 task(s) ... 10
+    usability issue(s) were identified" over a run that errored after a single
+    action on a 429 from the model endpoint. Every other part of the report was
+    honest about it -- journey_outcome.status said "partial", a limitation named
+    the error -- but the one line most readers read presented a collapsed run as a
+    finished review. A caveat five items into a limitations array is a caveat
+    nobody reads."""
+    cut_short = [{"runId": "run_1", "harnessError": "persona actor endpoint returned HTTP 429",
+                  "timeline": [{"type": "persona.expectation", "data": {}}]}]
+    findings = [{"title": "Unclear pricing", "severity": "high"}]
+
+    summary = JobExecutor._executive_summary(
+        "https://example.test/", ["Find the price", "Say what it does"],
+        [{"id": "persona_1"}], findings, [], cut_short)
+
+    assert "stopped early and did not finish the tasks" in summary
+    assert "got 1 action in" in summary
+    assert "not a full review" in summary
+    # Said before the count of what was found, not after it.
+    assert summary.index("stopped early") < summary.index("usability issue")
+
+    # A clean run says nothing of the kind.
+    clean = JobExecutor._executive_summary(
+        "https://example.test/", ["Find the price"], [{"id": "persona_1"}], findings, [],
+        [{"runId": "run_1", "timeline": []}])
+    assert "stopped early" not in clean
+    # And so does a report built without the runs to hand.
+    assert "stopped early" not in JobExecutor._executive_summary(
+        "https://example.test/", ["Find the price"], [{"id": "persona_1"}], findings, [])
+
+
+def test_evidence_paired_to_its_own_step_is_not_replaced_by_a_title_match():
+    """Two mechanisms write personaEvidence, and the general one was overwriting
+    the specific one. The broken-promise finding pairs each quote to the exact step
+    that produced it -- the reflection recorded immediately after that action --
+    and _attach_persona_evidence then replaced it with the best title-similarity
+    match across the whole run.
+
+    In a live report that put the persona's *expectation* under the finding as
+    evidence of what went wrong: "Clicking the Monthly toggle button will display
+    the specific monthly cost amounts" quoted as the complaint, when the complaint
+    the run recorded was "monthly cost amounts for the tiers are not shown". A
+    prediction presented as an observation -- and the expectation scored better
+    only because the title is made from it."""
+    findings = [{
+        "title": 'Promised more than it did: Monthly', "personaId": "persona_1",
+        "summary": "Clicking Monthly showed nothing.",
+        "personaEvidence": [{"quote": "monthly cost amounts for the tiers are not shown",
+                             "personaName": "Friedrich Wolf", "personaId": "persona_1"}],
+    }, {
+        "title": "Monthly toggle shows no cost amounts", "personaId": "persona_1",
+        "summary": "The monthly cost amounts are not shown for the tiers.",
+    }]
+    thoughts = {"persona_1": [
+        {"kind": "reasoning", "source": "persona.expectation",
+         "text": "Clicking the Monthly toggle button will display the specific monthly cost amounts."},
+        {"kind": "reasoning", "source": "persona.reflection",
+         "text": "monthly cost amounts for the tiers are not shown"},
+    ]}
+
+    JobExecutor._attach_persona_evidence(findings, thoughts, {"persona_1": "Friedrich Wolf"})
+
+    assert findings[0]["personaEvidence"][0]["quote"] == (
+        "monthly cost amounts for the tiers are not shown"), "paired evidence is the better evidence"
+    # A finding that arrived with none still gets the best match available.
+    assert findings[1].get("personaEvidence"), "the matcher still works where nothing was paired"
+
+
+def test_a_finding_is_titled_by_what_the_walk_read_off_the_control():
+    """The label was recovered by pattern-matching the persona's prose, which works
+    right up until the persona writes "The Pricing page will load and display the
+    company's pricing details" -- naming no control at all. Cycle 19 published
+    "Promised more than it did: e6" as a report headline while the element walk
+    had known it was the Pricing link the whole time.
+
+    A ref groups nothing and means nothing: the same control is e6 in one run and
+    e17 in another."""
+    prose = ("The Pricing page will load and display the company's pricing details "
+             "and plan options.")
+    click = {"type": "CLICK", "target": "e6"}
+
+    assert JobExecutor._promise_label(prose, click) == "e6", "this is what it did"
+    assert JobExecutor._promise_label(prose, click, "Pricing") == "Pricing"
+    # A measured name that is blank or absent changes nothing: old runs carry none.
+    assert JobExecutor._promise_label(prose, click, "   ") == "e6"
+    # And the persona's own quoted label still wins over the ref when there is no
+    # measured name, which is what made this work at all for fifteen cycles.
+    assert JobExecutor._promise_label(
+        "Clicking the 'Annual - save 17%' button will show prices",
+        {"type": "CLICK", "target": "e17"}) == "Annual - save 17%"
+
+
+def _promise_group(**over):
+    """A broken-promise group in the shape cycle 26 actually produced."""
+    group = {
+        "label": "Start 3-day free trial", "hits": 1, "cost": 0.22,
+        "personas": ["p1"], "names": ["Friedrich Wolf"], "runs": ["r1"],
+        "expectations": ["Clicking the 'Start 3-day free trial' button will open a sign-up modal "
+                         "that displays the pricing details for the service"],
+        "gaps": [{"quote": "Clicked button led to generic content rather than the expected sign-up "
+                           "modal showing pricing.", "personaId": "p1", "personaName": "Friedrich Wolf"}],
+        "actions": [{"type": "CLICK", "target": "e22"}],
+        "boxes": [{"x": 320, "y": 540, "width": 210, "height": 48}],
+        "sightings": [{"quote": "I see a 'Start 3-day free trial' button under each plan, and two "
+                                "pricing paragraphs.", "personaId": "p1", "personaName": "Friedrich Wolf"}],
+        "roles": ["CLICK"],
+    }
+    group.update(over)
+    return group
+
+
+def test_a_finding_says_one_thing_once():
+    """The slide prints four panels. "Clicked button led to generic content rather than the
+    expected sign-up modal showing pricing" used to fill three of them: Observed user
+    issue, Root cause analysis, and In the user's words. Three headings, one sentence,
+    and the panel meant to carry the thinking carried none."""
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+    gap = "Clicked button led to generic content"
+
+    assert gap in finding["summary"], "the observation still reports what happened"
+    assert gap not in finding["rootCause"], "the root cause is not the symptom said again"
+    assert gap not in finding["personaEvidence"][0]["quote"], "nor is the quote"
+    # And the root cause does not simply move the duplication to the expectation.
+    assert "will open a sign-up modal" not in finding["rootCause"]
+    # The quote is the person's own first-person account of what they could see --
+    # the one thing on the slide that is not already elsewhere on it.
+    assert finding["personaEvidence"][0]["quote"].startswith("I see")
+
+
+def test_the_root_cause_names_a_mechanism_and_it_depends_on_what_happened():
+    """"The click only moves the visitor instead" is the wrong lesson for a control that
+    did nothing at all. The mechanism is read from the visitor's own verb and from the
+    way the run described what followed."""
+    # The fixture's own expectation is "will open a modal that displays pricing": the
+    # verb that governs it is "open", and the run recorded that the click did navigate,
+    # just not to what was named.
+    moved_else = JobExecutor._why_they_expected_that(_promise_group())
+    assert "expected to be taken somewhere" in moved_else
+    assert "somewhere it has named" in moved_else
+
+    told_else = JobExecutor._why_they_expected_that(_promise_group(
+        expectations=["Reading the pricing section will show me what the plans cost"],
+        gaps=[{"quote": "the section carried plan names but no amounts"}]))
+    assert "expected to be told something" in told_else
+    assert "the label is the defect" in told_else
+
+    # "open a page showing the plan" is a request to be taken somewhere: the verb that
+    # governs the sentence is the one that comes first, not whichever pattern is tested first.
+    moved_silent = JobExecutor._why_they_expected_that(_promise_group(
+        label="Monthly",
+        expectations=["Clicking Monthly will open a page showing the monthly plan"],
+        gaps=[{"quote": "The view did not change and the button is still present."}]))
+    assert "expected to be taken somewhere" in moved_silent
+    assert "reads as a door" in moved_silent
+    assert "nothing they could see" in moved_silent
+
+    told_silent = JobExecutor._why_they_expected_that(_promise_group(
+        expectations=["Clicking will show the annual price"],
+        gaps=[{"quote": "no price amounts were displayed; nothing changed"}]))
+    assert "Silence reads as a control that is broken" in told_silent
+
+    # Nothing to reason from, nothing asserted.
+    assert JobExecutor._why_they_expected_that(_promise_group(expectations=[])) == ""
+
+
+def test_a_finding_knows_where_its_control_was():
+    """The report crops evidence to the element a finding is about -- but only when the
+    finding knows the box, and the one finding built from what a person actually did
+    carried none. So the best-evidenced finding in the report illustrated itself with a
+    whole-page screenshot captioned "page context"."""
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+    assert finding["elementBox"] == {"x": 320, "y": 540, "width": 210, "height": 48}
+    assert finding["elementName"] == "Start 3-day free trial"
+
+
+def test_measured_cost_arrives_with_the_scale_it_is_measured_on():
+    """"0.22 of this visitor's patience on a 0-1 scale" is a real number in a unit nobody
+    knows, which reads as less credible than a vague sentence."""
+    summary = JobExecutor._broken_promise_finding(_promise_group())["summary"]
+    assert "0.22" in summary, "the measurement stays"
+    assert "calm to walking away" in summary, "and arrives with something to hold it against"
+
+    assert "most of the way" in JobExecutor._patience_in_words(0.8)
+    assert "about a third" in JobExecutor._patience_in_words(0.4)
+    assert "small but measurable" in JobExecutor._patience_in_words(0.03)
+    # Out-of-range input is clamped rather than described as impossible.
+    assert JobExecutor._patience_in_words(-1).startswith("0.00")
+
+
+def test_the_report_writes_plurals_like_a_person():
+    """"1 usability issue(s) were identified" tells the reader, in its own first sentence,
+    that the document was assembled rather than written."""
+    assert JobExecutor._plural(1, "run") == "1 run"
+    assert JobExecutor._plural(2, "run") == "2 runs"
+    assert JobExecutor._plural(1, "person", "people") == "1 person"
+    assert JobExecutor._plural(3, "person", "people") == "3 people"
+    assert "(s)" not in JobExecutor._broken_promise_finding(_promise_group())["evidence"]
+
+
+def test_traits_are_claimed_only_where_the_encounter_shows_them():
+    """A run with three deliberately different visitors reported its findings as though
+    they had happened to a generic one, because susceptibleTraits shipped None."""
+    assert JobExecutor._traits_behind(_promise_group()) == [], "one calm touch claims nothing"
+    assert "low patience" in JobExecutor._traits_behind(_promise_group(hits=3))
+    assert "high irritability" in JobExecutor._traits_behind(_promise_group(cost=0.5))
+    assert "shared across dispositions" in JobExecutor._traits_behind(
+        _promise_group(personas=["p1", "p2"]))
+
+
+# --- RPT-1: commit to one concrete change --------------------------------------
+#
+# "Either make {label} do what it reads as doing, or stop it reading that way"
+# restated the problem as a choice and handed the thinking back to the reader.
+# These pin the replacement: a committed recommendation with a real noun and verb
+# from the page, and the rejected half moved to `alternatives` rather than
+# dropped.
+
+def test_the_recommendation_commits_instead_of_offering_a_choice():
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+
+    assert "Either" not in finding["recommendation"], \
+        "a recommendation that hands the choice back to the reader is not a recommendation"
+    assert not finding["recommendation"].lower().startswith(("either", "or "))
+    # A concrete noun and verb: add, move, relabel, remove -- some verb of that
+    # shape, not a restatement of the problem.
+    assert any(verb in finding["recommendation"] for verb in ("Relabel", "Make", "Reword"))
+
+
+def test_a_recommendation_carries_a_noun_drawn_from_the_page_under_test():
+    """The acceptance test the plan names: reject any recommendation that would
+    read identically on a different page. Two different pages -- two different
+    control labels -- must produce two different sentences, both naming their own
+    control."""
+    label_a = JobExecutor._broken_promise_finding(_promise_group(label="Start 3-day free trial"))
+    label_b = JobExecutor._broken_promise_finding(_promise_group(label="See annual pricing"))
+
+    assert "Start 3-day free trial" in label_a["recommendation"]
+    assert "See annual pricing" in label_b["recommendation"]
+    assert label_a["recommendation"] != label_b["recommendation"]
+
+
+def test_the_rejected_half_of_the_commitment_lands_in_alternatives_not_nowhere():
+    """RPT-1: `_finding_slide` only synthesises `alternatives` from `recommendation`
+    when the field is empty -- that fallback existed because this finding type
+    never filled it. It is filled now, with the option not committed to above,
+    never an echo of the recommendation itself."""
+    finding = JobExecutor._broken_promise_finding(_promise_group())
+
+    assert finding["alternatives"], "the field the audit found shipping None must carry something"
+    proposed = finding["alternatives"][0]["proposedChange"]
+    assert proposed != finding["recommendation"], \
+        "an alternative that repeats the recommendation is not an alternative"
+    assert finding["alternatives"][0].get("rationale")
+
+
+def test_something_happening_is_a_relabel_nothing_happening_is_a_build():
+    """The rule the commitment turns on: nothing visible happened (a likely
+    implementation bug) commits to building the behaviour the label already
+    promises; something happened, just not what was promised (the behaviour
+    exists and evidently works) commits to fixing the label instead."""
+    nothing_happened = JobExecutor._broken_promise_finding(_promise_group(
+        label="Monthly",
+        expectations=["Clicking Monthly will open a page showing the monthly plan"],
+        gaps=[{"quote": "The view did not change and the button is still present.", "personaId": "p1"}]))
+    assert nothing_happened["recommendation"].startswith("Make “Monthly”")
+
+    something_else_happened = JobExecutor._broken_promise_finding(_promise_group())  # default fixture
+    assert something_else_happened["recommendation"].startswith("Relabel “Start 3-day free trial”")
+
+
+def test_nothing_to_reason_from_commits_to_nothing():
+    """The same honesty `_why_they_expected_that` already has: a group with no
+    expectation to classify produces no recommendation and no alternatives,
+    rather than a generic sentence with no noun to hang it on."""
+    recommendation, alternatives = JobExecutor._committed_recommendation(_promise_group(expectations=[]))
+    assert recommendation == ""
+    assert alternatives == []
+
+
+def test_a_run_that_saw_less_than_it_tried_to_says_so():
+    """Cycle 26 lost four walks in one journey and shipped run_diagnostics: [], so a reader
+    had no way to know the review was made on ten steps of twelve."""
+    from apps.api.executor import _coverage_diagnostics
+
+    timeline = ([{"type": "persona.expectation"}] * 12
+                + [{"type": "persona.perception"}] * 10
+                + [{"type": "persona.perception_fallback",
+                    "data": {"reason": "the perception service returned nothing"}}] * 4
+                + [{"type": "persona.reflection_unavailable"}] * 3)
+    (entry,) = _coverage_diagnostics([{"runId": "r1", "profileId": "p1", "timeline": timeline}])
+
+    assert entry["severity"] == "medium"
+    assert "10 of 12 steps" in entry["summary"]
+    assert "the perception service returned nothing (4×)" in entry["summary"]
+    assert "3 actions drew no conclusion" in entry["summary"]
+    assert "unknown rather than absent" in entry["recommendation"]
+
+    # A run that saw everything says nothing, and a run that lost most of it says more.
+    assert _coverage_diagnostics([{"runId": "r2", "timeline":
+        [{"type": "persona.expectation"}] * 5 + [{"type": "persona.perception"}] * 5}]) == []
+    (bad,) = _coverage_diagnostics([{"runId": "r3", "timeline":
+        [{"type": "persona.expectation"}] * 12 + [{"type": "persona.perception"}] * 4
+        + [{"type": "persona.perception_fallback", "data": {"reason": "the page moved under the walk"}}] * 8}])
+    assert bad["severity"] == "high"
+
+
+def test_no_reader_facing_string_writes_a_machine_plural():
+    """`_plural` was added as a method on JobExecutor and fixed exactly one of the
+    eighteen places that needed it -- the same mistake in a different costume: a rule
+    written where the problem was noticed rather than where it applies. Two more crept
+    into the coverage diagnostic while that fix was being written.
+
+    So the rule is checked over the whole module rather than at the sites someone
+    happened to look at. Docstrings and comments quoting the old behaviour are exempt;
+    they are the record of why this exists.
+    """
+    import ast
+    import inspect
+    import re
+
+    from apps.api import executor
+
+    source = inspect.getsource(executor)
+    tree = ast.parse(source)
+    docstrings = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+            text = ast.get_docstring(node)
+            if text:
+                docstrings.update(text.splitlines())
+
+    offenders = []
+    for number, line in enumerate(source.splitlines(), start=1):
+        bare = line.strip().strip('"')
+        if line.strip().startswith("#") or bare in docstrings or line in docstrings:
+            continue
+        if re.search(r"\w\(s\)", line):
+            offenders.append(f"{number}: {bare[:90]}")
+    assert not offenders, "machine plurals in reader-facing strings:\n" + "\n".join(offenders)
+
+
+def test_the_deck_says_how_much_of_the_run_it_could_see():
+    """An absent finding and an unmeasured one look identical on a slide. The coverage
+    diagnostic was reaching the JSON and a limitations line that reads "see
+    run_diagnostics" -- which a reader of the deck cannot do."""
+    from apps.api.executor import _coverage_diagnostics
+
+    diagnostics = _coverage_diagnostics([{"runId": "r1", "timeline":
+        [{"type": "persona.expectation"}] * 12 + [{"type": "persona.perception"}] * 10
+        + [{"type": "persona.perception_fallback",
+            "data": {"reason": "the perception service returned nothing"}}] * 4}])
+    note = JobExecutor._coverage_note({"run_diagnostics": diagnostics})
+
+    assert "10/12 steps perceived" in note
+    assert "unknown rather than ruled out" in note
+    # A run that saw everything says nothing, rather than printing a reassuring zero.
+    assert JobExecutor._coverage_note({"run_diagnostics": []}) == ""
+
+
+def _run_that_measured(captures, summary="Completed what they came to do. It costs £200."):
+    """A run whose captures carry what the perception service measured on them."""
+    return {"runId": "run_1", "profileId": "persona_1",
+            "verdict": {"status": "passed", "summary": summary,
+                        "criteria": [{"id": "tasks-completed", "result": "met"}]},
+            "timeline": [{"type": "persona.perception",
+                          "data": {"legible": ["e1", "e2"], "capture": capture}}
+                         for capture in captures]}
+
+
+def test_a_cut_off_claim_is_checked_against_what_ran_past_the_edge():
+    """"The pricing cards are cut off" is a statement about clipping, and the
+    perception service measures clipping per element on every capture. Until now
+    the only thing that answered it was whether the run happened to finish."""
+    clean = [{"measured": 20, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0},
+             {"measured": 18, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0}]
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Pricing cards are cut off",
+               "summary": "The cards are cut off at the bottom of the viewport."}
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_measured(clean)])
+
+    assert finding["severity"] == "medium"
+    assert "nothing on the page was cut off" in finding["summary"]
+
+    # And it stands when something really did run past the edge.
+    real = [{"measured": 20, "clipped": 3, "blankShare": 0.0, "smallestFontPx": 14.0}]
+    stands = {"source": "eyeson-vision-synthesis", "severity": "high",
+              "title": "Pricing cards are cut off",
+              "summary": "The cards are cut off at the bottom of the viewport."}
+    JobExecutor._temper_contradicted_findings([stands], [_run_that_measured(real)])
+    assert stands["severity"] == "high"
+
+
+def test_a_tiny_text_claim_is_checked_against_the_type_the_walk_measured():
+    """The walk reads the computed font size off every element it reports, so the
+    page's own number answers this rather than an impression of one."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Body text is too small to read",
+               "summary": "The text is too small to read comfortably."}
+    roomy = [{"measured": 20, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0}]
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_measured(roomy)])
+
+    assert finding["severity"] == "medium"
+    assert "14px" in finding["summary"]
+
+    # A page that really is set in 9px keeps the finding.
+    small = [{"measured": 20, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 9.0}]
+    stands = {"source": "eyeson-vision-synthesis", "severity": "high",
+              "title": "Body text is too small to read",
+              "summary": "The text is too small to read comfortably."}
+    JobExecutor._temper_contradicted_findings([stands], [_run_that_measured(small)])
+    assert stands["severity"] == "high"
+
+
+def test_an_empty_sections_claim_is_checked_against_the_blank_share():
+    """"Massive empty vertical sections ... a major rendering bug" was filed at
+    critical severity against our own capture. The share of regions with nothing
+    drawn in them is measured on every capture and answers it directly."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "critical",
+               "title": "Massive empty sections",
+               "summary": "There are massive empty vertical sections down the page."}
+    drawn = [{"measured": 30, "clipped": 0, "blankShare": 0.0, "smallestFontPx": 14.0}]
+
+    JobExecutor._temper_contradicted_findings([finding], [_run_that_measured(drawn)])
+
+    assert finding["severity"] == "medium"
+    assert "no part of the page was blank" in finding["summary"]
+
+
+def test_a_check_that_cannot_run_does_not_pass():
+    """A run whose captures carry no measurement must not read as a clean one --
+    the commonest way a guard comes to report that it ran when it did not."""
+    finding = {"source": "eyeson-vision-synthesis", "severity": "high",
+               "title": "Pricing cards are cut off",
+               "summary": "The cards are cut off at the bottom of the viewport."}
+    nothing = {"runId": "run_1", "profileId": "persona_1",
+               "verdict": {"status": "failed", "summary": "", "criteria": []},
+               "timeline": [{"type": "persona.perception", "data": {"legible": ["e1"]}}]}
+
+    JobExecutor._temper_contradicted_findings([finding], [nothing])
+
+    assert finding["severity"] == "high"
+    assert "not supported by this run" not in finding["summary"]

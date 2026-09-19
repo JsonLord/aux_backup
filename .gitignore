@@ -12,3 +12,9 @@ data/
 *.py[cod]
 .venv/
 tinytroupe.*.log
+
+# Installed Node dependencies. The image builds these with `npm ci`
+# (spaces/aux-live/Dockerfile) and the Space deploy already skips them, so a
+# checkout that runs the Journey worker locally should not offer 196MB of
+# build output for commit.
+node_modules/

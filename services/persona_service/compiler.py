@@ -13,6 +13,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from .models import AbilityProfile, BehaviorProfile
+from .providers import model_providers, unreachable, why
 from .semantic import semantic_engine
 
 
@@ -68,29 +69,53 @@ class AbilityCompilationResult:
     compiler_version: str
 
 
+def _on_a_provider_that_answers(dspy_program, call):
+    """Run one compilation, moving on only when an endpoint cannot be reached.
+
+    A 400 or a refusal is the provider answering; asking a different one the same
+    bad question spends a second budget on the same failure. A name that will not
+    resolve is a different matter, and it is what ended five cycles.
+    """
+    last_error = None
+    providers = model_providers() or [None]
+    for index in range(len(providers)):
+        where = dspy_program.configure_lm(force=index > 0, index=index)
+        try:
+            return call()
+        except Exception as error:  # noqa: BLE001 - re-raised below when it is not transport
+            last_error = error
+            if not unreachable(error) or index == len(providers) - 1:
+                raise
+            print(f"[persona] {where} could not be reached ({why(error)}); "
+                  f"compiling on the next configured provider", flush=True)
+    raise last_error
+
+
 class PersonaCompiler:
     version = "persona-compiler-v1"
 
     def compile(self, persona: dict[str, Any], scenario: str, seed: int) -> dict[str, Any]:
         return self.compile_with_metadata(persona, scenario, seed).profile.model_dump()
 
-    def compile_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int) -> CompilationResult:
+    def compile_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int,
+                              providers=None) -> CompilationResult:
         if os.getenv("PERSONA_COMPILER", "native") == "dspy":
             if not self.dspy_available:
                 raise RuntimeError("PERSONA_COMPILER=dspy but DSPy is not installed")
             dspy_program = importlib.import_module("services.persona_service.dspy_program")
-            dspy_program.configure_lm()
-            prediction = dspy_program.build_compiler()(tiny_person=persona, scenario=scenario)
+            prediction = _on_a_provider_that_answers(
+                dspy_program, lambda: dspy_program.build_compiler()(tiny_person=persona, scenario=scenario))
             values = {trait: _bounded(getattr(prediction, _BEHAVIOR_KEY_MAP.get(trait, trait))) for trait in TRAITS}
             values["seed"] = seed
             return CompilationResult(BehaviorProfile.model_validate(values), "dspy-predict@3.3.0")
         # PLACEHOLDER: DSPy remains gated until the reviewed parity corpus is complete.
-        engine = semantic_engine()
+        engine = semantic_engine(providers)
         values = {trait: _bounded(value) for trait, value in engine.compile_behavior(persona, scenario, TRAITS, seed).items()}
         values["seed"] = seed
         return CompilationResult(BehaviorProfile.model_validate(values), engine.name)
 
-    def compile_abilities_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int) -> AbilityCompilationResult:
+    def compile_abilities_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int,
+                                        providers=None) -> AbilityCompilationResult:
         """Compile persona-varied functional/perceptual abilities.
 
         Same PERSONA_COMPILER gate and DSPy opt-in boundary as compile_with_metadata
@@ -102,11 +127,11 @@ class PersonaCompiler:
             if not self.dspy_available:
                 raise RuntimeError("PERSONA_COMPILER=dspy but DSPy is not installed")
             dspy_program = importlib.import_module("services.persona_service.dspy_program")
-            dspy_program.configure_lm()
-            prediction = dspy_program.build_ability_compiler()(tiny_person=persona, scenario=scenario)
+            prediction = _on_a_provider_that_answers(
+                dspy_program, lambda: dspy_program.build_ability_compiler()(tiny_person=persona, scenario=scenario))
             flat = {field: getattr(prediction, _ABILITY_KEY_MAP.get(field, field)) for field in ABILITY_FIELDS}
             return AbilityCompilationResult(_ability_from_flat(flat), "dspy-predict@3.3.0")
-        engine = semantic_engine()
+        engine = semantic_engine(providers)
         flat = engine.compile_abilities(persona, scenario, seed)
         return AbilityCompilationResult(_ability_from_flat(flat), engine.name)
 
