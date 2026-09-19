@@ -348,7 +348,7 @@ forth up to six times) and **scrolling to an offset the page already holds**
 *Done when:* `notLookedAt` falls across a run instead of holding at 13–14, and two
 of three runs reach a verdict other than inconclusive.
 
-### CAP-1. `/webui` — the configuration surface *(the main thing that does not exist)*
+### CAP-1. `/webui` — the configuration surface — **done**
 
 Modelled on the plain llama.cpp provider-connection flow: an OpenAI-compatible
 endpoint, a model list fetched from `/v1/models`, per-role selection. The store and
@@ -370,7 +370,6 @@ path="/")`, because the Gradio mount at `/` otherwise swallows it.
 | `GET /webui` | The page |
 | `GET /webui/api/models` | Server-side `GET {base}/v1/models`; model ids only |
 | `GET`/`PUT` `/webui/api/settings` | Per-role provider rows, over `ModelSettingsStore` |
-| `GET`/`PUT` `/webui/api/hats[/{id}]` | The registry: read, individualize, create |
 | `POST` `/webui/api/chat/completions` | Bounded passthrough, so "does this answer" is one click |
 
 **Enabled as an advanced option**, off by default: `AUX_WEBUI_ENABLED=1`. Disabled,
@@ -650,3 +649,31 @@ residual gap, and it is that gap which closed.
 | H3 | Scaling to more users | strong | high | **carried** — → **BE-5**. |
 | H4 | Reliability | partial | critical | **carried** — → **BE-1**. Routing through `chain()` *is* the fallback fix. |
 | H5 | Consistency of output volume | weak | high | **carried** — → **RPT-4** and **BE-5** together — the floor rises without anything being invented. |
+
+## CAP-1, as built
+
+`apps/webui/` — a router and three static files, no build step. Registered on
+`fastapi_app` before the Gradio catch-all, which a test asserts on the source,
+because getting that order wrong 404s the page in the deployed Space while every
+other test still passes.
+
+The three rules hold by construction rather than by discipline, which is what the
+tests check:
+
+- **Off unless asked for.** Without `AUX_WEBUI_ENABLED=1` the routes are never
+  registered — absent, not forbidden. The test asserts `app.routes` contains no
+  `/webui` path at all, not merely that a request 403s.
+- **No route returns a key.** The settings route returns `store.list()`, whose
+  SELECT does not name the `secret` column. Endpoints are cut to scheme and host,
+  and the test saves a provider whose base URL carries `?token=sk-…` to prove the
+  path goes too. A pasted key is sent once on save and cleared from the form.
+- **The passthrough is bounded.** One completion, capped prompt and reply, no
+  stream, no history, and rate-limited per workspace. The tests assert the second
+  check in a row is refused and that exactly one message is sent.
+
+Two things the page does not do, and should not: it never accepts a key in order
+to *read* one back, and it takes a Space secret by the **name** of the variable,
+so the recommended path never has a secret cross the wire at all.
+
+Model discovery asks the endpoint server-side, by `provider_id` — the browser
+names a row, never a credential.

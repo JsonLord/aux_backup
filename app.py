@@ -3180,6 +3180,16 @@ if __name__ == "__main__":
             ]
         }
 
+    # The model-provider surface, when this deployment asked for it. Registered
+    # *before* the Gradio mount below, because that one is a catch-all at "/" and
+    # would otherwise swallow /webui. Unset, the routes are never registered at
+    # all -- not 403, absent: a surface that does not exist cannot be
+    # misconfigured, and this one fronts the deployment's provider credentials.
+    from apps.webui import build_router, is_enabled as webui_enabled
+
+    if webui_enabled():
+        fastapi_app.include_router(build_router())
+
     # Mount static files for slides
     fastapi_app.mount("/static_slides", StaticFiles(directory=SLIDES_OUTPUT_ROOT), name="static_slides")
 
