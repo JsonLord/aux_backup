@@ -227,7 +227,7 @@ system *finds* — only what a reader is told.
 
 ## Track B — the backend
 
-### BE-1. Route runs through the settings store *(first, and blocking)*
+### BE-1. Route runs through the settings store — **done**
 
 As above. Everything else on this track depends on it, and so does CAP-1.
 
