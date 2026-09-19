@@ -510,12 +510,37 @@ hat produced a finding and what that hat could reach, because "I could not find 
 retention policy" means different things from a browser alone and from a browser
 plus a docs search.
 
-### CAP-3. Front-tab links
+### CAP-3. Front-tab links — **partly done**
 
 In the first Gradio tab, a row of buttons opening `/webui` deep links: **Developer
 Mode** (`/webui#developer`), one per preset hat (`/webui#hat=<id>`), and **Model &
 capabilities**. Each is a real URL, so it still works pasted to a colleague. Hidden
 when `AUX_WEBUI_ENABLED` is unset, rather than linking to a 404.
+
+**What shipped.** Two of the three links, at the top of the Analysis Orchestrator
+tab: **Model & capabilities** (`gr.Button(link="/webui")`) and **Developer Mode**
+(`gr.Button(link="/webui#developer")`), both real anchors via Gradio's `link=`
+(so they work pasted outside the app, per the spec), in a `gr.Row(visible=…)` gated
+on `apps.webui.is_enabled()` — the same check CAP-1's router registration uses, so
+the button and the surface it points at agree by construction rather than by two
+copies of the same env-var read staying in sync. Hidden, not disabled: the row's
+`visible` is `False` when the flag is unset, checked directly on the Blocks graph
+rather than only on the rendered HTML.
+
+**Not built: one button per preset hat.** There is no hat registry yet — CAP-2 does
+not exist — so there is nothing to enumerate and nothing to link to. Building a
+placeholder list now would be UI for data that has no source.
+
+**A defensible gap on the "Developer Mode" link, stated rather than hidden.**
+`/webui#developer` is a real, 200-returning URL, satisfying the letter of "not a
+404" — but the `/webui` page does not yet read `location.hash` to show anything
+different from the plain settings view, because developer mode (Hat 3, CAP-5) is
+not built either. Clicking it today opens the same page "Model & capabilities"
+does. Kept rather than dropped, because the plan names it and the destination is
+honest about what it currently is (the configuration surface, which developer mode
+will eventually be a section of) rather than a dead link — but whoever builds CAP-5
+should wire `app.js` to the fragment at the same time, or drop this link if that
+turns out to be the wrong shape once hats exist.
 
 ### CAP-4. Hat 2 — redaction *(parallel with CAP-0; gates any real signed-in run)*
 

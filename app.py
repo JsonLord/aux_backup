@@ -21,6 +21,7 @@ from apps.gradio.auth import request_identity, workspaces_from_profile
 from apps.gradio import credentials_panel, live_control, model_settings_panel
 from apps.gradio.github_backup import (GitHubAuthError, confirm_backup_repo, push_session_to_github,
                                         validate_and_list_repos)
+from apps.webui import is_enabled as webui_enabled
 
 import gradio as gr
 from fastapi import FastAPI, Header, HTTPException, Response
@@ -1575,6 +1576,27 @@ with gr.Blocks(title="UX Analysis Orchestrator", css=credentials_panel.CSS,
 
     with gr.Tabs() as main_tabs:
         with gr.Tab("Analysis Orchestrator"):
+            # CAP-3: real links into /webui, the model-provider configuration
+            # surface (CAP-1) -- so "does this model answer" is one click away
+            # from where a session actually starts, and the URL still works
+            # pasted to someone who isn't looking at this tab. Hidden rather
+            # than disabled when the surface itself is off
+            # (AUX_WEBUI_ENABLED unset): a visible button to a 404 is worse
+            # than no button.
+            #
+            # Only two of the plan's three links exist. "Model & capabilities"
+            # opens /webui itself, which is real. "Developer Mode" opens
+            # /webui#developer -- a real, 200-returning URL, but the page does
+            # not yet read the fragment to show anything distinct from the
+            # plain settings view (developer mode, CAP-5, is not built). Kept
+            # as a forward pointer rather than left out, because the plan
+            # names it and the destination is honest about what it is, not a
+            # dead link. The third link -- one button per preset hat -- is not
+            # built at all: it needs the hat registry (CAP-2), which does not
+            # exist yet, so there is nothing to link to.
+            with gr.Row(visible=webui_enabled()):
+                gr.Button("⚙️ Model & capabilities", link="/webui")
+                gr.Button("🛠️ Developer Mode", link="/webui#developer")
             gr.Markdown("### Start New Analysis Sessions")
             with gr.Row():
                 with gr.Column():

@@ -564,13 +564,19 @@ what that hat could reach.
 
 ---
 
-## CAP-3. Front-tab links
+## CAP-3. Front-tab links — **partly done, see `docs/next-cycle-plan.md`**
 
 A row of buttons in the first Gradio tab opening real URLs, so each still works
 pasted to a colleague: **Developer Mode** (`/webui#developer`), one per preset hat
 (`/webui#hat=<id>`), **Model & capabilities** (`/webui`). Hidden — not disabled —
 when `AUX_WEBUI_ENABLED` is unset, because a visible button to a 404 is worse than
 no button.
+
+**Status.** The first two links are built with `gr.Button(link=…)`, gated on
+`apps.webui.is_enabled()` (the same check CAP-1's route registration uses). The
+per-hat links are not built — there is no hat registry (CAP-2) yet to enumerate.
+Full account, including the one open question on "Developer Mode" linking to a page
+that does not yet distinguish itself by URL fragment, in `docs/next-cycle-plan.md`.
 
 ---
 
