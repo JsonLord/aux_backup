@@ -53,6 +53,19 @@ def require_write(auth):
         raise HTTPException(403, "workspace role is read-only")
 
 
+def _providers(body) -> list[tuple[str, str, str]] | None:
+    """The chain this request was handed, in providers.py's (url, key, model) shape.
+
+    None means the caller sent none and the deployment's environment decides, as
+    it did before routing existed. An empty list means the caller has no provider
+    it may use, and the engine refuses rather than falling back onto credentials
+    that are not theirs to spend.
+    """
+    if getattr(body, "models", None) is None:
+        return None
+    return [(entry.baseUrl, entry.apiKey, entry.model) for entry in body.models]
+
+
 @app.get("/healthz")
 def health():
     return {"status": "ok", "tinytroupeAvailable": generator.tinytroupe_available, "dspyAvailable": generator.compiler.dspy_available}
@@ -62,7 +75,8 @@ def health():
 def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
     require_write(auth)
     generated = generator.generate(body.theme, body.customer_profile, body.count, body.scenario,
-                                   body.seed, allow_offline_fallback=body.allow_offline_fallback)
+                                   body.seed, allow_offline_fallback=body.allow_offline_fallback,
+                                   providers=_providers(body))
     for item in generated:
         profiles.save(item, auth["workspace_id"], auth["owner_user_id"])
     return generated
@@ -71,7 +85,8 @@ def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
 @app.post("/v1/personas/compile", response_model=SyntheticUserProfile)
 def compile_existing(body: PersonaCompileRequest, auth=Depends(identity)):
     require_write(auth)
-    compiled = generator.compile_existing(body.persona, body.scenario, body.seed, source=body.source)
+    compiled = generator.compile_existing(body.persona, body.scenario, body.seed,
+                                          source=body.source, providers=_providers(body))
     profiles.save(compiled, auth["workspace_id"], auth["owner_user_id"])
     return compiled
 

@@ -293,6 +293,30 @@ function modelChain(input, role) {
       model: String(entry.model), apiKey: String(entry.apiKey) }));
 }
 
+/**
+ * Which provider actually answered, as a reader may be shown it.
+ *
+ * `decide.actingOn()` carries the key -- it is what the actor calls with -- and
+ * this ends up in a journey log a person can download, so only the host and the
+ * model go in. A base URL can carry a key in a query string, which is why the
+ * path is dropped too rather than the string being passed along.
+ */
+function servedBy(actor) {
+  const acting = typeof actor?.actingOn === "function" ? actor.actingOn() : null;
+  if (!acting?.baseUrl) return undefined;
+  const where = acting.movedTo || acting.baseUrl;
+  let endpoint = where;
+  try {
+    const parsed = new URL(where);
+    endpoint = `${parsed.protocol}//${parsed.host}`;
+  } catch {
+    // Not a URL we can parse: report nothing rather than a string that might
+    // carry more than a host.
+    return undefined;
+  }
+  return { endpoint, model: acting.model, movedFromPrimary: Boolean(acting.movedTo) };
+}
+
 /** True when the control plane decided this run's providers rather than the host. */
 function isRouted(input) {
   return Boolean(input && input.models);
@@ -366,13 +390,14 @@ async function runWithJourneyTest(input) {
   // a finding from a persona run and one from an agent run are about different
   // things.
   let director;
+  let personaActorFn = null;
   if (directorKind() === "pi") {
     director = piDirector();
   } else {
     director = new PersonaDirector({
       profile: input.profile,
       model: { provider, name: modelId },
-      actor: llmActor({ model: modelId, apiKey, baseUrl,
+      actor: personaActorFn = llmActor({ model: modelId, apiKey, baseUrl,
         // The reflection is a factual comparison rather than a performance, and
         // scoring persona adherence is smaller still, so both run on a smaller,
         // faster model where one is configured -- on its own endpoint and key
@@ -457,6 +482,10 @@ async function runWithJourneyTest(input) {
   }
   return { ...result, profileId: input.profile.id, simulationProfile: input.profile,
     browserSession: sessionName,
+    // Which provider served this run. A run served by the fallback is a run whose
+    // reproducibility claim is different, and the report cannot say so unless the
+    // run records it. Host and model only -- never the key.
+    servedBy: servedBy(personaActorFn),
     // Which director browsed. A finding from a persona run and one from an agent
     // run are about different things, so a reader has to be able to tell.
     director: director.name || "pi",
@@ -473,6 +502,7 @@ async function runWithJourneyTest(input) {
 
 module.exports = {
   retryingDaemonRaces, CURSOR_OVERLAY_SCRIPT, directorKind, installCursorOverlay, journeyContract,
-  loadJourneyTest, modelChain, resolveSessionState, runWithJourneyTest, sessionNameFor,
+  loadJourneyTest, modelChain, resolveSessionState, runWithJourneyTest, servedBy,
+  sessionNameFor,
   stepBudget,
   testerContract };

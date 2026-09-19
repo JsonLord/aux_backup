@@ -11,7 +11,7 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { modelChain, runWithJourneyTest } = require("../src/journeytest");
+const { modelChain, runWithJourneyTest, servedBy } = require("../src/journeytest");
 const { redactSensitive } = require("../src/safety");
 
 const CHAIN = [
@@ -80,4 +80,32 @@ test("a key handed to a run never survives what the recorder writes", () => {
   });
 
   assert.equal(JSON.stringify(recorded).includes("sk-mine"), false);
+});
+
+
+test("what served the run is reported as a host and a model, never as a key", () => {
+  // This lands in a journey log a person can download, and a base URL can carry
+  // a key in its query string -- so the path goes too, not just the header.
+  const record = servedBy({ actingOn: () => ({
+    model: "my-model", apiKey: "sk-must-not-appear",
+    baseUrl: "https://router.example/v1?token=sk-also-not" }) });
+
+  assert.deepEqual(record, { endpoint: "https://router.example", model: "my-model",
+    movedFromPrimary: false });
+  assert.equal(JSON.stringify(record).includes("sk-"), false);
+});
+
+test("a run that moved to its fallback says so", () => {
+  const record = servedBy({ actingOn: () => ({
+    model: "spare", apiKey: "sk-x", baseUrl: "https://primary.example/v1",
+    movedTo: "https://spare.example/v1" }) });
+
+  assert.equal(record.endpoint, "https://spare.example");
+  assert.equal(record.movedFromPrimary, true);
+});
+
+test("a run that never reached a model reports nothing rather than a blank row", () => {
+  assert.equal(servedBy(null), undefined);
+  assert.equal(servedBy({ actingOn: () => ({ model: "m" }) }), undefined);
+  assert.equal(servedBy({ actingOn: () => ({ baseUrl: "not a url", model: "m" }) }), undefined);
 });

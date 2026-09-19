@@ -1966,7 +1966,9 @@ class ReportAssembler:
 
     @classmethod
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
-                                     personas: list[dict[str, Any]], url: str | None
+                                     personas: list[dict[str, Any]], url: str | None,
+                                     vision: list[tuple[str, str, str]] | None = None,
+                                     send_options: bool = False
                                      ) -> tuple[list[dict[str, Any]], dict[str, bytes], list[dict[str, Any]],
                                                 str | None, list[str]]:
         """Critique a bounded, evenly-spaced sample of each run's real screenshots
@@ -1978,6 +1980,13 @@ class ReportAssembler:
         _synthesize_pain_points' cross-persona aggregation. Best-effort: a
         failure here never fails the run -- stage 1's findings still stand on
         their own."""
+        # Handed no vision provider this caller may use, the critique is not
+        # attempted at all. The alternative -- calling and letting the worker fall
+        # back to its own environment -- would spend the deployment's credentials
+        # on a run that was told it may not. Best-effort already, so an absent
+        # critique is a gap the report names rather than a failure.
+        if vision is not None and not vision:
+            return [], {}, [], "no model provider is configured for vision critique", []
         worker_url = os.getenv("EYESON_WORKER_URL", "http://127.0.0.1:8081")
         try:
             limit = int(os.getenv("EYESON_VISION_SCREENSHOT_LIMIT", "3"))
@@ -2021,6 +2030,11 @@ class ReportAssembler:
                         "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
                         "runId": journey.get("runId"), "userId": persona.get("id"),
                         "stepId": f"vision-{step_index + 1}", "screenshotRef": screenshot_path,
+                        # Only when this workspace configured its own: the worker
+                        # resolves from its environment otherwise, and it knows
+                        # more about its own deployment than the general chain.
+                        **({"options": {"baseUrl": vision[0][0], "apiKey": vision[0][1],
+                                        "model": vision[0][2]}} if send_options and vision else {}),
                     }).encode()
                     call = request.Request(f"{worker_url.rstrip('/')}/v1/journey-evidence-analyses",
                         data=payload, headers={"content-type": "application/json"}, method="POST")

@@ -112,12 +112,12 @@ fallback — it is not in the list at all, and a run with an empty chain fails w
 
 ## The work
 
-**Status: BE-1a, BE-1b and BE-1d have landed.** The engine takes a resolved chain, the
+**Status: BE-1 is complete — a, b, c, d, e and f have landed.** The engine takes a resolved chain, the
 control plane composes one per job and role, and the decision about the built-in
-providers is recorded at job creation. Twelve tests cover it. A journey now runs on the workspace's own
-providers when it has them. BE-1c (persona_service), BE-1e (eyeson worker) and
-BE-1f (record which provider served) remain, so persona compilation and the
-vision critique still resolve from the environment.
+providers is recorded at job creation. Twelve tests cover it. A run — persona compilation, the journey,
+the vision critique and the re-design — now goes to the workspace's own providers
+when it has them, and to the deployment's only when the decision recorded on the
+job allows it. The report names what served it.
 
 Two things came out different from this plan and are recorded under **What actually
 changed** at the end.
@@ -167,7 +167,7 @@ guards (`executor.py:559`, `assembler.py:2504`) become "is this workspace's chai
 this role empty" — the same question asked correctly, and it stops a configured
 workspace being told no model is available because the *deployment's* keys are absent.
 
-### BE-1c — persona_service over HTTP
+### BE-1c — persona_service over HTTP — **done**
 
 `/v1/personas/compile` and `/v1/personas/generate` take an optional `models` block;
 absent, `semantic_engine()` (`compiler.py:111`, `:132`) behaves exactly as today.
@@ -191,13 +191,13 @@ triple — so a two-entry chain maps on with no change to the actor itself. A ch
 longer than two needs `llmActor` to take a list; do that when a workspace actually
 configures three, not before.
 
-### BE-1e — the eyeson worker
+### BE-1e — the eyeson worker — **done**
 
 Same shape, role **vision**: the request carries the chain,
 `visionCritique.js:526-528` prefers it over the environment, and `critique()`
 (`visionCritique.js:440`) already takes `{model, apiKey, baseUrl}`.
 
-### BE-1f — record which provider served
+### BE-1f — record which provider served — **done**
 
 `_complete()` already knows which entry answered. Record its **host and model, never
 the key** on the run, and print it in the report: a run served by the fallback is a
@@ -322,3 +322,34 @@ test.** Nothing in the worker records the request: `runWithJourneyTest` echoes
 `fetch` wrapper reads the *response* body only, never `init` — so the
 `authorization` header it would otherwise carry never reaches a capture. The test
 asserts a key put through `redactSensitive()` does not survive it.
+
+### What BE-1c, BE-1e and BE-1f changed beyond the plan
+
+**The eyeson worker needed no change at all.** `critiqueScreenshot` already read
+`options.apiKey`, `options.baseUrl` and `options.model` in preference to its
+environment, and `index.js` already passed `payload.options` straight through. What
+was missing was a caller sending them. The refusal is the part that had to be built:
+a caller with no vision provider does not get a critique attempted **at all**, rather
+than a call the worker would serve from its own environment.
+
+**BE-1f found a live trap rather than needing new plumbing.** `decide.actingOn()`
+already tracked which endpoint the actor moved to, and nothing read it. It also
+carries the **api key** — it is what the actor calls with — and this lands in a
+journey log a person can download. So `servedBy()` reports a host and a model only,
+and drops the path as well as the header, because a base URL can carry a key in a
+query string. A run that never reached a model reports nothing rather than a blank
+row.
+
+**TinyTroupe's generation path is deliberately out of scope.** It configures a
+process-global OpenAI SDK singleton from environment variables, and threading a
+per-request chain into that is not safe under concurrency — it is a different piece
+of work, not this one. `PERSONA_GENERATOR` defaults to `offline`, so the default
+path compiles through `semantic_engine()` and is routed. A deployment that sets
+`PERSONA_GENERATOR=tinytroupe` still generates on the deployment's own credentials,
+and that is stated here rather than discovered.
+
+**Only the API workflow resolves a chain for persona work.** `app.py`'s
+`/api/v1/workflows/usability` is where the admission gate already sat, so that is
+where the chain is resolved and sent. The Gradio Persona Studio callbacks still
+compile without one, which means the service falls back to its environment for them
+— the pre-routing behaviour, not a new hole, but not finished either.

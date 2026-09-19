@@ -230,3 +230,72 @@ def test_a_refused_run_is_sent_an_empty_chain_rather_than_no_chain(monkeypatch, 
 
     assert models is not None, "a refused run must not fall back to the worker's environment"
     assert models["acting"] == []
+
+
+# --- BE-1c: persona_service over HTTP -----------------------------------------
+
+def test_the_persona_service_reads_the_chain_off_the_request_not_its_database():
+    """It runs as its own process. Opening the control plane's database to work
+    out whose budget to spend would be exactly the coupling AGENTS.md forbids."""
+    from services.persona_service.main import _providers
+    from services.persona_service.models import ModelProvider, PersonaCompileRequest
+
+    body = PersonaCompileRequest(persona={"name": "x"}, models=[
+        ModelProvider(baseUrl="https://mine.example/v1", model="m", apiKey="sk-mine")])
+
+    assert _providers(body) == [("https://mine.example/v1", "sk-mine", "m")]
+    # Absent means "the deployment's environment decides", as before routing.
+    assert _providers(PersonaCompileRequest(persona={"name": "x"})) is None
+    # Present and empty means "this caller has nothing it may use".
+    assert _providers(PersonaCompileRequest(persona={"name": "x"}, models=[])) == []
+
+
+def test_compiling_with_no_provider_refuses_rather_than_using_the_hosts(monkeypatch):
+    from services.persona_service.semantic import semantic_engine
+
+    monkeypatch.setenv("SEMANTIC_ENGINE", "direct")
+    with pytest.raises(ValueError):
+        semantic_engine([])
+
+
+def test_compiling_with_a_chain_runs_on_it(monkeypatch):
+    from services.persona_service.semantic import semantic_engine
+
+    monkeypatch.setenv("SEMANTIC_ENGINE", "direct")
+    engine = semantic_engine([("https://mine.example/v1", "sk-mine", "my-model")])
+
+    assert engine.base_url == "https://mine.example/v1"
+    assert [entry["base_url"] for entry in engine._chain()] == ["https://mine.example/v1"]
+
+
+# --- BE-1e: the vision critique -----------------------------------------------
+
+def test_the_vision_critique_is_not_attempted_without_a_provider_it_may_use():
+    """Calling and letting the worker fall back to its own environment would
+    spend the deployment's credentials on a run that was told it may not."""
+    from apps.api.executor import JobExecutor
+
+    cohort, shots, strengths, error, repeated = JobExecutor._collect_vision_pain_points(
+        [{"runId": "r", "artifacts": {"screenshots": ["/nope.png"]}}], ["t"], [{"id": "p"}],
+        "https://example.com", vision=[])
+
+    assert cohort == [] and shots == {}
+    assert "no model provider" in error
+
+
+# --- BE-1f: which provider served ---------------------------------------------
+
+def test_the_report_names_the_providers_that_served_it_and_never_a_key():
+    from apps.api.executor import JobExecutor
+
+    served = JobExecutor._served_by([
+        {"servedBy": {"endpoint": "https://a.example", "model": "m1"}},
+        {"servedBy": {"endpoint": "https://a.example", "model": "m1"}},
+        {"servedBy": {"endpoint": "https://b.example", "model": "m2", "movedFromPrimary": True}},
+        {"harnessError": "never reached a model"},
+    ])
+
+    assert served == [
+        {"endpoint": "https://a.example", "model": "m1", "movedFromPrimary": False},
+        {"endpoint": "https://b.example", "model": "m2", "movedFromPrimary": True}]
+    assert "apiKey" not in str(served) and "sk-" not in str(served)

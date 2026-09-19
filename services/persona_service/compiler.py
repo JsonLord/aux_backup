@@ -97,7 +97,8 @@ class PersonaCompiler:
     def compile(self, persona: dict[str, Any], scenario: str, seed: int) -> dict[str, Any]:
         return self.compile_with_metadata(persona, scenario, seed).profile.model_dump()
 
-    def compile_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int) -> CompilationResult:
+    def compile_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int,
+                              providers=None) -> CompilationResult:
         if os.getenv("PERSONA_COMPILER", "native") == "dspy":
             if not self.dspy_available:
                 raise RuntimeError("PERSONA_COMPILER=dspy but DSPy is not installed")
@@ -108,12 +109,13 @@ class PersonaCompiler:
             values["seed"] = seed
             return CompilationResult(BehaviorProfile.model_validate(values), "dspy-predict@3.3.0")
         # PLACEHOLDER: DSPy remains gated until the reviewed parity corpus is complete.
-        engine = semantic_engine()
+        engine = semantic_engine(providers)
         values = {trait: _bounded(value) for trait, value in engine.compile_behavior(persona, scenario, TRAITS, seed).items()}
         values["seed"] = seed
         return CompilationResult(BehaviorProfile.model_validate(values), engine.name)
 
-    def compile_abilities_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int) -> AbilityCompilationResult:
+    def compile_abilities_with_metadata(self, persona: dict[str, Any], scenario: str, seed: int,
+                                        providers=None) -> AbilityCompilationResult:
         """Compile persona-varied functional/perceptual abilities.
 
         Same PERSONA_COMPILER gate and DSPy opt-in boundary as compile_with_metadata
@@ -129,7 +131,7 @@ class PersonaCompiler:
                 dspy_program, lambda: dspy_program.build_ability_compiler()(tiny_person=persona, scenario=scenario))
             flat = {field: getattr(prediction, _ABILITY_KEY_MAP.get(field, field)) for field in ABILITY_FIELDS}
             return AbilityCompilationResult(_ability_from_flat(flat), "dspy-predict@3.3.0")
-        engine = semantic_engine()
+        engine = semantic_engine(providers)
         flat = engine.compile_abilities(persona, scenario, seed)
         return AbilityCompilationResult(_ability_from_flat(flat), engine.name)
 

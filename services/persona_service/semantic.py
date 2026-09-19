@@ -7,6 +7,7 @@ import os
 import random
 import re
 import time
+from urllib.parse import urlsplit
 from typing import Any, Protocol
 
 import requests
@@ -131,6 +132,8 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
         # provider at all, and __init__ then raises rather than quietly falling
         # back onto credentials it may not use.
         self.providers = [tuple(entry) for entry in providers] if providers is not None else None
+        # Set by _complete once something answers; read by callers that report it.
+        self.served_by: dict[str, str] | None = None
         resolved = self._resolve(base_url, model, api_key, chain=self.providers)
         self.base_url = resolved["base_url"].rstrip("/")
         self.model = resolved["model"]
@@ -230,6 +233,15 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
                     content = response.json()["choices"][0]["message"]["content"]
                     if not content or not content.strip():
                         raise ValueError("model returned an empty completion")
+                    # Which provider actually answered. A run served by the second
+                    # entry is a run whose reproducibility claim is different, and
+                    # the report has no way to say so unless this is kept. Host and
+                    # model only -- a base URL can carry a key in a query string,
+                    # so only the scheme and host are ever recorded.
+                    split = urlsplit(where["base_url"])
+                    self.served_by = {"endpoint": f"{split.scheme}://{split.netloc}"
+                                      if split.netloc else where["base_url"],
+                                      "model": where["model"]}
                     return content
                 except (requests.RequestException, ValueError, KeyError, IndexError) as error:
                     last_error = error
@@ -346,12 +358,14 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
         }
 
 
-def semantic_engine() -> SemanticEngine:
+def semantic_engine(providers=None) -> SemanticEngine:
     # "Is there anything to call?" is one question, and providers.py is the only
-    # thing that should be answering it.
-    selected = os.getenv("SEMANTIC_ENGINE", "direct" if model_providers() else "mock")
+    # thing that should be answering it -- unless the caller was handed a chain,
+    # in which case that chain is the answer and the environment is not consulted.
+    selected = os.getenv("SEMANTIC_ENGINE",
+                         "direct" if (providers or model_providers()) else "mock")
     if selected == "direct":
-        return DirectLLMSemanticEngine()
+        return DirectLLMSemanticEngine(providers=providers)
     if selected == "mock":
         return MockSemanticEngine()
     raise ValueError(f"unsupported SEMANTIC_ENGINE: {selected}")

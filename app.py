@@ -302,7 +302,8 @@ def _read_example_persona_file(example_file):
     return name, bio, raw_persona
 
 
-def load_example_persona(example_file, persona_client=None, compile_behavior=True, seed=1):
+def load_example_persona(example_file, persona_client=None, compile_behavior=True, seed=1,
+                         models=None):
     """Load a bundled example persona (e.g. Friedrich_Wolf.agent.json).
 
     When compile_behavior is True (the default, needed for journey testing --
@@ -323,7 +324,7 @@ def load_example_persona(example_file, persona_client=None, compile_behavior=Tru
     if not compile_behavior:
         return {"name": name, "minibio": bio, "persona": raw_persona}
     compiled = (persona_client or persona_runtime).compile(
-        raw_persona, scenario=f"Example persona preview: {name}", seed=seed)
+        raw_persona, scenario=f"Example persona preview: {name}", seed=seed, models=models)
     compiled["name"] = name
     compiled["minibio"] = bio
     return compiled
@@ -2785,6 +2786,34 @@ def configured_providers() -> list[dict[str, str]]:
     return providers
 
 
+def _generation_providers(authorization, workspace_id, example_persona):
+    """The chain this caller may generate a persona on, for the persona service.
+
+    Resolved here because the persona service runs as its own process and must
+    not open the control plane's database to work it out (AGENTS.md: versioned
+    HTTP contracts only). None means "send nothing and let its environment
+    decide", which is what happens for a run that would get the deployment's
+    providers anyway -- the service knows its own deployment better than the
+    general chain does.
+    """
+    from apps.api.auth import IdentityProvider
+    from apps.api.model_routing import providers_for
+    from apps.api.model_settings import ROLE_GENERATION, may_use_built_in_providers
+
+    try:
+        auth = IdentityProvider().resolve(authorization, workspace_id, "local")
+    except Exception:  # noqa: BLE001 - an unreadable identity is simply not the owner
+        auth = {}
+    workspace = auth.get("workspace_id") or workspace_id or "local"
+    own = providers_for(workspace, ROLE_GENERATION, built_in_allowed=False)
+    allowed = may_use_built_in_providers(auth, example_persona=example_persona)
+    if allowed and not own:
+        return None
+    return [{"baseUrl": url, "model": model, "apiKey": key}
+            for url, key, model in providers_for(workspace, ROLE_GENERATION,
+                                                 built_in_allowed=allowed)]
+
+
 def _refuse_unless_provisioned(authorization, workspace_id, example_persona) -> None:
     """Stop a run that has no model to spend, with something to do about it.
 
@@ -3004,6 +3033,7 @@ if __name__ == "__main__":
         # hundred-step journey against their own site. Checked here rather than
         # deeper down because a refusal is only useful before the work starts.
         _refuse_unless_provisioned(authorization, workspace_id, example_persona)
+        generation_models = _generation_providers(authorization, workspace_id, example_persona)
         try:
             if example_persona:
                 # Skip live TinyTroupe generation and use a bundled example persona
@@ -3011,14 +3041,16 @@ if __name__ == "__main__":
                 # default for exercising the rest of the pipeline (journey run,
                 # report) without paying live generation latency/cost each time.
                 persona_count = int(payload.get("persona_count", 1))
-                personas = [load_example_persona(example_persona, personas_client, compile_behavior=True, seed=seed)
+                personas = [load_example_persona(example_persona, personas_client, compile_behavior=True,
+                                                 seed=seed, models=generation_models)
                             for seed in range(1, persona_count + 1)]
             else:
                 personas = personas_client.generate(payload["theme"], payload["customer_profile"],
                                                     int(payload.get("persona_count", 5)),
                                                     scenario=payload.get("scenario") or f"Test {payload['url']}",
                                                     seed=int(payload.get("seed", 1)),
-                                                    allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)))
+                                                    allow_offline_fallback=bool(payload.get("allow_offline_fallback", False)),
+                                                    models=generation_models)
         except FileNotFoundError as error:
             raise HTTPException(404, str(error))
         except requests.exceptions.RequestException as error:

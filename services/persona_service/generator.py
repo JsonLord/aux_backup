@@ -29,7 +29,7 @@ class TinyTroupeGenerator:
         return importlib.util.find_spec("tinytroupe") is not None
 
     def generate(self, theme: str, customer_profile: str, count: int, scenario: str, seed: int,
-                 allow_offline_fallback: bool = False) -> list[dict[str, Any]]:
+                 allow_offline_fallback: bool = False, providers=None) -> list[dict[str, Any]]:
         if os.getenv("PERSONA_GENERATOR", "offline") == "tinytroupe":
             if not self.tinytroupe_available:
                 raise RuntimeError("PERSONA_GENERATOR=tinytroupe but TinyTroupe is not installed")
@@ -72,12 +72,13 @@ class TinyTroupeGenerator:
             # same max_concurrent_model_calls semaphore that phase used.
             with concurrent.futures.ThreadPoolExecutor(max_workers=max(1, len(raw))) as executor:
                 return list(executor.map(
-                    lambda args: self._profile(args[1], scenario, seed + args[0], model_label),
+                    lambda args: self._profile(args[1], scenario, seed + args[0], model_label,
+                                               providers=providers),
                     enumerate(raw),
                 ))
         # Offline fallback remains explicit and cannot satisfy pinned-package acceptance.
         return self._offline_profiles(theme, customer_profile, count, scenario, seed,
-                                      "tinytroupe-offline-placeholder")
+                                      "tinytroupe-offline-placeholder", providers=providers)
 
     @staticmethod
     def providers():
@@ -340,7 +341,7 @@ class TinyTroupeGenerator:
         client_class.send_message = patched_send_message
 
     def _offline_profiles(self, theme, customer_profile, count, scenario, seed, model,
-                          allow_compiler_fallback=False):
+                          allow_compiler_fallback=False, providers=None):
         rng = random.Random(seed)
         occupations = ["Researcher", "Operations specialist", "Independent professional", "Customer advocate"]
         profiles = []
@@ -361,7 +362,8 @@ class TinyTroupeGenerator:
                 "personality": {"description": "Generated offline baseline; tweak before execution."},
             }
             try:
-                profiles.append(self._profile(persona, scenario, persona_seed, model))
+                profiles.append(self._profile(persona, scenario, persona_seed, model,
+                                              providers=providers))
             except Exception:
                 if not allow_compiler_fallback:
                     raise
@@ -388,15 +390,15 @@ class TinyTroupeGenerator:
                     return {"name": getattr(person, "name", value.get("name")), **value}
         raise RuntimeError("TinyTroupe TinyPerson exposes no supported serialization method")
 
-    def _profile(self, persona, scenario, seed, model, source="tinytroupe"):
+    def _profile(self, persona, scenario, seed, model, source="tinytroupe", providers=None):
         # Compilation happens exactly once for this new synthetic user. The validated
         # result is embedded in the durable profile rather than recomputed per run.
         # Behavior and ability compilation are independent calls for the same
         # persona/scenario/seed; run them concurrently so adding ability
         # compilation doesn't double this method's latency.
         with concurrent.futures.ThreadPoolExecutor(max_workers=2) as executor:
-            behavior_future = executor.submit(self.compiler.compile_with_metadata, persona, scenario, seed)
-            abilities_future = executor.submit(self.compiler.compile_abilities_with_metadata, persona, scenario, seed)
+            behavior_future = executor.submit(self.compiler.compile_with_metadata, persona, scenario, seed, providers)
+            abilities_future = executor.submit(self.compiler.compile_abilities_with_metadata, persona, scenario, seed, providers)
             compilation = behavior_future.result()
             ability_compilation = abilities_future.result()
         return {"id": f"persona_{uuid4().hex}", "source": source, "persona": persona,
@@ -405,7 +407,7 @@ class TinyTroupeGenerator:
                                "compilerVersion": f"{self.compiler.version}/{compilation.compiler_version}",
                                "abilityCompilerVersion": f"{self.compiler.version}/{ability_compilation.compiler_version}"}}
 
-    def compile_existing(self, persona, scenario, seed, source="preset"):
+    def compile_existing(self, persona, scenario, seed, source="preset", providers=None):
         """Compile behavior/ability profiles for a persona that already exists
         (e.g. a bundled TinyTroupe example agent), without live generation.
 
@@ -415,4 +417,5 @@ class TinyTroupeGenerator:
         TinyTroupe generation) and therefore be usable for journey testing,
         which requires ``profile.behavior``.
         """
-        return self._profile(persona, scenario, seed, model=source, source=source)
+        return self._profile(persona, scenario, seed, model=source, source=source,
+                             providers=providers)

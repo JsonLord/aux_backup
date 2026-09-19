@@ -223,7 +223,11 @@ class JobExecutor(ReportAssembler):
             # falsifiable, and invisible to every other source here.
             findings += self._pain_points_from_expectations(journeys)
             cohort_runs, screenshot_bytes, raw_strengths, vision_error, repeated_captures = \
-                self._collect_vision_pain_points(journeys, tasks, personas, data.get("url"))
+                self._collect_vision_pain_points(
+                    journeys, tasks, personas, data.get("url"),
+                    self._providers_for(job, ROLE_VISION),
+                    send_options=bool(providers_for(job.get("workspace_id") or "local",
+                                                    ROLE_VISION, built_in_allowed=False)))
             vision_findings = self._synthesize_pain_points(cohort_runs, screenshot_bytes) if cohort_runs else []
             # The vision model has a "strengths" array and still puts praise in
             # "issues" -- a live run published "Familiar and clean layout" as a
@@ -377,6 +381,10 @@ class JobExecutor(ReportAssembler):
                                                              findings, preserve, journeys),
                 "synthetic_users": personas, "persona_artifacts": persona_artifacts,
                 "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys},
+                # Which providers actually served this report. A run served by the
+                # fallback is a run whose reproducibility claim is different, and a
+                # reader cannot weigh that unless it is stated. Host and model only.
+                "served_by": self._served_by(journeys),
                 "critical_pain_points": findings,
                 "run_diagnostics": run_diagnostics,
                 "flow_groups": self._flow_groups(findings, tasks),
@@ -547,6 +555,25 @@ class JobExecutor(ReportAssembler):
         except (OSError, ValueError, AttributeError):
             message = ""
         return f"HTTP {error.code} from the eyeson worker: {message}" if message else str(error)
+
+    @staticmethod
+    def _served_by(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The distinct providers that answered across a cohort, in run order.
+
+        `servedBy` is set by the worker and carries an endpoint and a model but
+        never a key (services/journey-worker/node/src/journeytest.js). Runs that
+        never reached a model contribute nothing rather than a blank row.
+        """
+        seen, served = set(), []
+        for journey in journeys:
+            entry = journey.get("servedBy") or {}
+            key = (entry.get("endpoint"), entry.get("model"))
+            if not entry.get("endpoint") or key in seen:
+                continue
+            seen.add(key)
+            served.append({"endpoint": entry["endpoint"], "model": entry.get("model"),
+                           "movedFromPrimary": bool(entry.get("movedFromPrimary"))})
+        return served
 
     @classmethod
     def _run_models(cls, job: dict[str, Any]) -> dict[str, list[dict[str, str]]] | None:

@@ -5,6 +5,20 @@ from pydantic import BaseModel, ConfigDict, Field
 ColorVision = Literal["typical", "protanopia", "deuteranopia", "tritanopia", "custom"]
 
 
+class ModelProvider(BaseModel):
+    """One endpoint, model and key -- a set, because an alias without its token is
+    a 401 on every call.
+
+    The control plane resolves these per caller and sends them (see
+    apps/api/model_routing.py); this service does not open its database to work
+    them out for itself. Absent, the deployment's own environment decides, which
+    is what happens for every caller not yet routed.
+    """
+
+    baseUrl: str
+    model: str
+    apiKey: str
+
 class PersonaGenerateRequest(BaseModel):
     theme: str
     customer_profile: str
@@ -12,6 +26,7 @@ class PersonaGenerateRequest(BaseModel):
     scenario: str = ""
     seed: int = 1
     allow_offline_fallback: bool = False
+    models: list[ModelProvider] | None = None
 
 
 class PersonaPatchRequest(BaseModel):
@@ -35,6 +50,7 @@ class PersonaCompileRequest(BaseModel):
     scenario: str = ""
     seed: int = 1
     source: Literal["tinytroupe", "manual", "preset"] = "preset"
+    models: list[ModelProvider] | None = None
 
 
 class BehaviorProfile(BaseModel):
