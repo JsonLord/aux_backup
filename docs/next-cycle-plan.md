@@ -229,11 +229,18 @@ system *finds* — only what a reader is told.
 
 ### BE-1. Route runs through the settings store *(first, and blocking)*
 
-As above. `chain()` returns an ordered list precisely so the second entry is the
-fallback; make the run walk it, record which provider actually served each call,
-and stop reading provider keys out of the environment at `executor.py:3366` and
-`executor.py:3417`. A run served by the fallback is a run whose reproducibility
-claim differs, so the served provider belongs in the report.
+As above. Everything else on this track depends on it, and so does CAP-1.
+
+Planned in detail in `docs/next-cycle-be-1.md`, which found two things this
+section's sketch did not. The work spans **four** processes, not two — the control
+plane, `persona_service`, the journey worker and the eyeson worker — though both
+Node workers already accept an injected endpoint, model and key, so only the wiring
+above them reads the environment. And the admission decision **cannot be re-derived
+at run time**: `may_use_built_in_providers()` needs an auth dict, a job carries only
+`workspace_id` and `owner_user_id`, and in `hf_token` mode that id is an HF `sub`
+while `space_owner()` yields a username — so a run would deny the Space's own owner
+the credentials reserved for them. It is decided at job creation, where `auth`
+exists, and recorded on the job.
 
 ### BE-2. Extract the report assembler — **done**
 

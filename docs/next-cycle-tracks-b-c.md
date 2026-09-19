@@ -19,6 +19,10 @@ test that proves the rail rather than the happy path.
 
 ## BE-1. Route runs through the workspace's providers
 
+> **Superseded by `docs/next-cycle-be-1.md`**, planned against the post-BE-2 tree.
+> Two of the call sites below moved into `services/report_service/` when BE-2 landed,
+> and that plan finds two more processes and one decision this section misses.
+
 ### What exists
 
 Three pieces that already fit, and one missing wire.
