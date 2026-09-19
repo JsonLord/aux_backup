@@ -469,12 +469,16 @@ run actually uses (BE-1), and returns no secret under any route.
 
 ---
 
-## CAP-2. The hat registry
+## CAP-2. The hat registry — additive only
 
-### What exists
+### The rule this is built around
 
-`browsingFaculty({abilities, seed, memory})` (`faculty.js:294`) is already the single
-place the mounted tool set is chosen:
+**Browsing is not optional and is not replaced.** It is what every job so far needs,
+it works, and every hat stands on it. A hat may only ever *add* faculties.
+
+### What exists, and stays exactly as it is
+
+`browsingFaculty({abilities, seed, memory})` (`faculty.js:294`):
 
 ```js
 const tools = [new BrowserTool({ abilities, seed }), new JourneyTool()];
@@ -482,44 +486,71 @@ if (memory) tools.push(memory);
 return new Faculty(tools);
 ```
 
-And `Faculty.actionsDefinitionsPrompt()` (`faculty.js:254`) assembles the persona's
-vocabulary from whatever is mounted — so **a hat that adds a tool adds vocabulary
-without touching the director.** That is the property the whole design rests on and
-it is already true.
+Unchanged, and not renamed. It has eight call sites, three of them module-level
+constants evaluated at import (`personaActor.js:32,52,53`) — `ACTION_TYPES`,
+`ACTION_VOCABULARY`, `ACTION_CONSTRAINTS`. Renaming it would touch all of them for
+no gain, and those three are precisely where a drift would go unnoticed.
+
+`Faculty.actionsDefinitionsPrompt()` (`faculty.js:254`) assembles the persona's
+vocabulary from whatever is mounted, so **an added faculty adds vocabulary without
+touching the director.** That is already true and is the property the design rests
+on.
 
 ### The change
 
-A hat is a record, stored in the control-plane SQLite beside providers and
-credentials:
+One new function beside the existing one, which calls it rather than replacing it:
+
+```js
+/** The browsing faculty, plus whatever this hat adds. Never less. */
+function facultyWith(extras = [], options = {}) {
+  const base = browsingFaculty(options);
+  return new Faculty([...base.tools, ...extras]);
+}
+```
+
+A hat records only its additions:
 
 ```jsonc
 { "hat_id": "hat_...", "workspace_id": "...", "label": "The integrator",
-  "tools": ["browser", "journey", "memory", "developer"],
+  "adds": ["developer"],
   "roles": {"acting": "llm_abc", "reflection": "llm_def"},   // provider_ids
-  "grants": {"mcpServers": [...], "plugins": [...], "developer": {"allowCommands": [...], "hosts": [...]}},
+  "grants": {"mcpServers": [...], "plugins": [...],
+             "developer": {"allowCommands": [...], "hosts": [...]}},
   "profileDefaults": {...} }
 ```
 
-`browsingFaculty()` becomes `facultyForHat(hat, {abilities, seed, memory})`, with
-the current behaviour as the `visitor` preset so nothing changes for an unspecified
-run. The `/v1/runs` payload carries `hat` (resolved server-side — the worker gets the
-manifest, not an id it would have to look up).
+There is no `"tools"` field and no `"removes"` field. A hat that takes browsing away
+is not refused by a check — it is unrepresentable, which is the stronger guarantee
+and costs nothing.
 
-Ship the named hats as presets; the registry is what makes them editable rather than
-hardcoded, which is the point of `/webui` having a hats tab at all.
+Two consequences worth naming:
 
-**The capability manifest goes in the report.** The worksheet is right that it is
-load-bearing: "I could not find the retention policy" means one thing from a hat
-that could only browse and another from one that could also search a docs site. A
-finding carries the hat that produced it and what that hat could reach.
+- **Precedence falls out for free.** `Faculty.processAction()` offers an action to
+  each tool in turn until one claims it. Appending means `BrowserTool` keeps first
+  claim on `READ`, `CLICK`, `SCROLL`, `TYPE` and `GO_BACK`, so a new faculty cannot
+  shadow a browsing action even by mistake.
+- **A hat with no additions is today's run.** Not "equivalent to" — the same
+  `browsingFaculty()` call, with a `Faculty` wrapped around the same tool list.
+
+The `/v1/runs` payload carries the hat resolved server-side (the worker gets the
+manifest, not an id it would have to look up). Ship the named hats as presets; the
+registry is what makes them editable rather than hardcoded, which is the point of
+`/webui` growing a hats tab at all.
+
+**The capability manifest goes in the report.** "I could not find the retention
+policy" means one thing from a hat that could only browse and another from one that
+could also search a docs site, so a finding carries the hat that produced it and
+what that hat could reach.
 
 ### Tests
 
-- `facultyForHat({tools: ["browser","journey"]})` yields exactly today's
-  `actionTypes`.
-- Adding a tool to a hat changes `actionsDefinitionsPrompt()` with no change to
-  `personaDirector.js`.
-- An unknown tool name in a hat is refused at save time, not at mount time.
+- `browsingFaculty()`'s `actionTypes` are unchanged by anything in this item.
+- `facultyWith([])` yields exactly today's action types, constraints and vocabulary.
+- An added faculty's actions appear in `actionsDefinitionsPrompt()` with no change
+  to `personaDirector.js`.
+- A browsing action still routes to `BrowserTool` when an added faculty declares a
+  colliding `actionType` — the rail against a hat shadowing a click.
+- An unknown name in `adds` is refused at save time, not at mount time.
 
 ---
 

@@ -387,19 +387,45 @@ Three rules, all of which the codebase already models:
 3. **The passthrough is bounded.** Rate-limited, size-capped, a connectivity check
    rather than a chat product.
 
-### CAP-2. The hat registry
+### CAP-2. The hat registry — additive only
 
-A hat is a record: mounted tool set, profile defaults, role-to-provider assignments,
-and capability grants (plugins, MCP servers). `browsingFaculty()` (`faculty.js:294`)
-is already the one place the mounted set is chosen; it becomes `facultyForHat()`.
+**`browsingFaculty()` does not change, and is not renamed.** Browsing is what every
+job so far needs and it works; it is the floor every hat stands on, not one option
+among several. Its eight call sites stay untouched — including the module-level
+`ACTION_TYPES`, `ACTION_VOCABULARY` and `ACTION_CONSTRAINTS` in `personaActor.js`
+(`personaActor.js:32,52,53`), which are computed at import and are exactly the kind
+of thing a rename makes drift quietly.
+
+A hat records what it **adds**, and there is no field in which it could record a
+removal:
+
+```jsonc
+{ "hat_id": "hat_...", "workspace_id": "...", "label": "The integrator",
+  "adds": ["developer"],                                     // extra faculties only
+  "roles": {"acting": "llm_abc", "reflection": "llm_def"},
+  "grants": {"mcpServers": [...], "plugins": [...],
+             "developer": {"allowCommands": [...], "hosts": [...]}},
+  "profileDefaults": {...} }
+```
+
+A new `facultyWith(extras, {abilities, seed, memory})` **calls** `browsingFaculty()`
+and appends. So a hat cannot take the browser away — not because a rule forbids it,
+but because nothing can express it. A hat with no extras is byte-for-byte today's
+faculty.
+
+Order matters and falls out for free: `Faculty.processAction()` offers an action to
+each tool until one claims it, so appending means `BrowserTool` keeps first claim on
+`READ`, `CLICK`, `SCROLL`, `TYPE` and `GO_BACK`. A new faculty cannot shadow a
+browsing action even by accident.
+
 Because `Faculty.actionsDefinitionsPrompt()` (`faculty.js:254`) assembles the
-vocabulary from whatever is mounted, a hat that adds a tool adds vocabulary without
-touching the director. Ship the named hats as presets; the registry is what makes
-them editable rather than hardcoded.
+vocabulary from whatever is mounted, an added faculty adds vocabulary without
+touching the director.
 
 The worksheet's **capability manifest** belongs here: a report should state which
 hat produced a finding and what that hat could reach, because "I could not find the
-retention policy" means different things from a browser and from a docs search.
+retention policy" means different things from a browser alone and from a browser
+plus a docs search.
 
 ### CAP-3. Front-tab links
 
