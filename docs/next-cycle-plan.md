@@ -235,16 +235,47 @@ and stop reading provider keys out of the environment at `executor.py:3366` and
 `executor.py:3417`. A run served by the fallback is a run whose reproducibility
 claim differs, so the served provider belongs in the report.
 
-### BE-2. Extract the report assembler
+### BE-2. Extract the report assembler — **done**
 
-`apps/api/executor.py` is **3843 lines** and holds both the run half and the report
-half. Track A rewrites the report half; BE-1 rewrites the run half. They will collide
-on every commit. `services/report-service/` exists and contains only `__init__.py`.
+`apps/api/executor.py` was 3843 lines and held both halves. The report half now
+lives in `services/report_service/` (underscore, matching `persona_service` and
+`perception_service` — the hyphenated `report-service/` stays the empty placeholder
+it was, as `persona-service/` is):
 
-**A single mechanical commit** — move the finding builders, report assembly and
-slide rendering across, change no behaviour, keep every test green. Both other
-tracks rebase onto it. It is worth more than it looks: it is the difference between
-three tracks running in parallel and three tracks taking turns.
+| | lines |
+| --- | --- |
+| `apps/api/executor.py` | 3843 → **637** |
+| `services/report_service/assembler.py` | 2904 (`ReportAssembler`, 91 members) |
+| `services/report_service/helpers.py` | 441 (module-level helpers) |
+
+**Deviation from this plan, stated rather than buried.** The plan said the moved
+`@classmethod`/`@staticmethod` members "become module-level functions, which is what
+they already are in everything but spelling". They did not. They moved as a class,
+`ReportAssembler`, which `JobExecutor` now inherits. The reason is that a
+function-level extraction is not a move: 62 members reference each other through
+`cls.`/`self.`, and two of them (`cls._vision_timeout()`, `cls._worker_error()`)
+reference the run half, so every one of those call sites would have to be rewritten
+and the two back-references redesigned. As a mixin, every reference resolves exactly
+as before — through the MRO instead of within one class body — and the diff is
+provably a move. De-classmethoding is a separate, later, also-mechanical commit.
+
+**What is not verbatim.** 3543 of the original's 3560 non-blank lines moved
+untouched. The 17 that changed: the class header gains its base; six places that
+reached the class by name (`JobExecutor._flow_label`, `._NOT_A_PROBLEM`,
+`._RARE_ACUITY`, `._RARE_CONTRAST`, `._what_stopped_them`) now name
+`ReportAssembler`, which is where those attributes moved and which `JobExecutor`
+inherits; and `_download_name` became a module function in `helpers.py` with
+`_download_name = staticmethod(download_name)` left on the class — because a module
+helper (`_evidence_reference_summary`) calls it and a module function cannot reach
+back into the class without a circular import. That binding shape is the one
+`_plural = staticmethod(plural)` already used a few lines away.
+
+`apps.api.executor` re-exports the fourteen helper names that the run half still
+calls or that other modules import by name, so no importer changed.
+
+**Verification.** 393 passed / 3 failed before, 393 passed / 3 failed after, the same
+three by name — all three need `dspy`, which `AGENTS.md` deliberately leaves
+uninstalled. Not one assertion changed.
 
 ### BE-3. Cost and time accounting
 
