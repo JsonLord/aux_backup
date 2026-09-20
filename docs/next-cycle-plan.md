@@ -1084,13 +1084,57 @@ that it is what was claimed. Plus one Python test proving a hat's `grants`
 pre-existing unrelated failures as baseline), 292 Node tests passing (up from
 283).
 
-### CAP-6. Hat 4 — role hats, and the gate that rejects most of them
+### CAP-6. Hat 4 — role hats, and the gate that rejects most of them — **done**
 
 Evaluator, administrator, integrator, compliance reader — with one rule: **a hat
 earns its place only if it changes what the system does, not what it says.** Same
 actions in a different tone is a prompt and belongs in a persona profile. Applied
 honestly this rejects some of the four, which is why it is written down before they
 are built rather than after.
+
+**The gate, applied to each of the four, honestly.**
+
+- **Integrator — passes, and needs no new code.** Wants Hat 3's (CAP-5's
+  developer) tools: FETCH to pull a page's declared assets, RUN to invoke an
+  allowlisted verification command, AUTHENTICATE to exercise an issued key
+  against the product's own API. That is a real change in what the system can
+  *do* -- CAP-5's own `DeveloperTool` is exactly this. And it needs zero new
+  production code, because CAP-2's registry already expresses it completely:
+  `HatRegistry.put(label="The integrator", adds=["developer"], grants=
+  {"developer": {"allowCommands": [...], "hosts": [...]}})` is the whole hat.
+  This is, in fact, the literal worked example this section's own CAP-2 JSON
+  sketch used before either CAP-2 or CAP-5 was built. Proven end to end by
+  `test_cap5_a_hats_grants_reach_the_run_payload_for_a_mounted_tool_to_read`
+  (Python: a hat record's `grants` reach the run) and
+  `developerTool.test.js`'s "a hat that does grant allowCommands mounts the
+  tool" (Node: that grant actually mounts `DeveloperTool`) -- the integrator
+  hat is those two tests composed, not a third thing to build.
+- **Administrator — fails the gate as stated.** "Wants Hat 2's tools and none
+  of Hat 3's" reads as though it should be built the same way as the
+  integrator, but Hat 2 (CAP-4's redaction) is not a `Tool` the registry
+  mounts at all -- it is unconditional behaviour `PersonaDirector.lookOnce()`
+  already applies to every signed-in run, driven by a credential's own
+  `redactSelectors`, not by a hat. There is no capability for an
+  "administrator" hat record to `adds`: a hat naming no extras is, by CAP-2's
+  own construction, byte-for-byte the plain browsing floor -- identical to no
+  hat at all. Nothing here changes what the system *does* beyond what already
+  happens unconditionally, so this fails the gate outright rather than
+  earning a place, and is not built.
+- **Evaluator and compliance reader — fail the gate, are personas.** Neither
+  names a capability outside browsing; both describe a stance (judgemental,
+  compliance-focused) applied to the same actions every persona already
+  takes. That is a prompt -- a persona profile's goals, traits and
+  `minibio`, compiled by `services/persona_service` -- and belongs there, not
+  in the hat registry. Not built here, because CAP-6's job is the gate, not a
+  persona for every plausible stance; if either is ever wanted, it is a
+  `persona_service` change, a different track entirely.
+
+**Done when**, restated honestly: the gate has been applied to all four
+candidates and the verdict written down before any of them were built, per
+this section's own reason for existing ("that is why the gate is written down
+before they are built"). One of four passes, needs nothing new, and is proven
+by tests CAP-2/CAP-5 already wrote for an unrelated reason; three are
+rejected, on stated grounds, rather than built and found wanting afterward.
 
 ## How the three tracks run in parallel
 
