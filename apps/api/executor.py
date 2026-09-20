@@ -385,6 +385,11 @@ class JobExecutor(ReportAssembler):
         self._attach_verdict_screenshots(findings, journeys, redact_selectors=redact_selectors,
                                          start_evidence_number=next_evidence_number)
         self._attach_redesigns(findings, data.get("url"), self._providers_for(job, ROLE_VISION))
+        # F8: after screenshots are attached (their filenames are the step index
+        # this reads), so findings accumulate into the story of the run instead
+        # of a severity-shuffled grab-bag. Severity still governs impact_analysis's
+        # own "what to fix first" ordering below, untouched by this.
+        findings = self._order_by_step(findings)
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
         if any(source.startswith("persona.") for source in sources):
             limitations.append(

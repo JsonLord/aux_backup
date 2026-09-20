@@ -597,6 +597,108 @@ def test_slide_deck_follows_usability_review_anatomy():
     assert "No findings" in empty_html
 
 
+# --- RPT-6: the reader-facing lines --------------------------------------------
+
+def test_the_intro_slide_states_scope_and_the_evidence_language_stamp():
+    """F2: scope stated as intent up front, including what was not reviewed.
+    G4: evidence_language printed verbatim, not only as "Observed"/"Inferred"
+    prose -- the strongest sentence the report can write about itself."""
+    report = {"url": "https://example.test/", "executive_summary": "s", "evidence_language": "observed",
+             "journey_outcome": {"tasks": ["Buy an item"]}, "impact_analysis": {},
+             "elements_to_preserve": [], "critical_pain_points": []}
+    html = JobExecutor._slide_deck(report)
+
+    assert "Scope: only the tasks below, against https://example.test/" in html
+    assert "were not exercised and are not" in html
+    assert "evidence_language: observed" in html
+
+
+def test_severity_derivation_is_printed_beside_the_chip_and_degrades_honestly():
+    """B7: why this severity, not just what it is -- built only from numbers a
+    finding actually carries, never invented for a source that has none."""
+    html = JobExecutor._finding_slide({
+        "title": "Confusing checkout", "severity": "medium", "summary": "s",
+        "affectedPersonas": 1, "claimedImpact": {"frustration": 0.2, "confusion": 0.1, "trust": 0.0},
+    }, 1, "Observed user issue")
+
+    assert "sev-why" in html
+    assert "1 person" in html and "raised frustration 0.20" in html and "not blocking" in html
+
+    # A verdict-level blocker carries none of that -- degrades to what it has.
+    bare = JobExecutor._finding_slide({"title": "Blocked", "severity": "critical", "summary": "s",
+                                       "category": "blocker"}, 1, "Observed user issue")
+    assert "blocking" in bare and "1 person" not in bare
+
+
+def _relative_luminance(hex_color: str) -> float:
+    hex_color = hex_color.lstrip("#")
+    if len(hex_color) == 3:
+        hex_color = "".join(ch * 2 for ch in hex_color)
+    r, g, b = (int(hex_color[i:i + 2], 16) / 255 for i in (0, 2, 4))
+
+    def channel(c):
+        return c / 12.92 if c <= 0.03928 else ((c + 0.055) / 1.055) ** 2.4
+
+    r, g, b = channel(r), channel(g), channel(b)
+    return 0.2126 * r + 0.7152 * g + 0.0722 * b
+
+
+def _contrast_ratio(hex_a: str, hex_b: str) -> float:
+    """WCAG 2.x's own formula (SC 1.4.3), not an approximation of it."""
+    lum_a, lum_b = _relative_luminance(hex_a) + 0.05, _relative_luminance(hex_b) + 0.05
+    return max(lum_a, lum_b) / min(lum_a, lum_b)
+
+
+def test_e11_the_decks_own_palette_passes_wcag_aa_contrast():
+    """E11: a contrast review that fails contrast would be embarrassing, and
+    nothing checked it before this. Reads the pairs out of the deck's actual
+    generated CSS -- not a hand-copied snapshot of it -- so a future palette
+    edit is what this test checks, not what it was written against."""
+    import re
+
+    css = JobExecutor._slide_deck({"url": "https://example.com", "critical_pain_points": []})
+
+    def rule(selector: str) -> str:
+        match = re.search(re.escape(selector) + r"\{([^}]*)\}", css)
+        assert match, f"selector {selector!r} not found in the deck's stylesheet"
+        return match.group(1)
+
+    def color_prop(block: str, prop: str) -> str:
+        match = re.search(prop + r":\s*(#(?:[0-9a-fA-F]{3}){1,2})\b", block)
+        assert match, f"no {prop!r} declared in {block!r}"
+        return match.group(1)
+
+    # Every severity chip: its own background against its own text colour.
+    for selector in (".sev-critical", ".sev-high", ".sev-medium", ".sev-low"):
+        block = rule(selector)
+        background, color = color_prop(block, "background"), color_prop(block, "color")
+        ratio = _contrast_ratio(background, color)
+        assert ratio >= 4.5, f"{selector} contrast is {ratio:.2f}:1, below WCAG AA's 4.5:1 ({background} on {color})"
+
+    # Body text against the deck's own default slide background (white), and
+    # the dark title slide against its own declared background and colour.
+    body_color = color_prop(rule("body"), "color")
+    assert _contrast_ratio("#ffffff", body_color) >= 4.5, "default body text on a white slide"
+    title_block = rule(".slide.title")
+    title_background, title_color = color_prop(title_block, "background"), color_prop(title_block, "color")
+    assert _contrast_ratio(title_background, title_color) >= 4.5, "title slide's own background and text colour"
+
+
+def test_findings_are_ordered_by_the_step_they_occurred_at_not_by_severity():
+    """F8: findings accumulate into the story of the run. Severity governs only
+    impact_analysis's own "what to fix first" ordering, a separate list."""
+    findings = [
+        {"title": "Late issue", "severity": "critical", "screenshotRef": "/tmp/x/010-click-after.png"},
+        {"title": "Early issue", "severity": "low", "screenshotRef": "/tmp/x/002-click-after.png"},
+        {"title": "No derivable step", "severity": "high"},
+        {"title": "Mid issue", "severity": "medium", "evidenceScreenshot": "/tmp/x/005-read.png"},
+    ]
+
+    ordered = JobExecutor._order_by_step(findings)
+
+    assert [item["title"] for item in ordered] == ["Early issue", "Mid issue", "Late issue", "No derivable step"]
+
+
 def test_slide_deck_says_predicted_when_no_browser_evidence_was_collected():
     """Honesty about evidence class: without a live run the deck must claim no more
     than a heuristic walkthrough does."""
@@ -2339,7 +2441,10 @@ def test_the_summary_names_the_worst_finding_rather_than_only_counting():
     summary = JobExecutor._executive_summary("https://example.test/", ["a", "b"],
                                              [{"id": "fw"}], findings, [{"title": "Clear value"}])
 
-    assert "The most serious is: On screen and never looked at" in summary
+    assert "The one thing to change: On screen and never looked at" in summary
+    # F1: the judgement leads; "what works" is named too when there is one.
+    assert summary.index("The one thing to change") < summary.index("3 usability issues")
+    assert "What works: Clear value." in summary
     # The two classes a reader would not know to look for are called out by name.
     assert "not legible once these users' eyesight is applied" in summary
     assert "never looked at -- a prominence problem" in summary
@@ -2349,7 +2454,7 @@ def test_the_summary_names_the_worst_finding_rather_than_only_counting():
 def test_the_summary_of_a_clean_run_does_not_invent_a_worst_finding():
     summary = JobExecutor._executive_summary("https://example.test/", ["a"], [{"id": "fw"}],
                                              [{"title": "No pain points detected"}], [])
-    assert "The most serious is" not in summary
+    assert "The one thing to change" not in summary
     assert "0 usability issues" in summary
 
 

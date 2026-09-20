@@ -186,6 +186,40 @@ class ReportAssembler:
             group["findingCount"] = len(group["findings"])
         return ordered
 
+    # F8: the leading zero-padded number in a capture's own filename is a real,
+    # verifiable step index -- both this codebase's own captures
+    # (personaDirector.js's keepSeenImage/keepRefusedCapture, "003-as-they-saw-
+    # it.jpg") and journeytest-core's own action captures ("001-click-e21-
+    # after.png") use it, so reading it back is not a guess at an external
+    # format, only at one this codebase already relies on elsewhere
+    # (_elements_for_screenshot pairs screenshots to snapshots by the same stem).
+    _LEADING_STEP = re.compile(r"^(\d+)")
+
+    @classmethod
+    def _finding_step_index(cls, finding: dict[str, Any]) -> int | None:
+        for key in ("evidenceScreenshot", "screenshotRef"):
+            ref = finding.get(key)
+            if ref:
+                match = cls._LEADING_STEP.match(Path(ref).stem)
+                if match:
+                    return int(match.group(1))
+        return None
+
+    @classmethod
+    def _order_by_step(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """So findings accumulate into a story -- the order a reader would have
+        hit them in, walking the run themselves -- rather than a grab-bag severity
+        cannot arrange into one. Severity is not involved here at all; it governs
+        only `_impact_analysis`'s "what to fix first" ordering, a separate list.
+
+        A finding with no derivable step (most verdict-level findings: a blocker
+        or a failed criterion is a claim about the whole run, not one screenshot)
+        sinks to the end, in whatever order it already had -- `sorted` is stable,
+        so ties never reshuffle findings that came from the same source.
+        """
+        with_index = [(cls._finding_step_index(finding), finding) for finding in findings]
+        return [finding for _, finding in sorted(with_index, key=lambda pair: (pair[0] is None, pair[0] or 0))]
+
     @classmethod
     def _impact_analysis(cls, findings: list[dict[str, Any]], personas: list[dict[str, Any]]) -> dict[str, Any]:
         """A designer-facing read of the findings: how bad, how widespread, and who
@@ -232,8 +266,27 @@ class ReportAssembler:
                  if str(finding.get("severity")) in ReportAssembler._NOT_A_PROBLEM]
         blocking = [finding for finding in real
                     if str(finding.get("severity")) in {"critical", "high"}]
-        parts = [f"{plural(len(personas), 'synthetic user')} attempted {plural(len(tasks), 'task')} "
-                 f"against {url or 'the target site'}."]
+
+        # F1: lead with the judgement, not the method. A reader who stops after
+        # one sentence should still know what works, where the product loses
+        # people, and the one thing to change -- the counts and the "N synthetic
+        # users attempted M tasks" scaffolding that used to open this are true of
+        # almost any report and tell a reader nothing they can act on; they now
+        # sit underneath the judgement instead of in front of it.
+        judgement = []
+        worst = (blocking or real)
+        if worst:
+            flow = ReportAssembler._flow_label(worst[0])
+            judgement.append(f"The one thing to change: {worst[0].get('title')}"
+                             + (f", where it loses people at {flow}." if flow else "."))
+        if preserve:
+            judgement.append(f"What works: {preserve[0].get('title')}.")
+        if not judgement:
+            judgement.append("No usability issues were identified against the configured tasks.")
+
+        parts = list(judgement)
+        parts.append(f"{plural(len(personas), 'synthetic user')} attempted {plural(len(tasks), 'task')} "
+                     f"against {url or 'the target site'}.")
         # How far the runs actually got, before any count of what they found. A
         # live report opened "1 synthetic user(s) attempted 2 task(s) ... 10
         # usability issue(s) were identified" over a run that errored after a
@@ -252,11 +305,6 @@ class ReportAssembler:
                 + ", so what follows is what was seen before that, not a full review.")
         parts.append(f"{plural(len(real), 'usability issue')} {verb(len(real), 'was', 'were')} identified"
                      + (f", {len(blocking)} of them high-severity or blocking." if blocking else "."))
-
-        # The single thing to fix first, named rather than counted.
-        worst = (blocking or real)
-        if worst:
-            parts.append(f"The most serious is: {worst[0].get('title')}.")
 
         unreadable = [f for f in real if f.get("source") == "perception.notPerceived"]
         missed = [f for f in real if f.get("source") == "perception.missed"]
@@ -2953,9 +3001,21 @@ class ReportAssembler:
         severity_counts = impact.get("findingsBySeverity") or {}
         counts_line = ", ".join(f"{count} {severity}" for severity, count
                                 in sorted(severity_counts.items(), key=lambda pair: -pair[1]))
+        # F2: scope stated as intent, up front, including what this review did
+        # not cover -- not left for a reader to infer from the absence of a
+        # finding about some other page or flow.
+        scope_note = (f'<p class="affected">Scope: only the tasks below, against {escape(url or "the target site")}. '
+                      "Other pages, flows, and states of the product were not exercised and are not "
+                      "represented in this review.</p>")
+        # G4: the strongest sentence this report can write about itself, printed
+        # verbatim rather than only rendered as "Observed"/"Inferred" prose --
+        # it is the one line that says exactly how much to trust what follows.
+        evidence_stamp = (f'<p class="affected" style="opacity:.7">'
+                          f'evidence_language: {escape(report.get("evidence_language") or "unknown")}</p>')
         slides.append(
             f'<section class="slide"><h2>How this review was made</h2>'
             f'<p class="summary">{escape(method)}</p>'
+            f'{scope_note}{evidence_stamp}'
             f'<h3>Tasks attempted</h3><ul>{task_items}</ul>'
             + (f'<p class="affected">{escape(plural(len(findings), "issue"))} found'
                + (f" &mdash; {escape(counts_line)}" if counts_line else "") + '</p>' if findings else "")
@@ -3096,6 +3156,7 @@ table.impact{{border-collapse:collapse;font-size:.92rem;max-width:62rem;color:#3
 table.impact th{{text-align:left;padding:.4rem .8rem;border-bottom:2px solid #12303f;font-size:.7rem;letter-spacing:.14em;text-transform:uppercase;color:#12303f}}
 table.impact td{{text-align:left;padding:.45rem .8rem;border-bottom:1px solid #e3e8ee}}
 .sev{{font-size:.66rem;padding:.12rem .5rem;border-radius:2px;letter-spacing:.1em;font-weight:700}}
+.sev-why{{font-size:.72rem;color:#5b6b7c;font-weight:400;letter-spacing:normal;text-transform:none}}
 .sev-critical{{background:#fbe3e3;color:#a01b1b}}
 .sev-high{{background:#fdeadb;color:#a3510e}}
 .sev-medium{{background:#fdf4d9;color:#8a6206}}
@@ -3137,6 +3198,29 @@ show(0);
         return (f'<p class="affected" style="opacity:.75">Coverage: '
                 f'{escape(str(worst.get("evidence") or ""))}. An eyesight finding absent from those '
                 f'steps is unknown rather than ruled out.</p>')
+
+    @staticmethod
+    def _severity_derivation(item: dict[str, Any]) -> str:
+        """B7: a one-line account of *why* this severity, not just what it is,
+        beside the chip -- built only from numbers this finding actually
+        carries. A piece with nothing behind it is left out rather than
+        guessed: not every finding source computes an affected count or a
+        behavioural-impact delta (a verdict-level blocker is a claim about the
+        whole run, not a per-persona measurement), so this degrades to
+        whatever is real for that finding instead of inventing the rest.
+        """
+        bits = []
+        affected = item.get("affectedPersonas")
+        if affected:
+            bits.append(plural(int(affected), "person"))
+        impact = item.get("claimedImpact") or item.get("behavioralImpact") or {}
+        frustration = impact.get("frustration") or impact.get("frustrationDelta")
+        if isinstance(frustration, (int, float)) and frustration > 0:
+            bits.append(f"raised frustration {frustration:.2f}")
+        is_blocking = (item.get("category") == "blocker" or item.get("source") == "blockers"
+                      or str(item.get("severity")) in ("critical", "high"))
+        bits.append("blocking" if is_blocking else "not blocking")
+        return ", ".join(bits)
 
     @staticmethod
     def _finding_slide(item: dict[str, Any], index: int, issue_label: str) -> str:
@@ -3194,10 +3278,13 @@ show(0);
             f'<cite>{escape(str(evidence.get("personaName") or evidence.get("personaId") or "Synthetic user"))}</cite></blockquote>'
             for evidence in (item.get("personaEvidence") or [])[:2])
         quote_block = f'<div class="col"><h3>In the user\'s words</h3>{quotes}</div>' if quotes else ""
+        # B7: why this severity, not just what it is.
+        derivation = ReportAssembler._severity_derivation(item)
 
         return (f'<section class="slide" data-severity="{escape(severity)}">'
                 f'<span class="badge"><span class="sev sev-{escape(severity)}">{escape(severity.upper())}</span> '
-                f'&middot; {escape(flow)}</span>'
+                + (f'<span class="sev-why">&mdash; {escape(derivation)}</span> ' if derivation else "")
+                + f'&middot; {escape(flow)}</span>'
                 f'<h2>{escape(item.get("title", "Finding"))}</h2>{affected}'
                 f'<div class="finding"><div class="cols">'
                 f'<div class="col"><h3>{escape(issue_label)}</h3><p>{escape(str(issue_text))}</p></div>'

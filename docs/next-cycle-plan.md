@@ -222,7 +222,7 @@ over seven reports rather than one. Its list, plus the audit's coverage gaps:
 them positive, and states its own hit rate. H5 follows from this and BE-5 together:
 the floor rises without anything being invented.
 
-### RPT-5. Evidence and re-design in the product's own language
+### RPT-5. Evidence and re-design in the product's own language — **done**
 
 Two items the audit rates high, both with the data already in hand:
 
@@ -238,21 +238,83 @@ Two items the audit rates high, both with the data already in hand:
   already; pass them into the prompt. While there, label the frame as working code
   and offer the source beside it (C3).
 
-### RPT-6. The reader-facing lines
+**What shipped.** E7: `_draw_evidence_marker()` (PIL) outlines a finding's element
+box and numbers it directly on the crop; `_crop_element_data_uri()` gained a
+`number` param; the deck prints the same number beside the finding's title
+(`finding["evidenceNumber"]`), via one counter per report continued from
+`_synthesize_pain_points`'s vision findings into `_attach_verdict_screenshots` so
+two region crops never draw the same digit. C4: `_sample_palette()` reads real
+colours from the screenshot's own pixels (the element's region, and the page
+background sampled from the corner farthest from it) and grounds the redesign
+prompt in them instead of a generic default. C3: the panel is now labelled
+"Re-design — working code, not a mockup".
+
+**Deviation, stated rather than silently narrowed.** The plan assumed "the
+measured palette, type sizes and radii are all collected by the element walk
+already." Checked against every fixture and test in this codebase: they are not.
+journeytest-core's DOM snapshot (what `_read_snapshot_elements()` reads) carries
+no colour, font-size, or radius field anywhere this codebase has ever seen —
+only `fontPx`/`fontWeight` exist, and only on `perception.js`'s own candidate
+walk (a different pipeline, used for the scan/eye-tracking simulation, never
+threaded to a finding's `elements` list). Rather than assume an unverified
+external schema, C4 reads the one place colour verifiably is: the screenshot's
+own pixels, via PIL. Any `fontPx`/`color` an element happens to carry is still
+used opportunistically in the prompt, never assumed present.
+
+9 new tests. Full regression: 450 Python tests passing (same 3 pre-existing
+unrelated failures as baseline) at the point this landed.
+
+### RPT-6. The reader-facing lines — **done**
 
 Seven changes at the render boundary, over data already computed. Grouped because
 each is a line or two; kept separate from RPT-4 because none of them changes what the
 system *finds* — only what a reader is told.
 
-| Audit | Change |
-| --- | --- |
-| B7 | Print the severity derivation beside the chip: "medium — one person, a fifth of their patience, not blocking" |
-| F1 | Lead the summary with the judgement — what works, where it loses people, the one thing to change. Counts underneath |
-| F2 | State scope as intent up front, including **what was not reviewed** |
-| F8 | Order findings by the step at which they occurred, so they accumulate into a story; severity governs only the "fix first" slide |
-| G4 | Print `evidence_language: observed` on the introduction slide — the strongest sentence we can write about ourselves, and it never reaches the reader |
-| E11 | Run our own luminance check over the deck palette in the test suite. A contrast review that fails contrast would be embarrassing, and nothing checks it |
-| A9 | Record model id and temperature per run, and say plainly that the persona's wording is not reproducible, only its disposition (rides with BE-3) |
+| Audit | Change | Status |
+| --- | --- | --- |
+| B7 | Print the severity derivation beside the chip: "medium — one person, a fifth of their patience, not blocking" | done, see below |
+| F1 | Lead the summary with the judgement — what works, where it loses people, the one thing to change. Counts underneath | done |
+| F2 | State scope as intent up front, including **what was not reviewed** | done |
+| F8 | Order findings by the step at which they occurred, so they accumulate into a story; severity governs only the "fix first" slide | done |
+| G4 | Print `evidence_language: observed` on the introduction slide — the strongest sentence we can write about ourselves, and it never reaches the reader | done |
+| E11 | Run our own luminance check over the deck palette in the test suite. A contrast review that fails contrast would be embarrassing, and nothing checks it | done |
+| A9 | Record model id and temperature per run, and say plainly that the persona's wording is not reproducible, only its disposition (rides with BE-3) | see BE-3 |
+
+**What shipped, and one honest narrowing on B7.** F1: `_executive_summary` now
+leads with `"The one thing to change: …"` and, when one exists, `"What works:
+…"`, before any count. F2: the intro slide states `Scope: only the tasks
+below, against {url}. Other pages, flows, and states of the product were not
+exercised and are not represented in this review.` F8: `_order_by_step()`
+sorts findings by the leading zero-padded step number in their own
+`evidenceScreenshot`/`screenshotRef` filename — a real convention both this
+codebase's own captures (`personaDirector.js`'s `keepSeenImage`/
+`keepRefusedCapture`, `"003-as-they-saw-it.jpg"`) and journeytest-core's own
+action captures (`"001-click-e21-after.png"`) already use, not a guess at an
+undocumented format; a finding with no derivable step (most verdict-level
+blockers, which are claims about the whole run rather than one screenshot)
+sinks to the end via a stable sort rather than being given a fabricated
+position. Severity now governs only `_impact_analysis`'s own "what to fix
+first" ordering, untouched. G4: `evidence_language: {value}` is now printed
+verbatim on the intro slide. E11: a new test reads the deck's own generated
+CSS (not a hand-copied snapshot of it) and checks every severity chip, body
+text, and the title slide against WCAG AA's 4.5:1 — all pass today, so this
+is a regression guard, not a fix.
+
+B7's shipped version is narrower than the audit's example. "Medium — one
+person, a fifth of their patience, not blocking" implies a severity actually
+*derived* from an affected count and a patience fraction by a real formula;
+no such formula exists anywhere in this codebase today — severity mostly
+comes from whichever source produced the finding (the vision worker's own
+judgement, or the max of a synthesized group's members), not a computation
+this code performs. `_severity_derivation()` reports the real numbers a
+finding actually carries (affected-person count, a frustration delta when
+`claimedImpact`/`behavioralImpact` is present, and blocking/not-blocking) and
+degrades to whichever subset is real for that finding's source, rather than
+inventing a "fifth of their patience" figure with no computation behind it.
+
+Four new tests (plus two existing tests updated for the reordered summary
+text and the new redesign caption). Full regression at this point: 454 Python
+tests passing (same 3 pre-existing unrelated failures as baseline).
 
 
 ## Track B — the backend
