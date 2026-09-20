@@ -158,3 +158,58 @@ def test_a_run_naming_no_hat_sends_no_hatExtras_at_all(tmp_path, monkeypatch):
 
     assert store.get_job(job["job_id"])["status"] == "succeeded"
     assert "hatExtras" not in captured["payload"]
+
+
+def test_cap5_a_hats_grants_reach_the_run_payload_for_a_mounted_tool_to_read(tmp_path, monkeypatch):
+    """CAP-5: what a mounted extra faculty (the developer tool, say) configures
+    itself with -- grants.developer.allowCommands -- travels with the run the
+    same way adds does, resolved once from the hat registry."""
+    import json as json_module
+
+    from apps.api.executor import JobExecutor
+    from apps.api.hats import HatRegistry
+    from apps.api.store import Store
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'control.db'}")
+    hat = HatRegistry(f"sqlite:///{tmp_path / 'control.db'}").put(
+        workspace_id="local", label="The integrator", adds=["developer"],
+        grants={"developer": {"allowCommands": ["curl"], "hosts": ["example.com"]}})
+
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}})
+
+    captured = {}
+
+    def dispatch(req, timeout):
+        captured["payload"] = json_module.loads(req.data)
+
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return self.body
+        return Response(json_module.dumps({
+            "runId": captured["payload"]["runId"], "runStatus": "completed",
+            "profileId": "persona_ada", "simulationProfile": captured["payload"]["profile"],
+            "verdict": {"status": "passed", "criteria": [], "blockers": [], "uxFindings": [],
+                       "suggestedImprovements": []},
+            "artifacts": {"screenshots": [], "snapshots": []}}).encode())
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.delenv("EYESON_WORKER_URL", raising=False)
+    monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": [persona["artifact_id"]], "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": [persona["artifact_id"]],
+                    "tasks": ["Buy an item"], "hatId": hat["hat_id"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+
+    assert store.get_job(job["job_id"])["status"] == "succeeded"
+    assert captured["payload"]["hatExtras"] == ["developer"]
+    assert captured["payload"]["grants"]["developer"]["allowCommands"] == ["curl"]

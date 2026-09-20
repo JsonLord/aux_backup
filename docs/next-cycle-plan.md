@@ -1016,7 +1016,7 @@ authenticated session is read as ordinary, not an expiry. Full regression:
 established baseline), 274 Node tests passing (up from 272 before this
 track).
 
-### CAP-5. Hat 3 — developer mode
+### CAP-5. Hat 3 — developer mode — **done**
 
 `FETCH`, `INSPECT`, `RUN`, `AUTHENTICATE`, mounted as `DeveloperTool` alongside
 `BrowserTool` with `realWorldSideEffects = true`. **The safety design is the
@@ -1029,6 +1029,60 @@ with the run; an environment built empty rather than inherited from a worker
 holding every provider key; egress only to declared hosts through `privateHost()`;
 output through `sanitizeUntrustedText()`; and every invocation in the timeline like
 a click.
+
+**What shipped, every rail from the table.** `services/journey-worker/node/src/
+developerTool.js`'s `DeveloperTool extends Tool`, registered with CAP-2's own
+registry (`registerFaculty("developer", factory)`) rather than hardcoded into
+`faculty.js` — the two stay decoupled, and any future hat's tool registers the
+same way. **Off unless the run asks**: the factory returns no tool at all when
+`grants.developer.allowCommands` is empty (`facultyWith` was extended to accept
+a falsy factory return as "do not mount", a small, direct consequence of this
+rail), so a hat without commands never mounts `DeveloperTool` — proven by a test
+asserting `RUN`/`FETCH` are *absent* from `actionTypes`, not merely refused.
+**Allowlist, constructed argv**: `_run` calls `execFile(command, args)` with an
+array, the same shape `agentBrowser.js`'s `runOnce` already uses — no shell, so
+no pipes, substitution or `&&`. **Scratch directory per run**: built beside the
+run's own artifact directory in `journeytest.js`
+(`${outputDir}/developer-scratch/${runId}`, the same "run-scoped, destroyed with
+the run" shape `_run_session_dir()` uses on the Python side), removed in the
+run's own `finally` block regardless of whether anything used it; every FETCH/
+INSPECT/RUN path is resolved and checked against it before use, refusing `../`
+escapes. **Environment built empty**: `execFile(..., { env: {} })`, never
+`...process.env` — verified with a real child process, not a mock: the test sets
+a secret in the *test's own* environment and asserts it does not reach a real
+subprocess's stdout. **Egress to declared hosts only**: every FETCH/AUTHENTICATE
+target goes through `privateHost()` first (blocking `127.0.0.1`, link-local,
+and the RFC1918 ranges) and then, when the run declared specific hosts, through
+that allowlist too — both proven against a real refusal, not a mock, plus one
+proving a *non-private* host outside the declared list is refused on its own
+account. **Output is untrusted input**: RUN's stdout/stderr pass through
+`sanitizeUntrustedText()` before reaching the timeline. **Every invocation is
+evidence**: `processAction` records action type, target, duration and outcome
+into the timeline as a `developer.invocation` event on every path, success or
+failure, via one `record()` closure so no branch can forget to call it.
+
+Wired end to end, not only callable in isolation: `PersonaDirector` accepts
+`grants`/`scratchDir` and passes them through `facultyWith`; `journeytest.js`
+builds the scratch directory and reads `input.grants`; `executor.py` resolves a
+job's hat into `hatExtras` *and* `grants` (CAP-2 only threaded `adds`; this
+extends the same resolution to also read `grants`) and sends both on the
+`/v1/runs` payload.
+
+Ten new tests in `developerTool.test.js`, one per rail from the detail spec's
+own list plus two beyond it: a command off the allowlist refused, a path
+outside the scratch directory refused, the child environment holding no parent
+key (against a real subprocess), a private address refused for both FETCH and
+AUTHENTICATE, a host outside the declared list refused independent of
+privateHost, a hat with no `allowCommands` mounting no RUN/FETCH action at all
+(not refused — absent), a hat that does grant them mounting the tool appended
+after browsing, every invocation recorded as evidence, and a full FETCH-then-
+INSPECT round trip against a real local HTTP fixture server proving the
+"done when" clause directly: download what a page offers, verify by checksum
+that it is what was claimed. Plus one Python test proving a hat's `grants`
+(not only its `adds`) reach the run payload. `npm run check` now also checks
+`developerTool.js`. Full regression: 487 Python tests passing (same 3
+pre-existing unrelated failures as baseline), 292 Node tests passing (up from
+283).
 
 ### CAP-6. Hat 4 — role hats, and the gate that rejects most of them
 

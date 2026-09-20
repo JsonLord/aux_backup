@@ -163,21 +163,24 @@ class JobExecutor(ReportAssembler):
         redact_selectors = list(data.get("redactSelectors") or []) if session_state_path else []
         # CAP-2: a run may name a hat by id rather than listing its extra
         # faculties inline. Resolved here, once, from this job's own workspace --
-        # the hat's `adds` is the only part of its record a run needs; `roles`
-        # and `grants` are for CAP-5/CAP-6 to read once a hat actually has any.
-        # A hat id that does not resolve is dropped rather than failing the run:
-        # the worker's own facultyWith() is where an unregistered *faculty name*
-        # is refused loudly, and a stale/mistyped hat id is a different, milder
-        # failure -- the run falls back to browsing rather than not starting.
+        # `adds` says which extra faculties to mount, `grants` is what a
+        # mounted one (CAP-5's developer tool, say) reads to configure itself
+        # (e.g. grants.developer.allowCommands). A hat id that does not
+        # resolve is dropped rather than failing the run: the worker's own
+        # facultyWith() is where an unregistered *faculty name* is refused
+        # loudly, and a stale/mistyped hat id is a different, milder failure
+        # -- the run falls back to browsing rather than not starting.
         hat_extras: list[str] = []
+        hat_grants: dict[str, Any] = {}
         hat_id = str(data.get("hatId") or "").strip()
         if hat_id:
             try:
                 from .hats import HatRegistry
                 hat = HatRegistry().get(hat_id, workspace_id=job.get("workspace_id") or "local")
                 hat_extras = list(hat.get("adds") or []) if hat else []
+                hat_grants = dict(hat.get("grants") or {}) if hat else {}
             except Exception:  # noqa: BLE001 - a hat registry problem must not fail a run over browsing
-                hat_extras = []
+                hat_extras, hat_grants = [], {}
         if worker_url:
             # BE-5: a bounded pool rather than one persona at a time -- a run costs
             # 213-516s, so a three-person cohort sequentially cost 20 minutes. Sized
@@ -196,7 +199,7 @@ class JobExecutor(ReportAssembler):
                 with ThreadPoolExecutor(max_workers=pool_size) as pool:
                     futures = {pool.submit(self._dispatch_persona_run, job, data, tasks, browser_safety,
                                            run_models, session_state_path, issued, redact_selectors,
-                                           worker_url, persona, index, hat_extras): index
+                                           worker_url, persona, index, hat_extras, hat_grants): index
                               for index, persona in enumerate(personas)}
                     # Waited out to completion even after the first failure --
                     # cancelling in-flight requests would race the `finally` below,
@@ -489,8 +492,8 @@ class JobExecutor(ReportAssembler):
     def _dispatch_persona_run(self, job: dict[str, Any], data: dict[str, Any], tasks: list[str],
                               browser_safety: dict[str, Any], run_models: Any, session_state_path: str | None,
                               issued: dict[str, Any], redact_selectors: list[str], worker_url: str,
-                              persona: dict[str, Any], index: int, hat_extras: list[str] | None = None
-                              ) -> dict[str, Any]:
+                              persona: dict[str, Any], index: int, hat_extras: list[str] | None = None,
+                              hat_grants: dict[str, Any] | None = None) -> dict[str, Any]:
         """One persona's run against the Journey worker -- unchanged from the
         sequential loop this was extracted from (BE-5), only parameterised so a
         bounded thread pool can call it concurrently. `index` replaces the old
@@ -520,7 +523,11 @@ class JobExecutor(ReportAssembler):
             # registry above by id. Appended to browsing on the worker side
             # (facultyWith), never a replacement for it; absent when the job
             # named no hat, which is a no-op there.
-            **({"hatExtras": hat_extras} if hat_extras else {})}).encode()
+            **({"hatExtras": hat_extras} if hat_extras else {}),
+            # CAP-5: what a mounted extra faculty configures itself with (e.g.
+            # grants.developer.allowCommands) -- absent when the hat granted
+            # nothing, which is a no-op on the worker side too.
+            **({"grants": hat_grants} if hat_grants else {})}).encode()
         call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload,
                                headers={"content-type": "application/json"}, method="POST")
         try:

@@ -393,6 +393,15 @@ async function runWithJourneyTest(input) {
   // whether this run started signed in -- it is what CAP-4's mid-run expiry
   // check needs to tell "logged out" apart from "was always logged out".
   const statePath = resolveSessionState(input);
+  const outputDir = input.artifactDirectory || process.env.JOURNEY_ARTIFACT_ROOT || "/tmp/aux-journeys";
+  // CAP-5: beside the run's own artifact directory, the same "run-scoped,
+  // destroyed with the run" shape _run_session_dir() uses on the Python side.
+  // Built for every run, not only ones with a developer hat, since a factory
+  // that finds no grants simply never mounts the tool -- creating an unused
+  // empty directory is cheaper than threading "does this run need one"
+  // through this function twice.
+  const developerScratchDir = path.join(path.resolve(outputDir), "developer-scratch",
+    String(input.runId || `run-${Date.now()}`));
   let director;
   let personaActorFn = null;
   if (directorKind() === "pi") {
@@ -410,6 +419,10 @@ async function runWithJourneyTest(input) {
       // its own hat registry and sent with the run by name -- never a
       // replacement for browsing, only ever appended to it (facultyWith).
       hatExtras: input.hatExtras,
+      // CAP-5: the hat's own grants (e.g. grants.developer.allowCommands) and
+      // this run's scratch directory. Off by default: a hat that grants
+      // nothing under "developer" mounts no developer tool at all.
+      grants: input.grants, scratchDir: developerScratchDir,
       actor: personaActorFn = llmActor({ model: modelId, apiKey, baseUrl,
         // The reflection is a factual comparison rather than a performance, and
         // scoring persona adherence is smaller still, so both run on a smaller,
@@ -440,7 +453,6 @@ async function runWithJourneyTest(input) {
       maxSteps: stepBudget(input.tasks),
     });
   }
-  const outputDir = input.artifactDirectory || process.env.JOURNEY_ARTIFACT_ROOT || "/tmp/aux-journeys";
   // journeytest-core keeps only `text` content blocks when it records an
   // assistant turn, so the model's real thinking never reaches the run
   // artifacts. Capture it from the completions responses instead.
@@ -491,6 +503,11 @@ async function runWithJourneyTest(input) {
     stopRevealKeeper();
     stopViewportStream();
     setActiveSession("");
+    // CAP-5: destroyed with the run, whether or not a developer tool actually
+    // mounted -- best-effort, because a directory that never got used (or
+    // never got created at all) is not worth failing the run's own result
+    // over.
+    await fs.promises.rm(developerScratchDir, { recursive: true, force: true }).catch(() => {});
   }
   return { ...result, profileId: input.profile.id, simulationProfile: input.profile,
     browserSession: sessionName,

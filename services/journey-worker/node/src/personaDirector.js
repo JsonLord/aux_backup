@@ -34,6 +34,11 @@ const path = require("node:path");
 const { AdherenceGate } = require("./adherence");
 const { BehaviorController } = require("./behavior");
 const { browsingFaculty, facultyWith } = require("./faculty");
+// CAP-5: registers "developer" with the faculty registry as a side effect of
+// being required -- loaded here, once, so any run that names it in
+// hatExtras finds it registered without this module needing to know
+// anything about what developer mode actually does.
+require("./developerTool");
 const { PersonaMemoryBank } = require("./memoryBank");
 const { PerceptionClient, frameImage, intoCaptureSpace, lookAtPage,
   motionFramesFrom } = require("./perception");
@@ -223,7 +228,7 @@ class PersonaDirector {
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
     scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
     frames = recentFrames, frame = latestFrame, faculty, gate, memory,
-    redactSelectors, authenticatedSession = false, hatExtras } = {}) {
+    redactSelectors, authenticatedSession = false, hatExtras, grants, scratchDir } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -270,7 +275,11 @@ class PersonaDirector {
     // browsing floor and that floor plus a hat's named extras, never a
     // replacement for either.
     this.faculty = faculty || facultyWith(hatExtras || [], { abilities: this.abilities,
-      seed: Number(this.profile.behavior?.seed) || 1, memory: this.memory || undefined });
+      seed: Number(this.profile.behavior?.seed) || 1, memory: this.memory || undefined,
+      // CAP-5: a hat's own grants (e.g. grants.developer.allowCommands) and
+      // this run's scratch directory -- read by a registered factory, never
+      // by this class, which stays ignorant of what any particular hat needs.
+      grants, scratchDir });
     // An action that does not sound like this person is sent back with the
     // reason, TinyTroupe-style. Without a judge the gate is simply off.
     this.gate = gate || new AdherenceGate({ judge: actor.judgeAdherence });

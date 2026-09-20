@@ -348,7 +348,14 @@ function facultyWith(extras = [], options = {}) {
     if (!factory) {
       throw new Error(`no faculty registered for "${name}" -- a hat cannot claim a capability nothing implements`);
     }
-    faculty.tools.push(factory(options));
+    // CAP-5's own rail: "off unless the run asks, or facultyForHat does not
+    // mount the tool at all". A factory that finds nothing to configure it
+    // with (no allowCommands, say) returns a falsy value here rather than a
+    // Tool that exists only to refuse everything -- mounted-then-guarded is
+    // one bug from ungated, and this is how a factory stays not-mounted
+    // instead.
+    const tool = factory(options);
+    if (tool) faculty.tools.push(tool);
   }
   return faculty;
 }
