@@ -229,12 +229,40 @@ passing (same 3 pre-existing unrelated failures as baseline), 277 Node tests
 unaffected (this track touched only `services/report_service/assembler.py` and
 `apps/api/executor.py`).
 
-### RPT-3. Say how you would know it worked
+### RPT-3. Say how you would know it worked — **partly done**
 
 Nothing in the tree does this. Every finding is a falsifiable prediction: fix this
 and the persona's expectation holds next run. Emit a re-test line per finding — the
 persona, the task, the expectation that should hold — and re-run it against the
 fixed page. No human review can close that loop; it is the thing to be known for.
+
+**What shipped.** `ReportAssembler._retest_prediction(finding, persona_names,
+tasks)` states, per finding, exactly who it should be re-run against and what
+should no longer happen: *"Falsifiable: on a re-run against the fixed page,
+{persona(s)} attempting "{task}" should no longer produce "{title}". If it does,
+the fix did not hold."* Wired onto every finding in `executor.py` right after F8's
+step-ordering (`finding["retest"]`, set only when a persona can actually be
+attributed -- the placeholder "No pain points detected"/"Journey ended early"
+entries and anything with no personaId get none, honestly, rather than a
+prediction naming nobody). Printed on both HTML surfaces: the slide deck (a
+"How you would know it worked" panel beside grounding) and the flat
+`_presentation` list.
+
+**Not attempted, stated rather than silently dropped: "re-run it against the
+fixed page."** The line names what a re-run would check; nothing here triggers
+one. Actually closing the loop needs a live browser against a real, already-fixed
+target and a mechanism to schedule and correlate that follow-up run against the
+finding it verifies -- a new job type and a live target this sandbox cannot reach
+from a report-generation call, in the same category as BE-4's noise floor. The
+falsifiable prediction is the buildable, testable half of this section; the
+automated re-run is not, here.
+
+Three new tests: the prediction's shape (persona named, task named, title named,
+several affected personas grouped rather than only the first one silently, no
+prediction when nobody is attributable), an end-to-end `combined_test` run
+reaching `critical_pain_points[].retest`, and both HTML surfaces printing it.
+Full regression: 466 Python tests passing (same 3 pre-existing unrelated
+failures as baseline), 277 Node tests unaffected (Python-only change).
 
 ### RPT-4. Report yield — what gets found
 

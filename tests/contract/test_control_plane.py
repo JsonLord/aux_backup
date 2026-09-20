@@ -784,6 +784,63 @@ def test_persona_narration_carries_the_mental_model_end_to_end(tmp_path, monkeyp
     assert "held for 2 of 3" in narration["mentalModel"]
 
 
+# --- RPT-3: how you would know it worked ----------------------------------------
+
+def test_rpt3_a_finding_states_a_falsifiable_retest_prediction():
+    """Every finding is a falsifiable prediction: fix this, and an identifiable
+    persona's expectation should hold on the next run. No human review closes
+    that loop -- a stated, checkable prediction is what does."""
+    finding = {"title": "Promised more than it did: Start 3-day free trial",
+              "affectedPersonaIds": ["p1"]}
+    retest = JobExecutor._retest_prediction(finding, {"p1": "Friedrich Wolf"}, ["Buy an item"])
+
+    assert "Friedrich Wolf" in retest
+    assert "Buy an item" in retest
+    assert "Promised more than it did: Start 3-day free trial" in retest
+    assert "Falsifiable" in retest
+
+    # Several affected personas: named as a group, not just the first one silently.
+    several = JobExecutor._retest_prediction(
+        {"title": "x", "affectedPersonaIds": ["p1", "p2"]}, {"p1": "Ada", "p2": "Lin"}, ["Buy an item"])
+    assert "each of the 2 affected personas" in several
+
+    # Nobody to re-run it against: no prediction rather than a fabricated one.
+    assert JobExecutor._retest_prediction({"title": "No pain points detected"}, {}, ["Buy an item"]) == ""
+
+
+def test_rpt3_the_retest_prediction_is_wired_into_the_report_end_to_end(tmp_path, monkeypatch):
+    verdict = {"status": "failed", "confidence": "high", "summary": "Blocked.",
+              "criteria": [{"id": "tasks-completed", "result": "not-met"}],
+              "blockers": [{"id": "b1", "severity": "major", "category": "blocker",
+                            "title": "Checkout never confirmed", "description": "The confirm button did nothing."}],
+              "uxFindings": [], "suggestedImprovements": []}
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed", "verdict": verdict,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    }, tasks=("Buy an item",))
+
+    assert completed["status"] == "succeeded"
+    blocker = next(item for item in report["critical_pain_points"] if item["title"] == "Checkout never confirmed")
+    assert "Falsifiable" in blocker["retest"]
+    assert "Buy an item" in blocker["retest"]
+    assert "Checkout never confirmed" in blocker["retest"]
+
+
+def test_rpt3_the_retest_line_is_printed_on_the_slide_and_in_the_presentation():
+    slide = JobExecutor._finding_slide({"title": "Generic link text", "summary": "s",
+                                        "retest": "Falsifiable: on a re-run, Ada should see this hold."},
+                                       1, "Observed user issue")
+    assert "How you would know it worked" in slide
+    assert "Ada should see this hold" in slide
+
+    presentation = JobExecutor._presentation({
+        "critical_pain_points": [{"title": "Generic link text", "severity": "medium", "category": "ux",
+                                  "summary": "s", "retest": "Falsifiable: on a re-run, Ada should see this hold."}],
+        "elements_to_preserve": [], "impact_analysis": {}, "url": "https://example.com",
+        "executive_summary": "", "evidence_language": "observed", "limitations": []})
+    assert "Ada should see this hold" in presentation
+
+
 def test_slide_deck_says_predicted_when_no_browser_evidence_was_collected():
     """Honesty about evidence class: without a live run the deck must claim no more
     than a heuristic walkthrough does."""

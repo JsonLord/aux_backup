@@ -206,6 +206,38 @@ class ReportAssembler:
         return None
 
     @classmethod
+    def _retest_prediction(cls, finding: dict[str, Any], persona_names: dict[str, str],
+                           tasks: list[str]) -> str:
+        """RPT-3: every finding here is a falsifiable prediction -- fix this, and
+        an identifiable persona's expectation should hold on the next run. No
+        human review closes that loop; a stated, checkable prediction is the
+        thing to be known for, per finding, not asserted once for the report as
+        a whole.
+
+        Returns "" when no persona can be attributed to the finding (the
+        placeholder "No pain points detected"/"Journey ended early" entries, and
+        anything a source built with no personaId) -- there is nobody to re-run
+        it against, so nothing here would be falsifiable.
+
+        Deliberately does not attempt the "re-run it against the fixed page"
+        half of this section on its own: that is a live browser run against a
+        target this codebase cannot reach from a report-generation call, and
+        doing so would need its own job type and a real target to verify
+        against, not something this method can respond for.
+        """
+        persona_ids = finding.get("affectedPersonaIds") or (
+            [finding["personaId"]] if finding.get("personaId") else [])
+        names = [persona_names.get(pid, pid) for pid in persona_ids if pid]
+        if not names:
+            return ""
+        who = names[0] if len(names) == 1 else f"each of the {plural(len(names), 'affected persona')}"
+        task = tasks[0] if len(tasks) == 1 else ("one of the configured tasks" if tasks else "the same task")
+        title = str(finding.get("title") or "this issue").strip()
+        return (f"Falsifiable: on a re-run against the fixed page, {who} attempting "
+                f"“{task}” should no longer produce “{title}”. If it "
+                f"does, the fix did not hold.")
+
+    @classmethod
     def _order_by_step(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
         """So findings accumulate into a story -- the order a reader would have
         hit them in, walking the run themselves -- rather than a grab-bag severity
@@ -3050,9 +3082,12 @@ class ReportAssembler:
                 f'{escape(str(evidence.get("quote", ""))[:400])}'
                 f'<br><span style="opacity:.6;font-size:.8em">— {escape(str(evidence.get("personaName") or "Synthetic user"))}</span>'
                 f'</blockquote>' for evidence in (item.get("personaEvidence") or [])[:2])
+            # RPT-3: a falsifiable prediction, not just an assertion.
+            retest = (f'<p style="opacity:.7;font-size:.85em"><strong>How you would know it worked:</strong> '
+                     f'{escape(str(item["retest"]))}</p>' if item.get("retest") else "")
             return (f'<li>{marker}<strong>[{badge}] {escape(item["title"])}</strong> '
                     f'<span style="opacity:.6">({category})</span><br>'
-                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{grounding}{quotes}{image}</li>')
+                    f'{escape(item.get("summary") or item.get("evidence") or "")}{recommendation}{grounding}{retest}{quotes}{image}</li>')
 
         findings = "".join(render_finding(item) for item in report.get("critical_pain_points", [])) or "<li>No findings.</li>"
         preserve_items = "".join(
@@ -3408,6 +3443,11 @@ show(0);
         grounding = ('<p class="grounding"><strong>Grounded in:</strong> ' + "; ".join(
             f'{escape(str(ref.get("source", "")))} &mdash; {escape(str(ref.get("principle") or ref.get("title") or "")) }'
             for ref in references) + "</p>") if references else ""
+        # RPT-3: how a reader would know this is fixed -- a falsifiable
+        # prediction, not just an assertion, and checkable without a human
+        # judgement call about what "fixed" would even mean here.
+        retest = (f'<p class="grounding"><strong>How you would know it worked:</strong> '
+                 f'{escape(str(item["retest"]))}</p>' if item.get("retest") else "")
 
         # Current design | Re-design, the pairing a redesign proposal is read in.
         panels = []
@@ -3457,4 +3497,4 @@ show(0);
                 + (f'<div class="col"><h3>Recommendations: design solutions</h3><ul>{changes}</ul></div>'
                    if changes else "")
                 + quote_block
-                + f'</div><div class="evidence">{shots}</div></div>{grounding}</section>')
+                + f'</div><div class="evidence">{shots}</div></div>{grounding}{retest}</section>')

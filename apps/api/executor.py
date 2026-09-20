@@ -398,6 +398,13 @@ class JobExecutor(ReportAssembler):
         # of a severity-shuffled grab-bag. Severity still governs impact_analysis's
         # own "what to fix first" ordering below, untouched by this.
         findings = self._order_by_step(findings)
+        # RPT-3: every finding is a falsifiable prediction -- stated per finding
+        # so closing the loop needs no human judgement call about what "fixed"
+        # would look like, only a re-run to check it against the fixed page.
+        for finding in findings:
+            retest = self._retest_prediction(finding, persona_names, tasks)
+            if retest:
+                finding["retest"] = retest
         sources = {item.get("source", "") for thoughts in thoughts_by_persona.values() for item in thoughts}
         if any(source.startswith("persona.") for source in sources):
             limitations.append(
