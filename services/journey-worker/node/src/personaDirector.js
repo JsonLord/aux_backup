@@ -33,7 +33,7 @@ const path = require("node:path");
 
 const { AdherenceGate } = require("./adherence");
 const { BehaviorController } = require("./behavior");
-const { browsingFaculty } = require("./faculty");
+const { browsingFaculty, facultyWith } = require("./faculty");
 const { PersonaMemoryBank } = require("./memoryBank");
 const { PerceptionClient, frameImage, intoCaptureSpace, lookAtPage,
   motionFramesFrom } = require("./perception");
@@ -223,7 +223,7 @@ class PersonaDirector {
   constructor({ actor, profile, model, maxSteps = DEFAULT_MAX_STEPS, sleepFn = sleep,
     scale = timeScale(), perception = new PerceptionClient(), walk = lookAtPage,
     frames = recentFrames, frame = latestFrame, faculty, gate, memory,
-    redactSelectors, authenticatedSession = false } = {}) {
+    redactSelectors, authenticatedSession = false, hatExtras } = {}) {
     if (typeof actor !== "function") throw new Error("PersonaDirector requires an actor");
     this.name = "persona";
     this.model = model;
@@ -265,7 +265,11 @@ class PersonaDirector {
           // rewriter copied it into a lesson verbatim.
           vocabulary: browsingFaculty().actionTypes.join(", ") })
       : memory;
-    this.faculty = faculty || browsingFaculty({ abilities: this.abilities,
+    // CAP-2: an explicit `faculty` still wins outright (tests, and any future
+    // caller that builds its own) -- this only decides between the plain
+    // browsing floor and that floor plus a hat's named extras, never a
+    // replacement for either.
+    this.faculty = faculty || facultyWith(hatExtras || [], { abilities: this.abilities,
       seed: Number(this.profile.behavior?.seed) || 1, memory: this.memory || undefined });
     // An action that does not sound like this person is sent back with the
     // reason, TinyTroupe-style. Without a judge the gate is simply off.

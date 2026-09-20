@@ -770,7 +770,7 @@ Three rules, all of which the codebase already models:
 3. **The passthrough is bounded.** Rate-limited, size-capped, a connectivity check
    rather than a chat product.
 
-### CAP-2. The hat registry — additive only
+### CAP-2. The hat registry — additive only — **partly done**
 
 **`browsingFaculty()` does not change, and is not renamed.** Browsing is what every
 job so far needs and it works; it is the floor every hat stands on, not one option
@@ -809,6 +809,64 @@ The worksheet's **capability manifest** belongs here: a report should state whic
 hat produced a finding and what that hat could reach, because "I could not find the
 retention policy" means different things from a browser alone and from a browser
 plus a docs search.
+
+**What shipped.** `facultyWith(extras, {abilities, seed, memory})`
+(`services/journey-worker/node/src/faculty.js`) exactly as specified: calls
+`browsingFaculty()` first and only ever appends, so "a hat with no extras is
+byte-for-byte today's faculty" is provable by construction (the empty-extras case
+literally calls `browsingFaculty()` and returns it unmodified) rather than merely
+intended. A `registerFaculty(name, factory)`/`FACULTY_REGISTRY` pair is where a
+future hat's tool factory would register itself -- empty today, since nothing
+past browsing has been built yet (CAP-5 would be the first real registrant). An
+extra named but not registered throws rather than silently producing a hat with
+fewer capabilities than it claims. `PersonaDirector` takes an optional
+`hatExtras` and calls `facultyWith(hatExtras, ...)` instead of `browsingFaculty()`
+directly when given one, wired through from `journeytest.js`'s `input.hatExtras`,
+so the registry is reachable from a real run today, not just callable in
+isolation.
+
+The persisted half: `apps/api/hats.py`'s `HatRegistry`, the same SQLite-adapter
+shape `CredentialStore`/`ModelSettingsStore` already use -- `put`/`get`/
+`list_hats`/`delete`, workspace-scoped, storing exactly the record shape this
+section specified (`adds`/`roles`/`grants`/`profileDefaults`, no field anywhere
+that could express a removal). `executor.py`'s `_combined_test` resolves a job's
+`hatId` (when given one) into that hat's `adds` and sends it as `hatExtras` on
+the `/v1/runs` payload -- a hat id that fails to resolve falls back to plain
+browsing rather than failing the run, deliberately milder than an unregistered
+*faculty name* at `facultyWith()`, which still refuses loudly on the worker side.
+
+**Deliberately not attempted here: validating a hat's `adds` against the
+worker's live `FACULTY_REGISTRY`.** They are two different processes in two
+different languages; asking the worker to validate on every hat write would
+make `hats.py` a second place a hat's real capabilities could drift from what
+the worker actually has registered -- the exact failure this section exists to
+prevent structurally. A hat can be created naming a faculty nothing implements
+yet; the run that tries to use it is where that surfaces, loudly, via
+`facultyWith()`'s own refusal, which is the one place drift cannot happen
+because it is the only code path that builds a faculty at all.
+
+**Not attempted: the capability manifest, and a UI for hat CRUD.** Both are real
+gaps, stated rather than narrowed silently. The capability manifest ("which hat
+produced a finding and what it could reach") has nothing to attach to yet --
+every run today uses either plain browsing or plain browsing plus a hat whose
+only registered extra is a test fixture, so a manifest field would say
+"browsing" on every finding in every real report until CAP-5 gives it something
+else to say. A Gradio panel for creating/listing/deleting hats (the natural next
+piece of CAP-3's own front-tab work) was not built for the same reason: CRUD
+against an empty capability list has limited value before there is a second
+capability to add.
+
+Fourteen new tests: four in `faculty.test.js` (no-extras equivalence, an
+unregistered name refused, an extra appended never prepended, an appended tool
+unable to shadow browsing even when it tries), two in `personaDirector.test.js`
+(`hatExtras` reaching the faculty, and its absence leaving the faculty
+unchanged), and eight Python (`test_hat_registry.py`: label required, `adds`
+type-checked, an empty-adds hat matches the plain-browsing shape, a hat records
+only what it adds, workspace scoping for listing and for get/delete, and two
+executor-level tests proving a resolved `hatId` reaches the run payload as
+`hatExtras` while no `hatId` sends no `hatExtras` field at all). Full
+regression: 486 Python tests passing (same 3 pre-existing unrelated failures as
+baseline), 283 Node tests passing (up from 277).
 
 ### CAP-3. Front-tab links — **partly done**
 

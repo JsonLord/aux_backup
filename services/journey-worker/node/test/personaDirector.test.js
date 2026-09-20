@@ -2150,3 +2150,34 @@ test("the same page with no authenticated session is read as ordinary, not an ex
   assert.equal(recorder.events.find((event) => event.type === "journey.session_expired"), undefined,
     "a signed-out run seeing an ordinary sign-in link has no session to lose");
 });
+
+// --- CAP-2: hatExtras reaches the faculty, additive only -----------------------
+
+test("hatExtras is appended to the browsing faculty, never in place of it", () => {
+  const { registerFaculty, FACULTY_REGISTRY, Tool } = require("../src/faculty");
+  class FakeTool extends Tool {
+    constructor() { super({ name: "test-cap2-tool" }); }
+    actionsDefinitionsPrompt() { return "- PING: does nothing"; }
+    get actionTypes() { return ["PING"]; }
+    async processAction() { return { handled: true, acted: false }; }
+  }
+  registerFaculty("test-cap2-extra", () => new FakeTool());
+  try {
+    const director = new PersonaDirector({ profile: impatient, sleepFn: async () => {},
+      hatExtras: ["test-cap2-extra"],
+      actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }) });
+
+    assert.ok(director.faculty.actionTypes.includes("PING"), "the hat's extra capability is present");
+    assert.ok(director.faculty.actionTypes.includes("CLICK"), "browsing is still there underneath it");
+  } finally {
+    FACULTY_REGISTRY.delete("test-cap2-extra");
+  }
+});
+
+test("with no hatExtras, the faculty is unchanged from before CAP-2", () => {
+  const director = new PersonaDirector({ profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }) });
+
+  assert.ok(director.faculty.actionTypes.includes("CLICK"));
+  assert.ok(!director.faculty.actionTypes.includes("PING"));
+});

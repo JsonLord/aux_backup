@@ -7,7 +7,8 @@
 const test = require("node:test");
 const assert = require("node:assert/strict");
 
-const { BrowserTool, Faculty, JourneyTool, browsingFaculty } = require("../src/faculty");
+const { BrowserTool, Faculty, JourneyTool, Tool, browsingFaculty,
+  facultyWith, registerFaculty, FACULTY_REGISTRY } = require("../src/faculty");
 const { ACTION_TYPES, ACTION_VOCABULARY } = require("../src/personaActor");
 
 function fakeBrowser({ box, clickThrows = false } = {}) {
@@ -165,4 +166,61 @@ test("a hand that could not be aimed says so instead of returning nothing", asyn
   const pointer = recorder.events.find((event) => event.type === "persona.pointer");
   assert.ok(pointer, "a measurement this run did not make is still a thing to record");
   assert.equal(pointer.data.measured, false);
+});
+
+// --- CAP-2: the hat registry is additive only -----------------------------------
+
+test("facultyWith no extras is exactly what browsingFaculty would have built", () => {
+  const faculty = facultyWith([], { abilities: {}, seed: 1 });
+
+  assert.equal(faculty.tools.length, 2, "BrowserTool and JourneyTool, nothing else");
+  assert.deepEqual(faculty.actionTypes, browsingFaculty({ abilities: {}, seed: 1 }).actionTypes);
+  assert.ok(faculty.tools[0] instanceof BrowserTool, "browsing keeps first claim");
+  assert.ok(faculty.tools[1] instanceof JourneyTool);
+});
+
+test("a name nothing registered is refused, not silently skipped", () => {
+  assert.throws(() => facultyWith(["nonexistent-hat"], { abilities: {} }), /no faculty registered/);
+});
+
+test("an extra faculty is appended, never prepended or replacing browsing", () => {
+  class FakeDeveloperTool extends Tool {
+    constructor() { super({ name: "developer", realWorldSideEffects: true }); }
+    actionsDefinitionsPrompt() { return "- FETCH: download a file"; }
+    get actionTypes() { return ["FETCH"]; }
+    async processAction() { return { handled: true, acted: true }; }
+  }
+  registerFaculty("test-developer", () => new FakeDeveloperTool());
+
+  const faculty = facultyWith(["test-developer"], { abilities: {}, seed: 1 });
+
+  assert.equal(faculty.tools.length, 3);
+  assert.ok(faculty.tools[0] instanceof BrowserTool, "browsing still claims the first slot");
+  assert.ok(faculty.tools[1] instanceof JourneyTool);
+  assert.ok(faculty.tools[2] instanceof FakeDeveloperTool, "the extra is appended last");
+  assert.ok(faculty.actionTypes.includes("FETCH"));
+  assert.ok(faculty.actionTypes.includes("CLICK"), "browsing's own actions are still all present");
+
+  FACULTY_REGISTRY.delete("test-developer");
+});
+
+test("an appended tool cannot shadow a browsing action even if it tries to claim one", async () => {
+  class ClaimsEverythingTool extends Tool {
+    constructor() { super({ name: "greedy" }); }
+    actionsDefinitionsPrompt() { return ""; }
+    get actionTypes() { return ["CLICK"]; }
+    async processAction() { return { handled: true, acted: true, url: "greedy-tool-handled-it" }; }
+  }
+  registerFaculty("test-greedy", () => new ClaimsEverythingTool());
+  const faculty = facultyWith(["test-greedy"], { abilities: {}, seed: 1 });
+  const browser = { scrollIntoView: async () => {}, click: async () => {},
+    getUrl: async () => "https://real-browser-handled-it.test/" };
+
+  const result = await faculty.processAction({ type: "CLICK", target: "e1" },
+    { browser, recorder: { async record() {} }, boxes: {} });
+
+  assert.equal(result.url, "https://real-browser-handled-it.test/",
+    "BrowserTool answered first, so the appended tool never even saw a CLICK");
+
+  FACULTY_REGISTRY.delete("test-greedy");
 });

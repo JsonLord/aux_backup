@@ -406,6 +406,10 @@ async function runWithJourneyTest(input) {
       // from the signed-in credential and sent with the run.
       redactSelectors: input.redactSelectors,
       authenticatedSession: Boolean(statePath),
+      // CAP-2: a hat's extra capabilities, resolved by the control plane from
+      // its own hat registry and sent with the run by name -- never a
+      // replacement for browsing, only ever appended to it (facultyWith).
+      hatExtras: input.hatExtras,
       actor: personaActorFn = llmActor({ model: modelId, apiKey, baseUrl,
         // The reflection is a factual comparison rather than a performance, and
         // scoring persona adherence is smaller still, so both run on a smaller,

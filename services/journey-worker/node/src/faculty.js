@@ -297,4 +297,61 @@ function browsingFaculty({ abilities, seed, memory } = {}) {
   return new Faculty(tools);
 }
 
-module.exports = { BrowserTool, Faculty, JourneyTool, Tool, browsingFaculty };
+/**
+ * CAP-2: where a hat's extra capabilities come from, by name -- "developer",
+ * eventually a docs search, whatever a later hat adds. Empty today: nothing
+ * has registered a second faculty yet (CAP-5's developer mode is what would
+ * be the first). A name with nothing registered for it is refused rather than
+ * silently producing a hat with fewer capabilities than it claims -- see
+ * facultyWith.
+ */
+const FACULTY_REGISTRY = new Map();
+
+/** Register a named extra faculty's tool factory, so facultyWith can add it by
+ * name. `factory` receives the same options facultyWith itself was called
+ * with (abilities, seed, memory, plus whatever a hat's own `grants` supply)
+ * and returns a Tool. Re-registering a name replaces it -- last one wins,
+ * which is only ever exercised by tests reaching into the same registry a
+ * real deployment would use once. */
+function registerFaculty(name, factory) {
+  FACULTY_REGISTRY.set(name, factory);
+}
+
+/**
+ * CAP-2: the hat registry's other half. `browsingFaculty()` does not change
+ * and is not renamed -- it is the floor every hat stands on, not one option
+ * among several, and this function's whole job is to make that structural
+ * rather than a convention someone could forget. It always calls
+ * browsingFaculty() first and only ever appends: there is no parameter here
+ * that removes a tool, because a hat's own record (`adds`, never
+ * `removes`/`replaces`) has no field to express one with. `Faculty.
+ * processAction()` offers an action to each tool in order until one claims
+ * it, so appending -- never prepending, never reordering -- means
+ * BrowserTool and JourneyTool keep first claim on every action they already
+ * handle; nothing appended here can shadow browsing even by accident.
+ *
+ * `extras` is a list of names from the registry above, resolved and appended
+ * in order. A name nothing has registered throws rather than being skipped:
+ * a hat that claims a capability and silently does not have it is a worse
+ * failure than a job that never starts, because the gap would not show up
+ * until a persona tried to use it and found no tool would.
+ *
+ * With no extras, this returns exactly what browsingFaculty() would have --
+ * "a hat with no extras is byte-for-byte today's faculty" is provable by
+ * construction, not merely intended, because this is the only code path that
+ * builds either.
+ */
+function facultyWith(extras = [], options = {}) {
+  const faculty = browsingFaculty(options);
+  for (const name of extras) {
+    const factory = FACULTY_REGISTRY.get(name);
+    if (!factory) {
+      throw new Error(`no faculty registered for "${name}" -- a hat cannot claim a capability nothing implements`);
+    }
+    faculty.tools.push(factory(options));
+  }
+  return faculty;
+}
+
+module.exports = { BrowserTool, Faculty, JourneyTool, Tool, browsingFaculty,
+  facultyWith, registerFaculty, FACULTY_REGISTRY };
