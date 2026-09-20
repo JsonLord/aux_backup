@@ -142,10 +142,11 @@ Five new tests, including the plan's own acceptance criterion made concrete: two
 different `label`s produce two different, non-identical sentences, each containing
 its own control's name.
 
-### RPT-2. Give the root cause depth, and stop it falling back to the symptom
+### RPT-2. Give the root cause depth, and stop it falling back to the symptom — **done**
 
-The generation already exists — `_why_they_expected_that()` (`executor.py:1694`). This
-is about what it is asked, and what happens when it declines to answer.
+The generation already exists — `_why_they_expected_that()` (`executor.py:1694`, now
+`services/report_service/assembler.py` post-BE-2). This is about what it is asked, and
+what happens when it declines to answer.
 
 **The fallback.** `executor.py:3760` still resolves the panel as `rootCause or
 mechanism or observation`. For any finding whose source sets no `rootCause`, the
@@ -180,6 +181,53 @@ same call with more in its prompt, and none needing data we do not already hold:
 
 And one quote fix (F5): quote the persona's **affect** line — what they felt — rather
 than the factual reflection, which is what makes a quote worth printing at all.
+
+**What shipped.** The fallback: `_finding_slide`'s root-cause panel now reads only
+`item.get("rootCause")` -- no `mechanism`, no `observation` -- and is left out
+entirely when there is none, per the stated rule. E8: `_panel_duplicates()` (Jaccard
+overlap on stemmed content words, threshold 0.45 -- higher than
+`_merge_similar_findings`' 0.18 same-issue bar, since two panels on one slide are
+expected to share more vocabulary before one is truly saying nothing new) replaces
+the old byte-equality check, so a paraphrase of the symptom is refused the same as
+an exact repeat. B2: `_why_they_expected_that()` now closes with a convention
+sentence keyed on the same `wanted` classification RPT-1 already computes, explicitly
+prefixed "This rests on a general web convention, not something this run measured" --
+never phrased as though this run had observed another site, because it has not. B3:
+new `_persona_mental_model()` walks a persona's whole
+`persona.expectation`/`persona.reflection` timeline (not only the unmet pairs the
+broken-promise findings group), classifies each with the same verb-matching RPT-1
+uses, and states the dominant pattern and how often it held -- `""` rather than a
+guess when fewer than two expectations exist to support a stated pattern. Wired onto
+`persona_narration[].mentalModel` in `executor.py`. F5: a `feelings` list, sourced
+from `persona.affect`'s own `feeling` text (already recorded by
+`personaDirector.js`'s `affectInWords()`, previously read nowhere on the Python
+side), now takes priority in `_broken_promise_finding`'s `personaEvidence` over
+`sightings` and the factual `gaps` quote.
+
+**B4 ("name the mechanism"), found already substantially shipped rather than
+built new.** Checked against the audit's own complaint ("scan pattern, fixation
+budget, goal pull and acuity... name none of them in a finding") against the
+current code, not the plan's description of code as it stood when written:
+`_never_looked_at_finding`'s summary already states the scan pattern, fixation
+budget and the "why" reasons inline (`{scan.get('pattern')}` etc.), and
+`_unreadable_finding`'s `rare_only` branch already cites acuity and contrast
+sensitivity. Duplicating either into a separate `rootCause` field would itself be
+refused by the new E8 check as a near-duplicate of the issue panel that already
+states it, so the root-cause panel is correctly absent for these two finding
+classes today -- an honest absence per this section's own fallback rule, not a
+gap. Nothing was built here because nothing was missing once checked against the
+tree rather than the plan's own two-cycle-old description of it.
+
+**Tests.** Five new: E8's paraphrase refusal, B2's convention sentence and its
+explicit inference marker, B3's mental-model text (both the isolated method and an
+end-to-end `combined_test` run reaching `persona_narration`), and F5's
+quote-priority (feeling present vs. absent, falling back to sightings never
+straight to the factual gap). One existing test rewritten for the removed
+fallback (the byte-equality check it exercised is now folded into E8's broader
+one) rather than broken by it. Full regression: 463 Python tests
+passing (same 3 pre-existing unrelated failures as baseline), 277 Node tests
+unaffected (this track touched only `services/report_service/assembler.py` and
+`apps/api/executor.py`).
 
 ### RPT-3. Say how you would know it worked
 

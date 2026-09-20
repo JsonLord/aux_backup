@@ -374,6 +374,10 @@ class JobExecutor(ReportAssembler):
                 "not the product): see run_diagnostics. They are excluded from the usability findings.")
         thoughts_by_persona = {persona.get("id"): self._persona_thoughts(journey)
                                for journey, persona in zip(journeys, personas) if persona.get("id")}
+        # RPT-2/B3: one persona's expectations across the whole run, summarised
+        # into a stated model of what they thought the product was.
+        mental_models_by_persona = {persona.get("id"): self._persona_mental_model(journey)
+                                    for journey, persona in zip(journeys, personas) if persona.get("id")}
         persona_names = {persona.get("id"): (persona.get("persona") or {}).get("name") or persona.get("name") or persona.get("id")
                          for persona in personas}
         self._attach_persona_evidence(findings, thoughts_by_persona, persona_names)
@@ -453,7 +457,11 @@ class JobExecutor(ReportAssembler):
                 "elements_to_preserve": preserve,
                 "impact_analysis": self._impact_analysis(findings, personas),
                 "persona_narration": [{"personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
-                                       "thoughts": thoughts} for persona_id, thoughts in thoughts_by_persona.items()],
+                                       "thoughts": thoughts,
+                                       # B3: "" when there were too few expectations to support a
+                                       # stated pattern -- an absent model is honest, a guessed one is not.
+                                       "mentalModel": mental_models_by_persona.get(persona_id, "")}
+                                      for persona_id, thoughts in thoughts_by_persona.items()],
                 "evidence_language": evidence_language, "limitations": limitations}
 
     @staticmethod

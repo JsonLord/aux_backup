@@ -887,7 +887,7 @@ class ReportAssembler:
                         group = groups.setdefault(label, {
                             "label": label, "hits": 0, "cost": 0.0, "personas": [], "names": [],
                             "runs": [], "gaps": [], "expectations": [], "actions": [],
-                            "boxes": [], "sightings": [], "roles": []})
+                            "boxes": [], "sightings": [], "roles": [], "feelings": []})
                         group["hits"] += 1
                         group["cost"] += max(0.0, frustration - previous)
                         if persona_id and persona_id not in group["personas"]:
@@ -909,6 +909,14 @@ class ReportAssembler:
                         if unmet.get("couldSee"):
                             group["sightings"].append({"quote": unmet["couldSee"], "personaId": persona_id,
                                                        "personaName": persona_name})
+                        # F5: what this cost them, in their own words -- not the
+                        # factual gap, which is already quoted verbatim in the
+                        # summary above. A quote is only worth printing a second
+                        # time if it says something the summary did not.
+                        feeling = str(data.get("feeling") or "").strip()
+                        if feeling:
+                            group["feelings"].append({"quote": feeling, "personaId": persona_id,
+                                                      "personaName": persona_name})
                         role = str((unmet.get("action") or {}).get("type") or "").upper()
                         if role:
                             group["roles"].append(role)
@@ -943,7 +951,7 @@ class ReportAssembler:
                 continue
             host["hits"] += group["hits"]
             host["cost"] += group["cost"]
-            for field in ("gaps", "expectations", "actions", "boxes", "sightings", "roles"):
+            for field in ("gaps", "expectations", "actions", "boxes", "sightings", "roles", "feelings"):
                 host[field].extend(group.get(field) or [])
             for persona, name in zip(group["personas"], group["names"]):
                 if persona not in host["personas"]:
@@ -1096,8 +1104,22 @@ class ReportAssembler:
         hits = int(group.get("hits") or 1)
         again = (f" They came back to it {hits} times, which is what people do when they are sure "
                  f"they used the right control and assume they mis-clicked." if hits > 1 else "")
+        # RPT-2/B2: name the convention the expectation rests on -- the
+        # benchmark's best sentences are all this shape ("as this is the case on
+        # other free apps"). Explicitly marked as an inference about a general
+        # web convention, never as something this run measured: nothing here
+        # observed another site, so it must not read as though it did.
+        convention = {
+            "be told something": "a control labelled with what it reveals is read as the thing that "
+                                 "reveals it, on most sites a visitor has already used",
+            "be taken somewhere": "a control that reads as a link or a button naming a destination is "
+                                  "expected to lead there, the way it does on most sites",
+            "get a response": "a clickable control is expected to visibly acknowledge the click, on "
+                              "most sites a visitor has already used",
+        }[wanted]
         return (f"The wording is what set the expectation. Reading \u201c{label}\u201d, this visitor "
-                f"expected to {wanted}, and got {got}. {moral}{again}")
+                f"expected to {wanted}, and got {got}. {moral}{again} This rests on a general web "
+                f"convention, not something this run measured: {convention}.")
 
     # One concrete verb per shape of promise, keyed on (wanted, silent). Committed
     # to, never offered as a choice -- "either make X do Y or stop it reading that
@@ -1221,11 +1243,13 @@ class ReportAssembler:
             "elementBox": (group.get("boxes") or [None])[0],
             "observation": happened,
             "rootCause": cls._why_they_expected_that(group),
-            # What this person could see when they formed the expectation, in their
-            # own first-person words. The gap sentence is already quoted in the
-            # summary; quoting it again under "In the user's words" made a
-            # four-panel analysis read as one observation in fancy dress.
-            "personaEvidence": (group.get("sightings") or group["gaps"])[:2],
+            # RPT-2/F5: what this cost them, in their own words, is what makes a
+            # second quote worth printing at all -- the factual gap is already
+            # quoted verbatim in the summary above it, so requoting it here read
+            # as the same observation in fancy dress. What they could see before
+            # acting is the next-best first-person quote when there is no affect
+            # line to draw on; the factual gap is the last resort, not the first.
+            "personaEvidence": (group.get("feelings") or group.get("sightings") or group["gaps"])[:2],
             "susceptibleTraits": cls._traits_behind(group),
             "claimedImpact": {"frustration": round(cost, 2), "personas": len(personas) or 1,
                               "attempts": hits},
@@ -2631,6 +2655,55 @@ class ReportAssembler:
         kept = reasoning + actions[: limit - len(reasoning)]
         return sorted(kept, key=lambda item: item.get("elapsedMs") or 0)
 
+    @classmethod
+    def _persona_mental_model(cls, journey: dict[str, Any]) -> str:
+        """RPT-2/B3: this persona's expectations across the whole run, summarised
+        into one stated model of what they thought the product was, with where
+        the page held or contradicted it -- not per-control (that is what the
+        broken-promise findings are for), but the pattern across all of them.
+
+        Built from every `persona.expectation` -> `persona.reflection` pair in
+        the timeline, not only the unmet ones `_pain_points_from_expectations`
+        groups into findings: a persona whose expectations mostly held is a real
+        and different report from one whose expectations mostly did not, and
+        that shape is invisible if only the misses are ever counted.
+        """
+        pending_expectation = ""
+        classified: list[str] = []
+        met, total = 0, 0
+        for event in journey.get("timeline") or []:
+            kind, data = event.get("type"), event.get("data") or {}
+            if kind == "persona.expectation":
+                pending_expectation = str(data.get("expectation") or "").strip()
+            elif kind == "persona.reflection" and pending_expectation:
+                reveal = cls._EXPECTED_TO_REVEAL.search(pending_expectation)
+                move = cls._EXPECTED_TO_MOVE.search(pending_expectation)
+                if reveal and move:
+                    classified.append("be told something" if reveal.start() < move.start() else "be taken somewhere")
+                elif reveal:
+                    classified.append("be told something")
+                elif move:
+                    classified.append("be taken somewhere")
+                else:
+                    classified.append("get a response")
+                total += 1
+                if str(data.get("matched") or "").lower() == "yes":
+                    met += 1
+                pending_expectation = ""
+        if total < 2:
+            # One data point is not a pattern; stating a "model" from it would
+            # overclaim what a single expectation can support.
+            return ""
+        dominant, dominant_count = Counter(classified).most_common(1)[0]
+        share = dominant_count / total
+        if share < 0.5:
+            shape = "no single pattern -- their expectations of controls varied about as much as the controls did"
+        else:
+            shape = f"mostly expected controls to {dominant} ({dominant_count} of {total} expectations)"
+        held = "held" if met == total else "never held" if met == 0 else f"held for {met} of {total}"
+        return (f"Across the run, this persona {shape}. That model {held} against what the page actually "
+                f"did.")
+
     @staticmethod
     def _persona_voice(journey: dict[str, Any]) -> list[dict[str, Any]]:
         """What the person said about the page, from the persona director's own
@@ -3292,18 +3365,39 @@ show(0);
         bits.append("blocking" if is_blocking else "not blocking")
         return ", ".join(bits)
 
-    @staticmethod
-    def _finding_slide(item: dict[str, Any], index: int, issue_label: str) -> str:
+    # RPT-2/E8: how much two panels' prose have to overlap before the second is
+    # not new information -- "substantially repeats", not merely "mentions the
+    # same words". Higher than _merge_similar_findings' 0.18 same-issue bar on
+    # purpose: two findings about the same control are expected to share
+    # vocabulary and still be different findings, but one slide's own root-cause
+    # panel restating its own issue panel is the specific failure this guards.
+    _PANEL_DUPLICATE_OVERLAP = 0.45
+
+    @classmethod
+    def _panel_duplicates(cls, candidate: str, other: str) -> bool:
+        if not candidate or not other:
+            return False
+        if candidate.strip() == other.strip():
+            return True
+        return cls._jaccard(cls._text_tokens(candidate), cls._text_tokens(other)) >= cls._PANEL_DUPLICATE_OVERLAP
+
+    @classmethod
+    def _finding_slide(cls, item: dict[str, Any], index: int, issue_label: str) -> str:
         """One issue, in the three-part shape a usability report uses: what the user
         hit, why it happens, and what to change -- beside the evidence for it."""
         severity = str(item.get("severity") or "medium")
         flow = ReportAssembler._flow_label(item)
         issue_text = item.get("summary") or item.get("evidence") or ""
-        # Never the `evidence` string: for a stage-1 verdict finding that is a bare
-        # capture reference, and a slide headed "Root cause analysis" showing
-        # "snapshot: 005-snapshot.txt" says nothing. The verdict's own observation is
-        # real prose about what was seen; with neither, the column is left out.
-        root_cause = item.get("rootCause") or item.get("mechanism") or item.get("observation") or ""
+        # RPT-2: no fallback to `mechanism` or `observation`. Either the source
+        # that produced this finding did the work of naming a root cause, or the
+        # panel is left out -- a panel that cannot be filled honestly is not
+        # filled with the symptom wearing a different heading. E8: also refused
+        # when it substantially repeats the issue panel above it, not only when
+        # the two are byte-identical -- a paraphrase of the symptom is the same
+        # failure to say anything new, just harder to catch.
+        root_cause = str(item.get("rootCause") or "")
+        if root_cause and cls._panel_duplicates(root_cause, str(issue_text)):
+            root_cause = ""
         alternatives = item.get("alternatives") or ([{"proposedChange": item["recommendation"]}]
                                                      if item.get("recommendation") else [])
         changes = "".join(f"<li>{escape(str(alt.get('proposedChange', '')))}</li>"
@@ -3359,7 +3453,7 @@ show(0);
                 f'<div class="finding"><div class="cols">'
                 f'<div class="col"><h3>{escape(issue_label)}</h3><p>{escape(str(issue_text))}</p></div>'
                 + (f'<div class="col"><h3>Root cause analysis</h3><p>{escape(str(root_cause))}</p></div>'
-                   if root_cause and root_cause != issue_text else "")
+                   if root_cause else "")
                 + (f'<div class="col"><h3>Recommendations: design solutions</h3><ul>{changes}</ul></div>'
                    if changes else "")
                 + quote_block

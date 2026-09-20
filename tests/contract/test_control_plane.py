@@ -761,6 +761,29 @@ def test_a_run_with_model_traffic_states_reproducibility_honestly(tmp_path, monk
     assert reproducibility and "disposition" in reproducibility[0]
 
 
+def test_persona_narration_carries_the_mental_model_end_to_end(tmp_path, monkeypatch):
+    """RPT-2/B3, wired: a real combined_test run's timeline reaches
+    persona_narration as a stated model, not just the isolated method."""
+    timeline = []
+    for expectation, matched in [("show the price", "yes"), ("show the total", "yes"),
+                                 ("take me to checkout", "no")]:
+        timeline.append({"type": "persona.expectation", "data": {"expectation": expectation}})
+        timeline.append({"type": "persona.reflection", "data": {"matched": matched}})
+
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed",
+        "verdict": {"status": "passed", "criteria": [{"id": "tasks-completed", "result": "met"}],
+                   "blockers": [], "uxFindings": [], "suggestedImprovements": []},
+        "timeline": timeline,
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    narration = report["persona_narration"][0]
+    assert "told something" in narration["mentalModel"]
+    assert "held for 2 of 3" in narration["mentalModel"]
+
+
 def test_slide_deck_says_predicted_when_no_browser_evidence_was_collected():
     """Honesty about evidence class: without a live run the deck must claim no more
     than a heuristic walkthrough does."""
@@ -1791,16 +1814,42 @@ def test_a_cited_capture_names_the_artifact_a_reader_can_download():
 
 
 def test_a_slide_never_heads_a_capture_reference_as_root_cause_analysis():
-    with_observation = JobExecutor._finding_slide(
+    """RPT-2: no fallback to `observation` or `mechanism` -- only an explicit
+    `rootCause` a finding's own source actually named fills this panel. A panel
+    that cannot be filled honestly is left out, not filled with the symptom
+    (or a bare capture reference) wearing a different heading."""
+    with_root_cause = JobExecutor._finding_slide(
         {"title": "Overwhelming number of buttons", "summary": "Many controls compete for attention.",
+         "rootCause": "Fifteen buttons share one visual weight, so none reads as primary.",
          "observation": "Initial snapshot shows more than 15 buttons without scrolling.",
          "evidence": "snapshot: 001-snapshot.txt"}, 1, "Observed user issue")
-    without = JobExecutor._finding_slide(
+    no_root_cause = JobExecutor._finding_slide(
         {"title": "Guided tour for new users", "summary": "The product offers many features.",
+         "observation": "Initial snapshot shows more than 15 buttons without scrolling.",
          "evidence": "snapshot: 001-snapshot.txt"}, 1, "Observed user issue")
 
-    assert "Initial snapshot shows more than 15 buttons" in with_observation
-    assert "001-snapshot.txt" not in without
+    assert "Fifteen buttons share one visual weight" in with_root_cause
+    assert "Root cause analysis" not in no_root_cause
+    assert "001-snapshot.txt" not in with_root_cause and "001-snapshot.txt" not in no_root_cause
+    assert "Initial snapshot shows more than 15 buttons" not in no_root_cause
+
+
+def test_e8_a_root_cause_that_paraphrases_the_symptom_is_refused_not_just_an_exact_repeat():
+    """RPT-2/E8: refused when it substantially repeats the issue panel, not only
+    when the two strings are byte-identical -- a paraphrase of the symptom says
+    nothing new, just harder to catch than an exact copy."""
+    paraphrased = JobExecutor._finding_slide({
+        "title": "Confusing checkout", "summary": "Many controls compete for the visitor's attention on the page.",
+        "rootCause": "Many controls are competing for the visitor's attention on this page.",
+    }, 1, "Observed user issue")
+    real_cause = JobExecutor._finding_slide({
+        "title": "Confusing checkout", "summary": "Many controls compete for the visitor's attention on the page.",
+        "rootCause": "Every control shares the same size and colour, so none reads as more important.",
+    }, 1, "Observed user issue")
+
+    assert "Root cause analysis" not in paraphrased
+    assert "Root cause analysis" in real_cause
+    assert "Every control shares the same size and colour" in real_cause
 
 
 def test_one_design_decision_praised_two_ways_becomes_one_preserved_element():
@@ -3475,6 +3524,39 @@ def test_a_finding_says_one_thing_once():
     assert finding["personaEvidence"][0]["quote"].startswith("I see")
 
 
+def test_b2_the_root_cause_names_the_convention_and_marks_it_as_inference():
+    """RPT-2/B2: the benchmark's best sentences name the convention an expectation
+    rests on ("as this is the case on other free apps"). Named here too, but
+    marked explicitly as an inference about a general convention -- nothing in
+    this run measured another site, so it must never read as though it did."""
+    root_cause = JobExecutor._why_they_expected_that(_promise_group())
+
+    assert "general web convention" in root_cause
+    assert "not something this run measured" in root_cause
+
+
+def test_b3_a_persona_s_expectations_summarise_into_one_stated_model():
+    """RPT-2/B3: not per-control (that is what the broken-promise findings are
+    for) but the pattern across the whole run -- a persona whose expectations
+    mostly held is a different report from one whose mostly did not."""
+    def pair(expectation, matched):
+        return [{"type": "persona.expectation", "data": {"expectation": expectation}},
+                {"type": "persona.reflection", "data": {"matched": matched}}]
+
+    mostly_navigation = {"timeline": pair("open the pricing page", "yes")
+                         + pair("take me to checkout", "no") + pair("navigate to the cart", "yes")}
+    assert "taken somewhere" in JobExecutor._persona_mental_model(mostly_navigation)
+    assert "held for 2 of 3" in JobExecutor._persona_mental_model(mostly_navigation)
+
+    all_held = {"timeline": pair("show the price", "yes") + pair("display the total", "yes")}
+    assert "never held" not in JobExecutor._persona_mental_model(all_held)
+    assert "held for" not in JobExecutor._persona_mental_model(all_held), "no partial phrasing when all of them held"
+
+    # Too little to support a stated pattern: no model is honest, a guessed one is not.
+    assert JobExecutor._persona_mental_model({"timeline": pair("show the price", "yes")}) == ""
+    assert JobExecutor._persona_mental_model({"timeline": []}) == ""
+
+
 def test_the_root_cause_names_a_mechanism_and_it_depends_on_what_happened():
     """"The click only moves the visitor instead" is the wrong lesson for a control that
     did nothing at all. The mechanism is read from the visitor's own verb and from the
@@ -3519,6 +3601,22 @@ def test_a_finding_knows_where_its_control_was():
     finding = JobExecutor._broken_promise_finding(_promise_group())
     assert finding["elementBox"] == {"x": 320, "y": 540, "width": 210, "height": 48}
     assert finding["elementName"] == "Start 3-day free trial"
+
+
+def test_f5_the_quoted_evidence_prefers_how_it_felt_over_what_they_could_see():
+    """RPT-2/F5: the factual gap is already quoted verbatim in the summary above
+    "In the user's words" -- requoting it there read as one observation in fancy
+    dress. What this cost them, in their own words (persona.affect's `feeling`,
+    already recorded by the director), says something the summary did not."""
+    with_feeling = JobExecutor._broken_promise_finding(_promise_group(
+        feelings=[{"quote": "That was annoying -- I was sure that button would work.",
+                  "personaId": "p1", "personaName": "Friedrich Wolf"}]))
+    without_feeling = JobExecutor._broken_promise_finding(_promise_group())
+
+    assert with_feeling["personaEvidence"][0]["quote"] == "That was annoying -- I was sure that button would work."
+    # No feeling recorded: falls back to what they could see, never straight to
+    # the factual gap that is already quoted in the summary.
+    assert without_feeling["personaEvidence"][0]["quote"].startswith("I see a 'Start 3-day free trial' button")
 
 
 def test_measured_cost_arrives_with_the_scale_it_is_measured_on():
