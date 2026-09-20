@@ -2766,8 +2766,17 @@ class ReportAssembler:
 
         merged: list[dict[str, Any]] = []
         for cluster in cls._cluster_by_title(findings, related=same_issue):
+            # BE-5: how many distinct runs actually saw this -- 1 of 1 and 2 of 2
+            # are different claims, and this is the one place every finding
+            # already passes through regardless of which run produced it, so it
+            # is where a reproduction count can be computed for all of them at
+            # once rather than duplicated per finding-source. Meaningful once a
+            # cohort runs any persona more than once (repeat seeds); on a cohort
+            # that does not, this is just 1 for everything, honestly.
+            run_ids = {item.get("runId") for item in cluster if item.get("runId")}
+            reproduced_in = len(run_ids) if run_ids else 1
             if len(cluster) == 1:
-                merged.append(cluster[0])
+                merged.append({**cluster[0], "reproducedIn": reproduced_in})
                 continue
             # Lead with the most severe phrasing; it is the one a reader should see.
             primary = max(cluster, key=lambda item: cls._SEVERITY_RANK.get(str(item.get("severity")), 1))
@@ -2794,6 +2803,7 @@ class ReportAssembler:
                 combined["affectedPersonaIds"] = persona_ids
                 combined["affectedPersonas"] = len(persona_ids)
             combined["mergedFrom"] = [item.get("title") for item in cluster if item is not primary]
+            combined["reproducedIn"] = reproduced_in
             merged.append(combined)
         return merged
 

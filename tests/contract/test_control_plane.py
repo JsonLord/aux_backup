@@ -1999,6 +1999,33 @@ def test_one_issue_described_two_ways_merges_on_its_description():
     assert sum("navigation" in title.lower() for title in titles) == 1
 
 
+def test_be5_a_finding_seen_in_two_runs_is_reproduced_in_two_not_one():
+    """BE-5: a finding seen in 2 of 2 runs is a different claim from 1 of 2.
+    Real once a cohort runs any persona more than once (repeat seeds); on a
+    cohort that does not, every finding is honestly reproducedIn: 1."""
+    merged = JobExecutor._merge_similar_findings([
+        {"title": "Ambiguous navigation hierarchy", "severity": "medium", "runId": "run_1",
+         "summary": "The page uses two different sets of navigation controls that seem to overlap."},
+        {"title": "Redundant and confusing navigation layers", "severity": "medium", "runId": "run_2",
+         "summary": "The page uses two different sets of navigation controls that seem to overlap."},
+        {"title": "Missing input labels", "severity": "medium", "runId": "run_1",
+         "summary": "Several input fields rely on placeholder text rather than explicit labels."},
+    ])
+
+    by_title = {item["title"]: item for item in merged}
+    navigation = next(item for title, item in by_title.items() if "navigation" in title.lower())
+    assert navigation["reproducedIn"] == 2
+    assert by_title["Missing input labels"]["reproducedIn"] == 1
+
+    # The same run's own findings merging (e.g. a duplicate phrasing within one
+    # journey) must not be counted as two separate reproductions of the claim.
+    same_run = JobExecutor._merge_similar_findings([
+        {"title": "Generic link text", "severity": "medium", "runId": "run_1", "summary": "Says only Learn more."},
+        {"title": "Ambiguous link text", "severity": "medium", "runId": "run_1", "summary": "Says only Learn more."},
+    ])
+    assert same_run[0]["reproducedIn"] == 1
+
+
 def test_capture_references_read_as_names_not_container_paths():
     """A live deck rendered "snapshot: /home/user/artifacts/journeys/2026-08-30T10-57-
     43-548Z-job_08147074e9f648a58d3c/snapshots/005-snapshot.txt" as its root-cause
@@ -4115,3 +4142,176 @@ def test_a_check_that_cannot_run_does_not_pass():
 
     assert finding["severity"] == "high"
     assert "not supported by this run" not in finding["summary"]
+
+
+# --- BE-5: concurrency -----------------------------------------------------------
+
+def test_be5_persona_runs_are_dispatched_concurrently_and_stay_in_persona_order(tmp_path, monkeypatch):
+    """A bounded pool, not one persona at a time -- proven by two runs actually
+    overlapping in wall time, not merely by both completing. journeys must stay
+    in the same order as personas even when the slower run (persona_ada, whose
+    fake request sleeps longer) finishes after the faster one, because
+    everything downstream (thoughts_by_persona, the scorecard, impact_analysis)
+    zips journeys against personas positionally."""
+    import json as json_module
+    import threading
+    import time
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    personas = [store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": pid, "persona": {"name": name}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}}) for pid, name in [("persona_ada", "slow"), ("persona_lin", "fast")]]
+
+    in_flight = []
+    lock = threading.Lock()
+    overlapped = threading.Event()
+
+    def dispatch(req, timeout):
+        payload = json_module.loads(req.data)
+        with lock:
+            in_flight.append(payload["profile"]["id"])
+            if len(in_flight) >= 2:
+                overlapped.set()
+        # persona_ada takes longer, and finishes its (fake) request after
+        # persona_lin despite being submitted first.
+        time.sleep(0.15 if payload["profile"]["id"] == "persona_ada" else 0.02)
+        with lock:
+            in_flight.remove(payload["profile"]["id"])
+
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return self.body
+        return Response(json_module.dumps({
+            "runId": payload["runId"], "runStatus": "completed",
+            "profileId": payload["profile"]["id"], "simulationProfile": payload["profile"],
+            "verdict": {"status": "passed", "criteria": [{"id": "tasks-completed", "result": "met"}],
+                       "blockers": [], "uxFindings": [], "suggestedImprovements": []},
+            "artifacts": {"screenshots": [], "snapshots": []}}).encode())
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.delenv("EYESON_WORKER_URL", raising=False)
+    monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
+    ids = [persona["artifact_id"] for persona in personas]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+
+    assert completed["status"] == "succeeded"
+    assert overlapped.is_set(), "both requests must have been in flight at once, not sequential"
+    runs = report["journey_outcome"]["runs"]
+    assert [run["profileId"] for run in runs] == ["persona_ada", "persona_lin"], (
+        "journeys must stay in persona order regardless of which request actually finished first")
+
+
+def test_be5_a_rejected_persona_run_still_fails_the_whole_job(tmp_path, monkeypatch):
+    """Matches the old sequential loop's behaviour: one persona's run being
+    rejected by the worker fails the job, with the same 422 message."""
+    import json as json_module
+    from urllib.error import HTTPError
+    from io import BytesIO
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    personas = [store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": pid, "persona": {"name": name}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}}) for pid, name in [("persona_ada", "a"), ("persona_lin", "b")]]
+
+    def dispatch(req, timeout):
+        payload = json_module.loads(req.data)
+        if payload["profile"]["id"] == "persona_ada":
+            raise HTTPError(req.full_url, 422, "Unprocessable Entity", {}, BytesIO(b"allowIrreversibleActions required"))
+
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return self.body
+        return Response(json_module.dumps({
+            "runId": payload["runId"], "runStatus": "completed",
+            "profileId": payload["profile"]["id"], "simulationProfile": payload["profile"],
+            "verdict": {"status": "passed", "criteria": [], "blockers": [], "uxFindings": [],
+                       "suggestedImprovements": []},
+            "artifacts": {"screenshots": [], "snapshots": []}}).encode())
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.delenv("EYESON_WORKER_URL", raising=False)
+    monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
+    ids = [persona["artifact_id"] for persona in personas]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+
+    assert completed["status"] == "failed"
+    assert "allowIrreversibleActions" in completed["error"]["message"]
+
+
+def test_be5_the_pool_is_bounded_by_max_concurrent_model_calls(tmp_path, monkeypatch):
+    """The pool never exceeds MAX_CONCURRENT_MODEL_CALLS in-flight requests at
+    once, whatever the cohort size -- concurrency against a provider whose
+    fallback does not work multiplies exactly the failure mode BE-1 exists to
+    fix, which is why this knob exists at all."""
+    import json as json_module
+    import threading
+    import time
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    personas = [store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": f"persona_{i}", "persona": {"name": f"p{i}"}, "abilities": {}, "behavior": {},
+                    "generation": {"seed": 1}},
+        "metadata": {}}) for i in range(4)]
+
+    lock = threading.Lock()
+    in_flight, peak = 0, 0
+
+    def dispatch(req, timeout):
+        nonlocal in_flight, peak
+        payload = json_module.loads(req.data)
+        with lock:
+            in_flight += 1
+            peak = max(peak, in_flight)
+        time.sleep(0.05)
+        with lock:
+            in_flight -= 1
+
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return self.body
+        return Response(json_module.dumps({
+            "runId": payload["runId"], "runStatus": "completed",
+            "profileId": payload["profile"]["id"], "simulationProfile": payload["profile"],
+            "verdict": {"status": "passed", "criteria": [], "blockers": [], "uxFindings": [],
+                       "suggestedImprovements": []},
+            "artifacts": {"screenshots": [], "snapshots": []}}).encode())
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setenv("MAX_CONCURRENT_MODEL_CALLS", "2")
+    monkeypatch.delenv("EYESON_WORKER_URL", raising=False)
+    monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
+    ids = [persona["artifact_id"] for persona in personas]
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": ids, "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": ids, "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+
+    assert completed["status"] == "succeeded"
+    assert peak == 2, f"expected at most 2 in flight at once, saw {peak}"

@@ -581,13 +581,72 @@ parse the run JSON for `refused`, `legibleShare`, and completed-run counts acros
 three same-commit cohorts and report the min/max) and commit it alongside the noise
 floor it produces, so the next person is not solving this same problem again.
 
-### BE-5. Concurrency and repeat runs
+### BE-5. Concurrency and repeat runs — **partly done**
 
 Personas run sequentially, so time grows linearly, and a three-person cohort is
 about 20 minutes. Repeat runs at different seeds turn A8/G6 into a real claim — a
 finding seen in 2 of 2 runs is a different claim from 1 of 2. Both land after BE-1,
 because concurrency against a provider with no working fallback multiplies the
 failure mode BE-1 exists to fix.
+
+**What shipped: concurrency.** The sequential `for persona in personas:` loop
+became `_dispatch_persona_run()` (the same per-persona logic, unchanged, only
+parameterised) called through a `ThreadPoolExecutor`, sized off
+`MAX_CONCURRENT_MODEL_CALLS` (the same knob `config.ini` already tuned
+defensively for exactly this failure mode, so this follows BE-1's own budget
+rather than picking a separate one) and bounded above by the cohort size.
+Results are written into a pre-sized list by submission index and only
+assigned to `journeys` once every future has completed, so the strict
+positional correspondence `zip(journeys, personas)` relies on everywhere
+downstream (`thoughts_by_persona`, the scorecard, `_impact_analysis`, vision
+critique) holds exactly as before, regardless of which request actually
+finishes first. Session-file cleanup (`finally: shutil.rmtree(...)`) still
+waits for every future, not just the one that failed, because cancelling
+in-flight requests would race deleting a session file others are mid-request
+against. A rejected run (a 422, an unreachable worker) still fails the whole
+job, matching the sequential loop's own behaviour as closely as true
+concurrency -- which has already started every run by the time any of them
+can fail -- allows: the first error wins rather than none of them being
+started.
+
+**What shipped: the reproduction count, without the repeat-seed dispatch.**
+`_merge_similar_findings()` now computes `reproducedIn` -- the count of
+distinct `runId`s in a merged cluster -- for every finding, not only ones
+that were actually merged, so a cohort that never repeats a persona still
+gets an honest `reproducedIn: 1` on everything rather than a field that only
+sometimes appears. This is the mechanism BE-5's "reproducedIn count" asks
+for, real and tested, but **inert until something actually dispatches a
+repeated run**, which was not built.
+
+**Not attempted: dispatching a persona at a second seed, stated rather than
+narrowed silently.** The report-building pipeline this touches
+(`thoughts_by_persona`, `mental_models_by_persona`, `persona_names`,
+`_run_scorecard`, `_impact_analysis`, `_collect_vision_pain_points`) is built
+throughout on a strict one-journey-per-persona invariant, keyed by
+`persona_id` in several places (`thoughts_by_persona = {persona.get("id"):
+... for journey, persona in zip(journeys, personas)}`). Dispatching the same
+persona twice would make two journeys share one `persona_id`, and every one
+of those dict-keyed structures would silently overwrite the first run's data
+with the second's rather than erroring -- a correctness bug, not a missing
+feature, and one this sandbox has no live run to catch by testing against
+real output. The concrete next step for whoever picks this up: build an
+expanded per-run persona list (each repeat carrying a synthetic id such as
+`f"{persona_id}#{seed}"`), thread it everywhere `personas` currently is
+zipped against `journeys`, and keep the original `personas` list only for
+counts that should stay per-persona (`impact_analysis.personasTested`, the
+scorecard's row-per-persona shape) rather than per-run.
+
+Four new tests: concurrent dispatch proven by two requests actually
+overlapping in wall time (not just both completing), journeys staying in
+persona order regardless of completion order, a rejected run still failing
+the whole job, and the pool never exceeding `MAX_CONCURRENT_MODEL_CALLS` in
+flight at once -- plus one for `reproducedIn` (a finding seen in two runs
+counted as 2, a same-run duplicate phrasing never double-counted as two
+reproductions). Full regression: 478 Python tests passing (same 3
+pre-existing unrelated failures as baseline; the four concurrency tests were
+run three times each to check for flakiness and produced identical results
+every time), 277 Node tests unaffected (this track touched only
+`apps/api/executor.py` and `services/report_service/assembler.py`).
 
 ## Track C — hats, capabilities and `/webui`
 

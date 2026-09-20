@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import base64
 from collections import Counter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from html import escape
 from io import BytesIO
 import json
@@ -161,63 +162,42 @@ class JobExecutor(ReportAssembler):
         # element's data says about it. Only meaningful when the run is signed in.
         redact_selectors = list(data.get("redactSelectors") or []) if session_state_path else []
         if worker_url:
+            # BE-5: a bounded pool rather than one persona at a time -- a run costs
+            # 213-516s, so a three-person cohort sequentially cost 20 minutes. Sized
+            # off the same MAX_CONCURRENT_MODEL_CALLS knob the persona-generation
+            # side already reads (config.ini), tuned defensively for the same
+            # reason: concurrency against a provider whose fallback does not work
+            # multiplies exactly the failure mode BE-1 exists to fix, so this
+            # follows BE-1's own budget rather than picking a separate one.
             try:
-                for persona in personas:
-                    run_identity = issued.get(persona.get("id")) if issued else None
-                    run_id = f"{job['job_id']}_{persona.get('id', len(journeys))}"
-                    # What this run may send a completion to, resolved here
-                    # because the worker is a separate process and must not open
-                    # the control plane's database for it. Keys travel in this
-                    # body, over loopback to a service in the same deployment --
-                    # the boundary CredentialStore.capture_session() already
-                    # crosses -- so nothing may log, record or echo it.
-                    payload = json.dumps({"runId": run_id, "url": data.get("url"),
-                        "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
-                        **({"models": run_models} if run_models is not None else {}),
-                        **({"sessionStatePath": session_state_path} if session_state_path else {}),
-                        **({"identity": run_identity} if run_identity else {}),
-                        # CAP-4: selectors this run always treats as sensitive --
-                        # "an account menu, an invoice table" -- no matter what a
-                        # walked element's own data says. A run signed in has one
-                        # to redact; a signed-out run has none, and an absent list
-                        # is a no-op on the worker side.
-                        **({"redactSelectors": redact_selectors} if redact_selectors else {})}).encode()
-                    call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload, headers={"content-type": "application/json"}, method="POST")
-                    try:
-                        with request.urlopen(call, timeout=self._journey_run_timeout()) as response:
-                            journey = json.loads(response.read())
-                            journeys.append(self._usable_journey(journey))
-                    except request.HTTPError as error:
-                        detail = error.read().decode("utf-8", errors="replace")[:2000]
-                        if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
-                            raise RuntimeError(
-                                "Journey worker rejected run (422): one of the configured tasks reads as a "
-                                "potentially irreversible action (purchase, account deletion, submission, "
-                                "production deploy, ...). This run did not opt in to allow it -- re-run with "
-                                "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
-                                "allow_irreversible_actions: true (API) if the task is genuinely meant to "
-                                f"perform it. Raw detail: {detail}") from error
-                        raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
-                    except (TimeoutError, request.URLError) as error:
-                        # Ordered after HTTPError, which subclasses URLError -- a
-                        # rejected run must keep its own message.
-                        if not _reads_as_timeout(error):
-                            raise
-                        # The run itself is still going and will still write its
-                        # result to disk; only this side of the socket gave up. The
-                        # artifact tree is reachable from here whenever the API and
-                        # the worker share a filesystem, which is how the Space runs
-                        # them -- so read the verdict from there rather than throw it
-                        # away with the connection.
-                        salvaged = self._journey_from_disk(run_id)
-                        if salvaged is None:
-                            raise RuntimeError(
-                                f"Journey worker did not answer within {self._journey_run_timeout():.0f}s "
-                                f"and no result for {run_id} was found on disk. Raise JOURNEY_RUN_TIMEOUT "
-                                f"if runs against this target legitimately take longer.") from error
-                        journeys.append(self._usable_journey(
-                            {**salvaged, "profileId": salvaged.get("profileId") or persona.get("id"),
-                             "simulationProfile": salvaged.get("simulationProfile") or persona}))
+                pool_size = int(os.getenv("MAX_CONCURRENT_MODEL_CALLS", "5") or 5)
+            except (TypeError, ValueError):
+                pool_size = 5
+            pool_size = max(1, min(pool_size, len(personas)))
+            results: list[dict[str, Any] | None] = [None] * len(personas)
+            try:
+                with ThreadPoolExecutor(max_workers=pool_size) as pool:
+                    futures = {pool.submit(self._dispatch_persona_run, job, data, tasks, browser_safety,
+                                           run_models, session_state_path, issued, redact_selectors,
+                                           worker_url, persona, index): index
+                              for index, persona in enumerate(personas)}
+                    # Waited out to completion even after the first failure --
+                    # cancelling in-flight requests would race the `finally` below,
+                    # which deletes the session file every still-running request
+                    # needs. First error wins, matching the sequential loop's own
+                    # stop-at-first-failure semantics as closely as true
+                    # concurrency (which has already started every run by the time
+                    # any of them can fail) allows.
+                    first_error = None
+                    for future in as_completed(futures):
+                        try:
+                            results[futures[future]] = future.result()
+                        except Exception as error:  # noqa: BLE001 - re-raised below, never swallowed
+                            if first_error is None:
+                                first_error = error
+                if first_error is not None:
+                    raise first_error
+                journeys = results
             finally:
                 # The session file is a live login. It exists for the runs that
                 # need it and not a moment longer -- including when one of them
@@ -488,6 +468,72 @@ class JobExecutor(ReportAssembler):
                                        "mentalModel": mental_models_by_persona.get(persona_id, "")}
                                       for persona_id, thoughts in thoughts_by_persona.items()],
                 "evidence_language": evidence_language, "limitations": limitations}
+
+    def _dispatch_persona_run(self, job: dict[str, Any], data: dict[str, Any], tasks: list[str],
+                              browser_safety: dict[str, Any], run_models: Any, session_state_path: str | None,
+                              issued: dict[str, Any], redact_selectors: list[str], worker_url: str,
+                              persona: dict[str, Any], index: int) -> dict[str, Any]:
+        """One persona's run against the Journey worker -- unchanged from the
+        sequential loop this was extracted from (BE-5), only parameterised so a
+        bounded thread pool can call it concurrently. `index` replaces the old
+        `len(journeys)` disambiguator for a persona with no id: under
+        concurrency, `len(journeys)` read at call time would race with every
+        other in-flight submission, where the loop index is stable per call.
+        """
+        run_identity = issued.get(persona.get("id")) if issued else None
+        run_id = f"{job['job_id']}_{persona.get('id', index)}"
+        # What this run may send a completion to, resolved here because the
+        # worker is a separate process and must not open the control plane's
+        # database for it. Keys travel in this body, over loopback to a service
+        # in the same deployment -- the boundary CredentialStore.capture_session()
+        # already crosses -- so nothing may log, record or echo it.
+        payload = json.dumps({"runId": run_id, "url": data.get("url"),
+            "tasks": tasks, "profile": persona, "browserSafety": browser_safety,
+            **({"models": run_models} if run_models is not None else {}),
+            **({"sessionStatePath": session_state_path} if session_state_path else {}),
+            **({"identity": run_identity} if run_identity else {}),
+            # CAP-4: selectors this run always treats as sensitive -- "an
+            # account menu, an invoice table" -- no matter what a walked
+            # element's own data says. A run signed in has one to redact; a
+            # signed-out run has none, and an absent list is a no-op on the
+            # worker side.
+            **({"redactSelectors": redact_selectors} if redact_selectors else {})}).encode()
+        call = request.Request(f"{worker_url.rstrip('/')}/v1/runs", data=payload,
+                               headers={"content-type": "application/json"}, method="POST")
+        try:
+            with request.urlopen(call, timeout=self._journey_run_timeout()) as response:
+                journey = json.loads(response.read())
+                return self._usable_journey(journey)
+        except request.HTTPError as error:
+            detail = error.read().decode("utf-8", errors="replace")[:2000]
+            if error.code == 422 and "allowIrreversibleActions" in detail and not browser_safety.get("allowIrreversibleActions"):
+                raise RuntimeError(
+                    "Journey worker rejected run (422): one of the configured tasks reads as a "
+                    "potentially irreversible action (purchase, account deletion, submission, "
+                    "production deploy, ...). This run did not opt in to allow it -- re-run with "
+                    "\"Allow potentially irreversible actions\" checked (Gradio UI) or "
+                    "allow_irreversible_actions: true (API) if the task is genuinely meant to "
+                    f"perform it. Raw detail: {detail}") from error
+            raise RuntimeError(f"Journey worker rejected run ({error.code}): {detail}") from error
+        except (TimeoutError, request.URLError) as error:
+            # Ordered after HTTPError, which subclasses URLError -- a rejected
+            # run must keep its own message.
+            if not _reads_as_timeout(error):
+                raise
+            # The run itself is still going and will still write its result to
+            # disk; only this side of the socket gave up. The artifact tree is
+            # reachable from here whenever the API and the worker share a
+            # filesystem, which is how the Space runs them -- so read the
+            # verdict from there rather than throw it away with the connection.
+            salvaged = self._journey_from_disk(run_id)
+            if salvaged is None:
+                raise RuntimeError(
+                    f"Journey worker did not answer within {self._journey_run_timeout():.0f}s "
+                    f"and no result for {run_id} was found on disk. Raise JOURNEY_RUN_TIMEOUT "
+                    f"if runs against this target legitimately take longer.") from error
+            return self._usable_journey(
+                {**salvaged, "profileId": salvaged.get("profileId") or persona.get("id"),
+                 "simulationProfile": salvaged.get("simulationProfile") or persona})
 
     @staticmethod
     def _journey_run_timeout() -> float:
