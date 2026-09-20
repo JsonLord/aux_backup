@@ -237,6 +237,16 @@ class JobExecutor(ReportAssembler):
             # What the page looked like it would do and then did not. First-hand,
             # falsifiable, and invisible to every other source here.
             findings += self._pain_points_from_expectations(journeys)
+            # D7: controls close enough to read as one group that do different
+            # kinds of things -- a relationship between elements, not a property
+            # of one, so no per-element check above finds it.
+            findings += self._grouped_controls_with_differing_actions(journeys)
+            # D4 (partial): a deterministic sweep for targets below the WCAG
+            # minimum size, so coverage of this one does not depend on a persona
+            # stumbling onto it. See _small_touch_targets for why the other four
+            # checks this section named (heading order, alt text, form labels,
+            # focus visibility) are not attempted here.
+            findings += self._small_touch_targets(journeys)
             cohort_runs, screenshot_bytes, raw_strengths, vision_error, repeated_captures = \
                 self._collect_vision_pain_points(
                     journeys, tasks, personas, data.get("url"),
@@ -261,7 +271,12 @@ class JobExecutor(ReportAssembler):
             findings.extend(vision_findings)
             preserve = (self._merge_strengths(raw_strengths + self._praise_from_verdicts(journeys)
                                               + self._praise_as_strengths(vision_praise))
-                        + self._preserved_from_verdicts(journeys))
+                        + self._preserved_from_verdicts(journeys)
+                        # D9: elements_to_preserve grounded in a *met* expectation --
+                        # a control that did exactly what a visitor expected, first
+                        # try -- not generic praise. A review that only lists faults
+                        # is half a review.
+                        + self._preserved_from_met_expectations(journeys))
             # A run kept by _usable_journey() saw real pages but did not get to the
             # end of the journey. Saying "completed" about it would overstate the
             # coverage behind every finding below, so the status carries the
@@ -463,6 +478,9 @@ class JobExecutor(ReportAssembler):
                 "flow_groups": self._flow_groups(findings, tasks),
                 "elements_to_preserve": preserve,
                 "impact_analysis": self._impact_analysis(findings, personas),
+                # A2: task success, actions taken, expectations met vs missed --
+                # the hit rate a report that only shows misses would otherwise hide.
+                "scorecard": self._run_scorecard(journeys, personas, persona_names),
                 "persona_narration": [{"personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
                                        "thoughts": thoughts,
                                        # B3: "" when there were too few expectations to support a

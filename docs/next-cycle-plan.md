@@ -264,7 +264,7 @@ reaching `critical_pain_points[].retest`, and both HTML surfaces printing it.
 Full regression: 466 Python tests passing (same 3 pre-existing unrelated
 failures as baseline), 277 Node tests unaffected (Python-only change).
 
-### RPT-4. Report yield — what gets found
+### RPT-4. Report yield — what gets found — **partly done**
 
 The worksheet §2 is better grounded than the audit on yield, because it is measured
 over seven reports rather than one. Its list, plus the audit's coverage gaps:
@@ -297,6 +297,64 @@ over seven reports rather than one. Its list, plus the audit's coverage gaps:
 *Done when:* a report carries ten or more findings about the site, at least two of
 them positive, and states its own hit rate. H5 follows from this and BE-5 together:
 the floor rises without anything being invented.
+
+**What shipped.** D9: `_preserved_from_met_expectations()` -- the positive to
+`_pain_points_from_expectations`' misses, sharing its `_promise_label` grouping
+key and its rule for what counts as a promise (a control, not a scroll or a
+read), grounded in a real met expectation's own text rather than generic praise.
+"Stop filing our own run as the leading finding": confirmed already true --
+`_is_run_diagnostic`/`run_diagnostics` already separates harness failures from
+usability findings; nothing further was needed. A2: `_run_scorecard()` -- task
+success, actions taken, and expectations met vs missed, drawn from the same
+`matched` field the misses use so the two can never disagree about what a "miss"
+is -- on the report as `scorecard` and printed on the intro slide (`"2 of 3 tasks
+completed, 75% of expectations held"`). D7:
+`_grouped_controls_with_differing_actions()` -- a simple flood-fill proximity
+clustering over each snapshot's interactive elements (`_cluster_by_proximity`,
+boxes within 16px read as one visual group), flagged when a cluster's roles
+imply different kinds of action (a link beside what reads as a sibling button,
+say). D4 (partial): `_small_touch_targets()` -- a deterministic sweep for WCAG
+2.5.8's 24x24px minimum pointer target, over box geometry alone.
+
+**A7/D6 ("promote a corroborated read gap"), found already substantially
+shipped, the same shape RPT-2's B4 turned out to be.** `_unreadable_finding`
+already promotes severity by corroboration -- `len(personas) > 1` reads as "Hard
+to read for several personas" (medium, numbered among the problems) versus a
+single ordinary-profile miss staying "low" and a single rare-profile miss
+staying "info" and excluded entirely (`rare_only`). `_never_looked_at_finding`
+does the same (`"high" if len(personas) > 1 else "medium"`). This is the rule
+this section asks for -- one person is perception, more than one is the page --
+already built before CAP-0's memory fix made it safe to build, and already
+gated the same way (a corroborated finding is never published from a scan that
+had no memory of what it had already shown a persona). Nothing new here.
+
+**D4, the other four checks, and D8: not attempted, stated rather than
+silently narrowed.** Heading order, alt text, form labels and focus visibility
+all need a field this codebase has never seen on a snapshot element -- a tag or
+heading-level, an `alt` attribute, a label association, a focus-visible style --
+checked the same way RPT-5/C4 checked before declining to guess at a palette
+field, and found absent from every fixture and every live payload shape
+referenced anywhere in this tree. Guessing field names that may not exist would
+either silently find nothing (indistinguishable from "the page is fine") or
+crash on a real payload. D8 ("a wait that exceeds this person's tolerance") has
+no real signal to build from either, once checked against what `behavior.js`
+actually computes: `readMs` is a *simulated reading duration* (how long this
+persona would take to read the text already on screen), not a measurement of
+page response latency, and the "wait" coping decision's `durationMs` is set to
+exactly `computeWaitTolerance()`'s own threshold by construction -- a persona
+who chooses to wait never, by the code's own arithmetic, waits longer than they
+would tolerate. There is no measured "the page took this long and this persona
+would not have tolerated it" quantity anywhere in the timeline to report;
+building one would need new instrumentation (a real page-response-latency
+measurement), not wiring data that already exists.
+
+Eight new tests: D9's grounding and cross-label consistency with the
+broken-promise side (2), A2's scorecard math and its intro-slide line (2), D7's
+clustering algorithm plus both the flagged and not-flagged cases (3), D4's
+target-size sweep (1). Full regression: 474 Python tests passing (same 3
+pre-existing unrelated failures as baseline), 277 Node tests unaffected (this
+track touched only `services/report_service/assembler.py` and
+`apps/api/executor.py`).
 
 ### RPT-5. Evidence and re-design in the product's own language — **done**
 

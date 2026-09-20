@@ -303,6 +303,48 @@ class ReportAssembler:
             "providers": [{"endpoint": endpoint, "model": model} for endpoint, model in sorted(providers)],
         }
 
+    @staticmethod
+    def _run_scorecard(journeys: list[dict[str, Any]], personas: list[dict[str, Any]],
+                       persona_names: dict[str, str]) -> dict[str, Any]:
+        """RPT-4/A2: task success, actions taken, where each run stopped, and
+        expectations met vs missed -- per persona and rolled up. A report that
+        only shows misses hides its own hit rate; this states it, from the same
+        `matched` field the broken-promise findings already draw the misses from,
+        so the two can never disagree about what a "miss" is."""
+        rows = []
+        total_met, total_missed = 0, 0
+        for journey, persona in zip(journeys, personas):
+            persona_id = persona.get("id")
+            verdict = journey.get("verdict") or {}
+            timeline = journey.get("timeline") or []
+            actions = sum(1 for event in timeline if event.get("type") == "persona.expectation")
+            met = sum(1 for event in timeline if event.get("type") == "persona.reflection"
+                     and str((event.get("data") or {}).get("matched") or "").lower() == "yes")
+            missed = sum(1 for event in timeline if event.get("type") == "persona.reflection"
+                        and str((event.get("data") or {}).get("matched") or "").lower() == "no")
+            total_met += met
+            total_missed += missed
+            rows.append({
+                "personaId": persona_id, "personaName": persona_names.get(persona_id, persona_id),
+                "runId": journey.get("runId"),
+                "taskSuccess": verdict.get("status") == "passed",
+                "verdictStatus": verdict.get("status") or "unknown",
+                "actionsTaken": actions, "expectationsMet": met, "expectationsMissed": missed,
+                # The run's own account of why it ended, whatever that was --
+                # not re-derived, so this can never disagree with the verdict.
+                "stoppedBecause": verdict.get("summary") or "",
+            })
+        total_expectations = total_met + total_missed
+        return {
+            "runs": rows,
+            "tasksSucceeded": sum(1 for row in rows if row["taskSuccess"]),
+            "tasksAttempted": len(rows),
+            "expectationsMet": total_met, "expectationsMissed": total_missed,
+            # None rather than a fabricated 0/0 -> 0% when no expectation was ever
+            # recorded at all (an empty timeline, or a director that records none).
+            "expectationsMetRate": round(total_met / total_expectations, 2) if total_expectations else None,
+        }
+
     @classmethod
     def _impact_analysis(cls, findings: list[dict[str, Any]], personas: list[dict[str, Any]]) -> dict[str, Any]:
         """A designer-facing read of the findings: how bad, how widespread, and who
@@ -958,6 +1000,46 @@ class ReportAssembler:
         merged = cls._merge_promise_labels(groups)
         return [cls._broken_promise_finding(group) for group in
                 sorted(merged, key=lambda item: -item["cost"])]
+
+    @classmethod
+    def _preserved_from_met_expectations(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """RPT-4/D9: the positive to `_pain_points_from_expectations`' misses --
+        a control that did exactly what a visitor expected, first try, grounded
+        in a *met* expectation rather than in generic praise. Same rule the
+        misses use for what counts as a promise (a control, not a scroll or a
+        read), the same grouping key (`_promise_label`, so a control preserved
+        here and broken elsewhere in another run can never silently be two
+        different entries), and the same `matched` field the scorecard counts
+        its hit rate from.
+        """
+        preserved: dict[str, dict[str, Any]] = {}
+        for journey in journeys:
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            pending: dict[str, Any] | None = None
+            expectation, measured_name = "", ""
+            for event in journey.get("timeline") or []:
+                kind, data = event.get("type"), event.get("data") or {}
+                if kind == "persona.expectation":
+                    pending, expectation = data.get("action") or {}, str(data.get("expectation") or "")
+                    measured_name = str(data.get("targetName") or "").strip()
+                elif kind == "persona.reflection" and pending is not None:
+                    if (str(data.get("matched") or "").lower() == "yes"
+                            and str(pending.get("type") or "").upper() in cls._PROMISING_ACTIONS):
+                        label = cls._promise_label(expectation, pending, measured_name)
+                        entry = preserved.setdefault(label, {
+                            "title": f"“{label}” does what it says", "elements": [],
+                            "personaIds": [], "routes": [], "screenshotRefs": [], "source": "persona.expectation",
+                            "hits": 0, "expectation": expectation.strip()})
+                        entry["hits"] += 1
+                        if persona_id and persona_id not in entry["personaIds"]:
+                            entry["personaIds"].append(persona_id)
+                    pending = None
+        for entry in preserved.values():
+            entry["observedByPersonas"] = len(entry["personaIds"])
+            entry["description"] = (f"Before touching it, a visitor expected: "
+                                    f"“{entry.pop('expectation') or entry['title']}”. It delivered, "
+                                    f"first try, {plural(entry.pop('hits'), 'time')}.")
+        return list(preserved.values())
 
     @staticmethod
     def _merge_promise_labels(groups: dict[str, dict[str, Any]]) -> list[dict[str, Any]]:
@@ -1952,6 +2034,160 @@ class ReportAssembler:
         except (OSError, json.JSONDecodeError):
             return []
         return snapshot.get("elements", []) if isinstance(snapshot, dict) else []
+
+    # D7: roles read as the same rough kind of control for proximity-grouping
+    # purposes. Anything not in one of these buckets is left out of the check
+    # entirely -- a role this doesn't recognise is a role it has no business
+    # guessing the behaviour kind of.
+    _CONTROL_ACTION_KIND = {
+        "link": "navigates", "button": "acts", "submit": "acts", "checkbox": "toggles",
+        "radio": "toggles", "switch": "toggles", "tab": "switches view", "menuitem": "opens menu",
+    }
+    # Elements whose boxes are within this many pixels of each other (expanded)
+    # read as one visual group to a visitor scanning the page -- roughly a
+    # comfortable touch-target gap, not a rigorous perceptual measurement.
+    _GROUPING_MARGIN_PX = 16
+
+    @staticmethod
+    def _boxes_are_adjacent(a: dict[str, Any], b: dict[str, Any], margin: float) -> bool:
+        try:
+            ax0, ay0 = float(a["x"]), float(a["y"])
+            ax1, ay1 = ax0 + float(a["width"]), ay0 + float(a["height"])
+            bx0, by0 = float(b["x"]), float(b["y"])
+            bx1, by1 = bx0 + float(b["width"]), by0 + float(b["height"])
+        except (KeyError, TypeError, ValueError):
+            return False
+        return not (bx0 > ax1 + margin or bx1 < ax0 - margin or by0 > ay1 + margin or by1 < ay0 - margin)
+
+    @classmethod
+    def _cluster_by_proximity(cls, elements: list[dict[str, Any]]) -> list[list[dict[str, Any]]]:
+        """Elements a visitor would read as one visual group, by boxes touching
+        or nearly touching -- proximity implying similar function is a
+        relationship *between* elements, not a property of one, which is why no
+        per-element check finds it. Simple flood-fill over pairwise adjacency;
+        this does not need to be a real layout engine, only consistent."""
+        remaining = list(elements)
+        clusters: list[list[dict[str, Any]]] = []
+        while remaining:
+            cluster = [remaining.pop(0)]
+            grew = True
+            while grew:
+                grew = False
+                for candidate in list(remaining):
+                    if any(cls._boxes_are_adjacent(member.get("box") or {}, candidate.get("box") or {},
+                                                    cls._GROUPING_MARGIN_PX) for member in cluster):
+                        cluster.append(candidate)
+                        remaining.remove(candidate)
+                        grew = True
+            clusters.append(cluster)
+        return clusters
+
+    @classmethod
+    def _grouped_controls_with_differing_actions(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """D7: controls close enough to read as one group, whose kinds of action
+        actually differ -- a navigation link next to what looks like its sibling
+        but is really a destructive submit button, say. The geometry and the
+        roles are both already captured; this is the relationship between
+        elements no per-element check can find."""
+        findings: list[dict[str, Any]] = []
+        seen: set[tuple] = set()
+        for journey in journeys:
+            snapshot_paths = [path for path in (journey.get("artifacts") or {}).get("snapshots") or []
+                              if Path(path).suffix == ".json"]
+            for snapshot_path in snapshot_paths:
+                elements = [element for element in cls._read_snapshot_elements(snapshot_path)
+                           if element.get("box") and str(element.get("role") or "").lower() in cls._CONTROL_ACTION_KIND]
+                for cluster in cls._cluster_by_proximity(elements):
+                    kinds = {str(element.get("role") or "").lower() for element in cluster}
+                    if len(cluster) < 2 or len(kinds) < 2:
+                        continue
+                    key = tuple(sorted(str(element.get("selector") or "") for element in cluster))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    names = [str(element.get("name") or element.get("text") or element.get("selector") or "").strip()
+                            for element in cluster]
+                    kind_list = ", ".join(f'"{name}" {cls._CONTROL_ACTION_KIND[str(element.get("role") or "").lower()]}'
+                                          for name, element in zip(names, cluster))
+                    box = min((element.get("box") for element in cluster),
+                             key=lambda b: (b or {}).get("y", 0))
+                    findings.append({
+                        "severity": "medium", "category": "consistency",
+                        "title": f"Grouped controls that do different kinds of things: {', '.join(names[:3])}",
+                        "summary": (f"{plural(len(cluster), 'control')} sit close enough together to read as "
+                                    f"one group, and do different kinds of things: {kind_list}. Proximity "
+                                    "implies shared function; a visitor treating them as equivalent options "
+                                    "gets a different outcome depending on which one they pick."),
+                        "recommendation": ("Separate them visually if they are meant to be read as different "
+                                           "kinds of control, or make their behaviour consistent if they are "
+                                           "meant to be read as the same kind."),
+                        "evidence": f"boxes within {cls._GROUPING_MARGIN_PX}px of each other, roles: "
+                                   + ", ".join(sorted(kinds)),
+                        "elementBox": box, "elementName": names[0] if names else "",
+                        "source": "layout.grouped", "runId": journey.get("runId"),
+                        "personaId": journey.get("profileId") or journey.get("testerProfileId"),
+                    })
+        return findings
+
+    # D4: WCAG 2.5.8 (Target Size, Minimum) -- 24x24 CSS px, the AA minimum for
+    # a pointer target. Built from box geometry alone, which is the one part of
+    # the DOM snapshot already verified reliable elsewhere in this codebase
+    # (_boxes_are_adjacent, _crop_element_data_uri). Deliberately the only piece
+    # of the "deterministic sweep" this attempts: heading order needs a tag or
+    # heading-level field, alt text needs an `alt` attribute, and a form-label
+    # check needs a label association -- none of which this codebase has ever
+    # seen on an element from journeytest-core's own snapshot (checked against
+    # every fixture and every live payload shape referenced anywhere in this
+    # tree, the same check RPT-5/C4 ran before declining to guess at a palette
+    # field). Guessing field names that may not exist would either silently
+    # find nothing (indistinguishable from "the page is fine") or crash on a
+    # real payload -- both worse than not attempting the other four checks.
+    _MIN_TARGET_PX = 24
+
+    @classmethod
+    def _small_touch_targets(cls, journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """D4 (partial: target size only): an interactive control below the WCAG
+        AA minimum is hard to hit accurately for any visitor, not only one whose
+        motor profile happened to miss it -- a fact about the control, reported
+        the same way the contrast check reports a fact about a colour."""
+        findings: list[dict[str, Any]] = []
+        seen: set[str] = set()
+        for journey in journeys:
+            for snapshot_path in [path for path in (journey.get("artifacts") or {}).get("snapshots") or []
+                                  if Path(path).suffix == ".json"]:
+                for element in cls._read_snapshot_elements(snapshot_path):
+                    role = str(element.get("role") or "").lower()
+                    if role not in cls._CONTROL_ACTION_KIND:
+                        continue
+                    box = element.get("box") or {}
+                    width, height = box.get("width"), box.get("height")
+                    if not (isinstance(width, (int, float)) and isinstance(height, (int, float))):
+                        continue
+                    if width >= cls._MIN_TARGET_PX and height >= cls._MIN_TARGET_PX:
+                        continue
+                    selector = str(element.get("selector") or "")
+                    if not selector or selector in seen:
+                        continue
+                    seen.add(selector)
+                    name = str(element.get("name") or element.get("text") or selector).strip()
+                    findings.append({
+                        "severity": "medium", "category": "accessibility",
+                        "title": f'Target below the WCAG minimum: "{name}"',
+                        "summary": (f'"{name}" measures {int(width)}x{int(height)}px. The WCAG 2.2 AA minimum '
+                                    f"for a pointer target is {cls._MIN_TARGET_PX}x{cls._MIN_TARGET_PX}px -- "
+                                    "below it, an accurate tap or click gets measurably harder for any "
+                                    "visitor, not only one with reduced motor precision."),
+                        "recommendation": (f"Increase the clickable area to at least "
+                                           f"{cls._MIN_TARGET_PX}x{cls._MIN_TARGET_PX}px, either by enlarging "
+                                           "the control or by padding its hit area without changing how it "
+                                           "looks."),
+                        "evidence": f"measured {int(width)}x{int(height)}px against a {cls._MIN_TARGET_PX}"
+                                   f"x{cls._MIN_TARGET_PX}px minimum",
+                        "elementBox": box, "elementName": name,
+                        "source": "layout.targetSize", "runId": journey.get("runId"),
+                        "personaId": journey.get("profileId") or journey.get("testerProfileId"),
+                    })
+        return findings
 
     @classmethod
     def _elements_for_screenshot(cls, screenshot_path: str, snapshot_paths: list[str]) -> list[dict]:
@@ -3190,10 +3426,19 @@ class ReportAssembler:
                          f'{plural(usage["totalCalls"], "model call")}, '
                          f'{usage["totalWallMs"] / 1000:.1f}s wall time{token_bits}'
                          + (f" &mdash; served by {escape(provider_bits)}" if provider_bits else "") + '</p>')
+        # A2: the hit rate, not only the misses -- a report that only shows
+        # misses hides its own.
+        scorecard = report.get("scorecard") or {}
+        scorecard_note = ""
+        if scorecard.get("tasksAttempted"):
+            rate = scorecard.get("expectationsMetRate")
+            rate_bits = f", {rate:.0%} of expectations held" if rate is not None else ""
+            scorecard_note = (f'<p class="affected">{scorecard["tasksSucceeded"]} of '
+                             f'{plural(scorecard["tasksAttempted"], "task")} completed{rate_bits}</p>')
         slides.append(
             f'<section class="slide"><h2>How this review was made</h2>'
             f'<p class="summary">{escape(method)}</p>'
-            f'{scope_note}{evidence_stamp}{usage_note}'
+            f'{scope_note}{evidence_stamp}{usage_note}{scorecard_note}'
             f'<h3>Tasks attempted</h3><ul>{task_items}</ul>'
             + (f'<p class="affected">{escape(plural(len(findings), "issue"))} found'
                + (f" &mdash; {escape(counts_line)}" if counts_line else "") + '</p>' if findings else "")

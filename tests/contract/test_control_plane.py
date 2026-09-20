@@ -841,6 +841,176 @@ def test_rpt3_the_retest_line_is_printed_on_the_slide_and_in_the_presentation():
     assert "Ada should see this hold" in presentation
 
 
+# --- RPT-4/A2: the scorecard -----------------------------------------------------
+
+def test_a2_the_scorecard_states_task_success_and_the_expectation_hit_rate():
+    """A report that only shows misses hides its own hit rate. The scorecard
+    draws misses from the same `matched` field the broken-promise findings do,
+    so the two can never disagree about what a "miss" is."""
+    def pair(matched):
+        return [{"type": "persona.expectation", "data": {}}, {"type": "persona.reflection", "data": {"matched": matched}}]
+
+    journeys = [
+        {"runId": "run_1", "verdict": {"status": "passed", "summary": "Completed."},
+         "timeline": pair("yes") + pair("yes") + pair("no")},
+        {"runId": "run_2", "verdict": {"status": "failed", "summary": "Gave up at checkout."},
+         "timeline": pair("no")},
+    ]
+    personas = [{"id": "p1"}, {"id": "p2"}]
+
+    scorecard = JobExecutor._run_scorecard(journeys, personas, {"p1": "Ada", "p2": "Lin"})
+
+    assert scorecard["tasksSucceeded"] == 1 and scorecard["tasksAttempted"] == 2
+    assert scorecard["expectationsMet"] == 2 and scorecard["expectationsMissed"] == 2
+    assert scorecard["expectationsMetRate"] == 0.5
+    assert scorecard["runs"][0]["personaName"] == "Ada"
+    assert scorecard["runs"][0]["actionsTaken"] == 3
+    assert scorecard["runs"][1]["stoppedBecause"] == "Gave up at checkout."
+
+    # No expectations recorded at all: None, not a fabricated 0%.
+    empty = JobExecutor._run_scorecard([{"runId": "r", "verdict": {}, "timeline": []}], [{"id": "p1"}], {})
+    assert empty["expectationsMetRate"] is None
+
+
+def test_a2_the_scorecard_hit_rate_is_printed_on_the_intro_slide():
+    html = JobExecutor._slide_deck({
+        "url": "https://example.test/", "executive_summary": "s", "evidence_language": "observed",
+        "journey_outcome": {"tasks": ["Buy an item"]}, "impact_analysis": {},
+        "elements_to_preserve": [], "critical_pain_points": [],
+        "scorecard": {"tasksSucceeded": 2, "tasksAttempted": 3, "expectationsMet": 6,
+                     "expectationsMissed": 2, "expectationsMetRate": 0.75}})
+
+    assert "2 of 3 tasks completed" in html
+    assert "75% of expectations held" in html
+
+
+# --- RPT-4/D9: say what worked, grounded in a met expectation -------------------
+
+def test_d9_a_met_expectation_becomes_a_preserved_element_not_generic_praise():
+    """A control that did exactly what a visitor expected, first try, is a
+    design decision worth preserving -- grounded in the same `matched` field
+    the misses use, not in generic praise."""
+    journeys = [{"runId": "run_1", "profileId": "p1", "timeline": [
+        {"type": "persona.expectation", "data": {"expectation": "clicking will show the price",
+                                                  "action": {"type": "CLICK", "target": "e1"},
+                                                  "targetName": "See pricing"}},
+        {"type": "persona.reflection", "data": {"matched": "yes"}},
+    ]}]
+
+    preserved = JobExecutor._preserved_from_met_expectations(journeys)
+
+    assert len(preserved) == 1
+    assert preserved[0]["title"] == "“See pricing” does what it says"
+    assert "clicking will show the price" in preserved[0]["description"]
+    assert "delivered, first try" in preserved[0]["description"]
+    assert preserved[0]["observedByPersonas"] == 1
+
+    # Not a promising action (a READ changes nothing): not counted as a promise
+    # kept, the same rule the misses use for what counts as a promise at all.
+    not_a_promise = [{"runId": "run_1", "profileId": "p1", "timeline": [
+        {"type": "persona.expectation", "data": {"expectation": "scrolling will reveal more",
+                                                  "action": {"type": "SCROLL"}}},
+        {"type": "persona.reflection", "data": {"matched": "yes"}},
+    ]}]
+    assert JobExecutor._preserved_from_met_expectations(not_a_promise) == []
+
+
+def test_d9_a_control_kept_and_broken_elsewhere_groups_under_the_same_label():
+    """The met and unmet cases share _promise_label, so a control preserved in
+    one run and broken in another can never silently become two entries with
+    different names for the same control."""
+    action = {"type": "CLICK"}
+    kept = JobExecutor._preserved_from_met_expectations([{"runId": "run_1", "profileId": "p1", "timeline": [
+        {"type": "persona.expectation", "data": {"expectation": "will start the trial",
+                                                  "action": action, "targetName": "Start free trial"}},
+        {"type": "persona.reflection", "data": {"matched": "yes"}},
+    ]}])
+    broken_label = JobExecutor._promise_label("will start the trial", action, "Start free trial")
+    assert kept[0]["title"] == f"“{broken_label}” does what it says"
+
+
+# --- RPT-4/D7: grouped controls whose actions differ in kind --------------------
+
+def test_d7_two_adjacent_controls_of_different_kinds_are_flagged(tmp_path):
+    import json as json_module
+
+    snapshot = tmp_path / "001-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": "#next", "role": "link", "name": "Continue",
+         "box": {"x": 100, "y": 40, "width": 80, "height": 30}},
+        {"selector": "#delete", "role": "button", "name": "Delete account",
+         "box": {"x": 184, "y": 40, "width": 80, "height": 30}},
+        {"selector": "#far", "role": "button", "name": "Far away button",
+         "box": {"x": 900, "y": 900, "width": 80, "height": 30}},
+    ]}))
+    journeys = [{"runId": "run_1", "profileId": "p1", "artifacts": {"snapshots": [str(snapshot)]}}]
+
+    findings = JobExecutor._grouped_controls_with_differing_actions(journeys)
+
+    assert len(findings) == 1
+    assert "Continue" in findings[0]["title"] and "Delete account" in findings[0]["title"]
+    assert "navigates" in findings[0]["summary"] and "acts" in findings[0]["summary"]
+    assert findings[0]["source"] == "layout.grouped"
+    # The far-away button is its own cluster of one -- never flagged, and never
+    # pulled into the same finding as the adjacent pair.
+    assert "Far away" not in findings[0]["title"]
+
+
+def test_d7_controls_of_the_same_kind_grouped_together_are_not_flagged(tmp_path):
+    """Proximity alone is not the defect -- a row of same-kind buttons (three
+    links, say) is an ordinary menu, not an inconsistency."""
+    import json as json_module
+
+    snapshot = tmp_path / "001-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": "#a", "role": "link", "name": "Home", "box": {"x": 0, "y": 0, "width": 40, "height": 20}},
+        {"selector": "#b", "role": "link", "name": "About", "box": {"x": 44, "y": 0, "width": 40, "height": 20}},
+    ]}))
+    journeys = [{"runId": "run_1", "profileId": "p1", "artifacts": {"snapshots": [str(snapshot)]}}]
+
+    assert JobExecutor._grouped_controls_with_differing_actions(journeys) == []
+
+
+def test_d7_cluster_by_proximity_flood_fills_a_chain_of_adjacent_boxes():
+    elements = [
+        {"selector": "a", "box": {"x": 0, "y": 0, "width": 20, "height": 20}},
+        {"selector": "b", "box": {"x": 25, "y": 0, "width": 20, "height": 20}},   # touches a
+        {"selector": "c", "box": {"x": 50, "y": 0, "width": 20, "height": 20}},   # touches b, not a directly
+        {"selector": "d", "box": {"x": 500, "y": 500, "width": 20, "height": 20}},  # isolated
+    ]
+    clusters = JobExecutor._cluster_by_proximity(elements)
+    sizes = sorted(len(cluster) for cluster in clusters)
+    assert sizes == [1, 3]
+
+
+# --- RPT-4/D4: a deterministic sweep for target size -----------------------------
+
+def test_d4_a_target_below_the_wcag_minimum_is_flagged(tmp_path):
+    import json as json_module
+
+    snapshot = tmp_path / "001-view-dom.json"
+    snapshot.write_text(json_module.dumps({"elements": [
+        {"selector": "#tiny", "role": "button", "name": "X",
+         "box": {"x": 10, "y": 10, "width": 16, "height": 16}},
+        {"selector": "#fine", "role": "button", "name": "Submit",
+         "box": {"x": 100, "y": 10, "width": 48, "height": 32}},
+        {"selector": "#text", "role": "text", "name": "Some paragraph",
+         "box": {"x": 10, "y": 100, "width": 10, "height": 10}},
+    ]}))
+    journeys = [{"runId": "run_1", "profileId": "p1", "artifacts": {"snapshots": [str(snapshot)]}}]
+
+    findings = JobExecutor._small_touch_targets(journeys)
+
+    assert len(findings) == 1
+    assert findings[0]["title"] == 'Target below the WCAG minimum: "X"'
+    assert "16x16px" in findings[0]["summary"] and "24x24px" in findings[0]["summary"]
+    assert findings[0]["source"] == "layout.targetSize"
+    # Not flagged: comfortably above the minimum, and non-interactive text
+    # (never a "target" to begin with, whatever size it measures).
+    assert "Submit" not in str(findings)
+    assert "Some paragraph" not in str(findings)
+
+
 def test_slide_deck_says_predicted_when_no_browser_evidence_was_collected():
     """Honesty about evidence class: without a live run the deck must claim no more
     than a heuristic walkthrough does."""
