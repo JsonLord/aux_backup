@@ -134,6 +134,11 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
         self.providers = [tuple(entry) for entry in providers] if providers is not None else None
         # Set by _complete once something answers; read by callers that report it.
         self.served_by: dict[str, str] | None = None
+        # BE-3: every call this engine instance made that actually answered --
+        # role, provider served, wall time, and token usage when the response
+        # carried it. A retried attempt that failed spent no tokens a report
+        # could account for, so only a successful call is ever appended.
+        self.usage_log: list[dict[str, Any]] = []
         resolved = self._resolve(base_url, model, api_key, chain=self.providers)
         self.base_url = resolved["base_url"].rstrip("/")
         self.model = resolved["model"]
@@ -194,7 +199,7 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
 
     def _complete(self, messages: list[dict], response_format: dict | None = None,
                    max_attempts: int | None = None, retry_wait_seconds: float | None = None,
-                   temperature: float = 0, timeout: float = 60) -> str:
+                   temperature: float = 0, timeout: float = 60, role: str = "") -> str:
         """POST a chat completion and return its raw text content, retrying the same
         request on transient failure. The "auto" router occasionally returns a
         non-2xx status, a connection error (observed live, under concurrent load
@@ -226,11 +231,13 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
                 payload["response_format"] = response_format
             for attempt in range(1, max_attempts + 1):
                 try:
+                    started_at = time.monotonic()
                     response = requests.post(f"{where['base_url']}/chat/completions",
                                              headers={"authorization": f"Bearer {where['api_key']}"},
                                              json=payload, timeout=timeout)
                     response.raise_for_status()
-                    content = response.json()["choices"][0]["message"]["content"]
+                    body = response.json()
+                    content = body["choices"][0]["message"]["content"]
                     if not content or not content.strip():
                         raise ValueError("model returned an empty completion")
                     # Which provider actually answered. A run served by the second
@@ -242,6 +249,14 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
                     self.served_by = {"endpoint": f"{split.scheme}://{split.netloc}"
                                       if split.netloc else where["base_url"],
                                       "model": where["model"]}
+                    # BE-3: recorded only on the call that actually answered -- a
+                    # retried attempt that failed spent no tokens to account for.
+                    usage = body.get("usage") or {}
+                    self.usage_log.append({
+                        "role": role, "endpoint": self.served_by["endpoint"], "model": where["model"],
+                        "temperature": temperature, "wallMs": round((time.monotonic() - started_at) * 1000),
+                        "promptTokens": usage.get("prompt_tokens"), "completionTokens": usage.get("completion_tokens"),
+                    })
                     return content
                 except (requests.RequestException, ValueError, KeyError, IndexError) as error:
                     last_error = error
@@ -276,12 +291,13 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
             chain.append({"base_url": url, "model": model, "api_key": key})
         return chain
 
-    def _complete_json(self, prompt: dict, max_attempts: int | None = None, retry_wait_seconds: float | None = None) -> dict:
+    def _complete_json(self, prompt: dict, max_attempts: int | None = None, retry_wait_seconds: float | None = None,
+                        role: str = "") -> dict:
         """Like _complete, but sends `prompt` as a JSON-encoded user message and
         parses the response as JSON (tolerating a markdown code fence)."""
         content = self._complete([{"role": "user", "content": json.dumps(prompt)}],
                                   response_format={"type": "json_object"},
-                                  max_attempts=max_attempts, retry_wait_seconds=retry_wait_seconds)
+                                  max_attempts=max_attempts, retry_wait_seconds=retry_wait_seconds, role=role)
         try:
             return self._parse_json_completion(content)
         except json.JSONDecodeError as error:
@@ -289,17 +305,17 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
 
     def complete_text(self, system_prompt: str, user_prompt: str,
                        max_attempts: int | None = None, retry_wait_seconds: float | None = None,
-                       temperature: float = 0.4, timeout: float = 90) -> str:
+                       temperature: float = 0.4, timeout: float = 90, role: str = "") -> str:
         """Free-form text/HTML completion (no JSON response_format constraint),
         reusing the same retry/backoff behavior as _complete_json."""
         return self._complete([{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}],
                                max_attempts=max_attempts, retry_wait_seconds=retry_wait_seconds,
-                               temperature=temperature, timeout=timeout)
+                               temperature=temperature, timeout=timeout, role=role)
 
     def compile_behavior(self, persona, scenario, traits, seed):
         schema = {trait: "number from 0 to 1" for trait in traits}
         prompt = {"task": "Compile web-interaction priors. Do not infer medical or physical impairments from demographics.", "persona": persona, "scenario": scenario, "seed": seed, "required_output": schema}
-        result = self._complete_json(prompt)
+        result = self._complete_json(prompt, role="persona.behavior")
         if set(result) != set(traits):
             raise ValueError("semantic engine returned an invalid behavior schema")
         return {trait: max(0.0, min(1.0, float(result[trait]))) for trait in traits}
@@ -337,7 +353,7 @@ class DirectLLMSemanticEngine:  # noqa: D101 - documented below
                     "realistic minority should deviate meaningfully.",
             "persona": persona, "scenario": scenario, "seed": seed, "required_output": schema,
         }
-        result = self._complete_json(prompt)
+        result = self._complete_json(prompt, role="persona.abilities")
         if set(result) != set(self._ABILITY_FIELDS):
             raise ValueError("semantic engine returned an invalid ability schema")
         color_vision = result["colorVision"] if result["colorVision"] in {"typical", "protanopia", "deuteranopia", "tritanopia"} else "typical"

@@ -220,6 +220,57 @@ class ReportAssembler:
         with_index = [(cls._finding_step_index(finding), finding) for finding in findings]
         return [finding for _, finding in sorted(with_index, key=lambda pair: (pair[0] is None, pair[0] or 0))]
 
+    @staticmethod
+    def _model_usage_summary(journeys: list[dict[str, Any]], extra_usage: list[dict[str, Any]] | None = None
+                             ) -> dict[str, Any] | None:
+        """BE-3: what this run actually cost, broken down by role, and which
+        providers served it. Two funnels feed this -- every Node-side model
+        call the run made (`journey["modelUsage"]`, from personaActor.js's
+        `completion()`) and every Python-side call this report itself made
+        while building the redesign panels (`extra_usage`, from
+        DirectLLMSemanticEngine._complete()) -- because there are exactly two
+        places a model call can originate from. Returns None when neither
+        funnel recorded anything, rather than a report claiming a cost of
+        zero for calls it simply never measured.
+        """
+        calls = list(extra_usage or [])
+        for journey in journeys:
+            calls.extend(journey.get("modelUsage") or [])
+        if not calls:
+            return None
+        by_role: dict[str, dict[str, Any]] = {}
+        providers: set[tuple[str, str]] = set()
+        total_wall_ms = 0
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        any_tokens = False
+        for call in calls:
+            role = str(call.get("role") or "unspecified")
+            bucket = by_role.setdefault(role, {"calls": 0, "wallMs": 0, "promptTokens": 0, "completionTokens": 0})
+            bucket["calls"] += 1
+            wall_ms = call.get("wallMs") or 0
+            bucket["wallMs"] += wall_ms
+            total_wall_ms += wall_ms
+            prompt_tokens, completion_tokens = call.get("promptTokens"), call.get("completionTokens")
+            if isinstance(prompt_tokens, (int, float)) or isinstance(completion_tokens, (int, float)):
+                any_tokens = True
+                bucket["promptTokens"] += prompt_tokens or 0
+                bucket["completionTokens"] += completion_tokens or 0
+                total_prompt_tokens += prompt_tokens or 0
+                total_completion_tokens += completion_tokens or 0
+            if call.get("endpoint") and call.get("model"):
+                providers.add((str(call["endpoint"]), str(call["model"])))
+        return {
+            "totalCalls": len(calls),
+            "totalWallMs": total_wall_ms,
+            # None rather than 0 when nothing in this run's chain ever returned a
+            # usage object -- a real zero and "never measured" are different claims.
+            "totalPromptTokens": total_prompt_tokens if any_tokens else None,
+            "totalCompletionTokens": total_completion_tokens if any_tokens else None,
+            "byRole": by_role,
+            "providers": [{"endpoint": endpoint, "model": model} for endpoint, model in sorted(providers)],
+        }
+
     @classmethod
     def _impact_analysis(cls, findings: list[dict[str, Any]], personas: list[dict[str, Any]]) -> dict[str, Any]:
         """A designer-facing read of the findings: how bad, how widespread, and who
@@ -2744,7 +2795,8 @@ class ReportAssembler:
 
     @classmethod
     def _attach_redesigns(cls, findings: list[dict[str, Any]], url: str | None,
-                          providers: list[tuple[str, str, str]] | None = None) -> None:
+                          providers: list[tuple[str, str, str]] | None = None,
+                          usage_sink: list[dict[str, Any]] | None = None) -> None:
         """Generate the "Re-design" half of each finding as real, inspectable HTML.
 
         The reference review deck pairs a photo of the current design with a mockup
@@ -2769,7 +2821,7 @@ class ReportAssembler:
         for finding in ranked[:limit]:
             if finding.get("title") == "No pain points detected":
                 continue
-            fragment = cls._generate_redesign_fragment(finding, url, providers)
+            fragment = cls._generate_redesign_fragment(finding, url, providers, usage_sink=usage_sink)
             if fragment:
                 finding["redesignHtml"] = fragment
 
@@ -2826,7 +2878,8 @@ class ReportAssembler:
 
     @classmethod
     def _generate_redesign_fragment(cls, finding: dict[str, Any], url: str | None,
-                                    providers: list[tuple[str, str, str]] | None = None) -> str | None:
+                                    providers: list[tuple[str, str, str]] | None = None,
+                                    usage_sink: list[dict[str, Any]] | None = None) -> str | None:
         """One finding -> a self-contained HTML fragment implementing its fix.
 
         Returns None when no model is configured or the call fails: an absent
@@ -2879,9 +2932,14 @@ class ReportAssembler:
             "Produce the corrected component implementing those changes.",
         ])
         try:
-            content = engine.complete_text(system_prompt, user_prompt)
+            content = engine.complete_text(system_prompt, user_prompt, role="report.redesign")
         except RuntimeError:
             return None
+        finally:
+            # BE-3: recorded whether or not the call above produced a usable
+            # fragment -- the tokens were still spent on the attempt.
+            if usage_sink is not None:
+                usage_sink.extend(engine.usage_log)
         stripped = content.strip()
         if stripped.startswith("```"):
             stripped = re.sub(r"^```[a-zA-Z]*\n?", "", stripped)
@@ -3012,10 +3070,22 @@ class ReportAssembler:
         # it is the one line that says exactly how much to trust what follows.
         evidence_stamp = (f'<p class="affected" style="opacity:.7">'
                           f'evidence_language: {escape(report.get("evidence_language") or "unknown")}</p>')
+        # BE-3: the economic case, on the one slide a reader would look for it --
+        # never made before this existed anywhere in the artifact.
+        usage = report.get("model_usage") or {}
+        usage_note = ""
+        if usage:
+            token_bits = (f", {usage['totalPromptTokens'] + usage['totalCompletionTokens']} tokens"
+                         if usage.get("totalPromptTokens") is not None else "")
+            provider_bits = ", ".join(f"{p['model']} ({p['endpoint']})" for p in usage.get("providers") or [])
+            usage_note = (f'<p class="affected" style="opacity:.7">'
+                         f'{plural(usage["totalCalls"], "model call")}, '
+                         f'{usage["totalWallMs"] / 1000:.1f}s wall time{token_bits}'
+                         + (f" &mdash; served by {escape(provider_bits)}" if provider_bits else "") + '</p>')
         slides.append(
             f'<section class="slide"><h2>How this review was made</h2>'
             f'<p class="summary">{escape(method)}</p>'
-            f'{scope_note}{evidence_stamp}'
+            f'{scope_note}{evidence_stamp}{usage_note}'
             f'<h3>Tasks attempted</h3><ul>{task_items}</ul>'
             + (f'<p class="affected">{escape(plural(len(findings), "issue"))} found'
                + (f" &mdash; {escape(counts_line)}" if counts_line else "") + '</p>' if findings else "")

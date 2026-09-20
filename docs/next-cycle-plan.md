@@ -376,11 +376,56 @@ calls or that other modules import by name, so no importer changed.
 three by name — all three need `dspy`, which `AGENTS.md` deliberately leaves
 uninstalled. Not one assertion changed.
 
-### BE-3. Cost and time accounting
+### BE-3. Cost and time accounting — **done**
 
 Nothing records tokens or wall time. Two reasons to add it: the economic case is
 never made in the artifact itself, and RPT-1 and RPT-3 both add model calls, so without
 it we cannot say what the better report costs.
+
+**What shipped, both funnels named in the detail spec.** Node: `completion()`
+(`personaActor.js`) accepts an optional `role` and `usageLog` array; on a call
+that actually answers, it pushes `{role, endpoint, model, temperature, wallMs,
+promptTokens, completionTokens}` -- never on a retried attempt that failed, which
+spent no tokens to account for. `llmActor()` owns one log per run
+(`decide.usageLog`), fed by all three of its call sites (acting, reflection,
+adherence, each under its own role), and `journeytest.js` attaches it to the run
+result as `modelUsage`. Python: `DirectLLMSemanticEngine._complete()` records the
+same shape onto `self.usage_log`; `compile_behavior`/`compile_abilities` pass
+`role="persona.behavior"`/`"persona.abilities"`, and the report's own redesign
+calls (`_generate_redesign_fragment`) pass `role="report.redesign"` and drain
+into a `usage_sink` list `_attach_redesigns` threads through.
+
+`ReportAssembler._model_usage_summary()` rolls both funnels into one summary --
+total calls, wall time, prompt/completion tokens (kept as `None` rather than a
+fabricated `0` when nothing in the chain ever returned a `usage` object), broken
+down `byRole`, and every distinct `{endpoint, model}` that actually served a
+call. It lands on the report as `model_usage` and is printed on the "How this
+review was made" slide, per the "done when" clause.
+
+**A9, which the RPT-6 table said would ride with this.** When `model_usage` is
+non-empty, a limitations line states plainly that this run's model calls used
+temperature > 0 and will not reproduce the same persona wording on a re-run --
+only the compiled behavior/ability profile (the persona's disposition) is
+reproducible, not its exact phrasing.
+
+**Not accounted for, stated rather than silently narrowed.** Persona
+generation's own model calls (`compile_behavior`/`compile_abilities`) are
+recorded onto `self.usage_log` and tested directly, but nothing in this change
+threads them into a specific report's `model_usage` -- persona compilation runs
+as its own artifact-producing step, earlier and in a different job than
+`combined_test`, and the persona artifact carries no usage field for a later
+report to read back. `model_usage` on a report today covers exactly the model
+calls `combined_test` itself makes: the run's own acting/reflection/adherence
+calls (Node) and this report's own redesign generation (Python). Threading
+persona-compile usage into a specific downstream report is a real gap, not
+fixed here.
+
+Seven new tests: four Python (one engine-level usage-log test, two
+`_model_usage_summary`/report-level tests, one slide-deck rendering test) and
+three Node (a real completion's usage record, a failed retry never billed,
+reflection/adherence billed under their own role). Full regression: 458
+Python tests passing (same 3 pre-existing unrelated failures as baseline),
+277 Node tests passing.
 
 ### BE-4. The noise floor *(the worksheet's §0, and it gates judging any of this)*
 

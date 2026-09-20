@@ -334,3 +334,80 @@ test("the acting loop falls back to a large model, not the reflection one", asyn
   // Reflection keeps its own small model; the fallback did not take it over.
   assert.equal(actor.reflectModel, "alias-fast");
 });
+
+// --- BE-3: cost and time accounting --------------------------------------------
+
+test("a real completion records its role, wall time and token usage", async () => {
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => ({
+    ok: true,
+    json: async () => ({
+      choices: [{ message: { content: JSON.stringify(
+        { visible: "", expectation: "", action: { type: "READ", target: "e1" } }) } }],
+      usage: { prompt_tokens: 120, completion_tokens: 40 },
+    }),
+  });
+  try {
+    const actor = llmActor({ model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1" });
+    await actor(ASK());
+
+    assert.equal(actor.usageLog.length, 1);
+    assert.equal(actor.usageLog[0].role, "acting");
+    assert.equal(actor.usageLog[0].model, "auto");
+    assert.equal(actor.usageLog[0].endpoint, "https://router.example/v1");
+    assert.equal(actor.usageLog[0].promptTokens, 120);
+    assert.equal(actor.usageLog[0].completionTokens, 40);
+    assert.ok(actor.usageLog[0].wallMs >= 0);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("only the attempt that actually answered is billed, not a failed retry", async () => {
+  let calls = 0;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async () => {
+    calls += 1;
+    if (calls === 1) {
+      return { ok: false, status: 500, text: async () => "boom", headers: { get: () => "" } };
+    }
+    return {
+      ok: true,
+      json: async () => ({ choices: [{ message: { content: JSON.stringify(
+        { visible: "", expectation: "", action: { type: "READ", target: "e1" } }) } }] }),
+    };
+  };
+  try {
+    const actor = llmActor({ model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1" });
+    await actor(ASK());
+
+    assert.equal(calls, 2, "the request really was retried");
+    assert.equal(actor.usageLog.length, 1, "only the answer that succeeded is billed");
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});
+
+test("reflection and adherence calls are billed under their own role", async () => {
+  const originalFetch = globalThis.fetch;
+  const reply = (content) => ({ ok: true, json: async () => ({ choices: [{ message: { content } }] }) });
+  globalThis.fetch = async (url, { body }) => {
+    const { model } = JSON.parse(body);
+    if (model === "alias-fast") {
+      return reply(JSON.stringify({ observed: "nothing changed", matched: "yes", gap: "" }));
+    }
+    return reply(JSON.stringify({ visible: "", expectation: "", action: { type: "READ", target: "e1" } }));
+  };
+  try {
+    const actor = llmActor({ model: "auto", apiKey: "k1", baseUrl: "https://router.example/v1",
+      reflectModel: "alias-fast", reflectApiKey: "k2", reflectBaseUrl: "https://router.example/v1" });
+    await actor(ASK());
+    await actor.reflect({ profile: ASK().profile, expectation: "prices shown", action: { type: "CLICK" },
+      observation: "nothing changed" });
+
+    const roles = actor.usageLog.map((entry) => entry.role);
+    assert.deepEqual(roles, ["acting", "reflection"]);
+  } finally {
+    globalThis.fetch = originalFetch;
+  }
+});

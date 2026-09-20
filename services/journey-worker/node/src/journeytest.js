@@ -494,6 +494,10 @@ async function runWithJourneyTest(input) {
     // reproducibility claim is different, and the report cannot say so unless the
     // run records it. Host and model only -- never the key.
     servedBy: servedBy(personaActorFn),
+    // BE-3: every model call this run made, by role, with wall time and token
+    // usage when the response carried it -- the economic case a report could
+    // never make about itself before this existed.
+    modelUsage: personaActorFn?.usageLog || [],
     // Which director browsed. A finding from a persona run and one from an agent
     // run are about different things, so a reader has to be able to tell.
     director: director.name || "pi",

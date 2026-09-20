@@ -449,7 +449,12 @@ function completionBudget(env = process.env) {
 
 async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 120000,
   maxTokens = completionBudget(),
-  attempts = 3, retryWaitMs = 1500, wait = (ms) => new Promise((r) => setTimeout(r, ms)) }) {
+  attempts = 3, retryWaitMs = 1500, wait = (ms) => new Promise((r) => setTimeout(r, ms)),
+  // BE-3: which job this call was for (acting, reflection, adherence), and
+  // where to record it. `usageLog` is a plain array the caller owns and reads
+  // back after the run -- not a return-value change, so every existing caller
+  // of completion() is unaffected whether or not it cares about accounting.
+  role = "", usageLog }) {
   let lastError;
   // Raised for a rate limit only, and only once one is actually met, so a
   // healthy endpoint is never waited on longer than it was before.
@@ -477,6 +482,13 @@ async function completion({ system, user, model, apiKey, baseUrl, timeoutMs = 12
       // An empty completion is a failed one: the caller cannot act on it, and a
       // retry against a router that just picked a different model often can.
       if (!content || !content.trim()) throw new Error("the model returned an empty completion");
+      // BE-3: recorded only on the call that actually answered -- a retried
+      // attempt that failed spent no tokens a report could account for.
+      if (Array.isArray(usageLog)) {
+        usageLog.push({ role, endpoint: baseUrl, model, temperature: 0.7, wallMs: Date.now() - startedAt,
+          promptTokens: Number.isFinite(data.usage?.prompt_tokens) ? data.usage.prompt_tokens : null,
+          completionTokens: Number.isFinite(data.usage?.completion_tokens) ? data.usage.completion_tokens : null });
+      }
       return content;
     } catch (error) {
       lastError = error;
@@ -516,6 +528,9 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
   fallbackModel, fallbackApiKey, fallbackBaseUrl,
   complete = completion, attempts = 2 } = {}) {
   const judge = reflectModel || model;
+  // BE-3: one log per actor, read back by the director once the run ends and
+  // attached to the result -- the same shape servedBy already travels in.
+  const usageLog = [];
   // The smaller model can live somewhere else entirely. Reflecting and scoring
   // adherence are small, frequent jobs and a router that is fast at them is
   // often not the one you want deciding what a person does next -- so the
@@ -546,12 +561,12 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
    */
   async function completeSomewhere(ask) {
     try {
-      return await complete({ ...ask, ...actingOn });
+      return await complete({ ...ask, ...actingOn, role: "acting", usageLog });
     } catch (error) {
       if (!spare || movedTo || !unreachable(error)) throw error;
       movedTo = spare.baseUrl;
       actingOn = spare;
-      return complete({ ...ask, ...actingOn });
+      return complete({ ...ask, ...actingOn, role: "acting", usageLog });
     }
   }
   async function decide(input, { notLikeYou = "" } = {}) {
@@ -571,7 +586,8 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
 
   decide.reflect = async function reflect(input) {
     const { system, user } = buildReflectionPrompt(input);
-    const text = await complete({ system, user, model: judge, apiKey: judgeKey, baseUrl: judgeUrl });
+    const text = await complete({ system, user, model: judge, apiKey: judgeKey, baseUrl: judgeUrl,
+      role: "reflection", usageLog });
     // An unreadable reflection must not invent a violation: "partly" would say
     // the page disappointed someone on no evidence at all.
     return parseReflection(text) || { observed: "", matched: "yes", gap: "", malformed: true };
@@ -591,7 +607,10 @@ function llmActor({ model, reflectModel, apiKey, baseUrl, reflectApiKey, reflect
    * not also pay a full-sized call to grade itself.
    */
   decide.judgeAdherence = ({ system, user }) =>
-    complete({ system, user, model: judge, apiKey: judgeKey, baseUrl: judgeUrl });
+    complete({ system, user, model: judge, apiKey: judgeKey, baseUrl: judgeUrl,
+      role: "adherence", usageLog });
+  // BE-3: the accounting for this actor's whole run, read once at the end.
+  decide.usageLog = usageLog;
   return decide;
 }
 

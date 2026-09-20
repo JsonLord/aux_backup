@@ -384,7 +384,11 @@ class JobExecutor(ReportAssembler):
         next_evidence_number = 1 + max((item.get("evidenceNumber") or 0 for item in findings), default=0)
         self._attach_verdict_screenshots(findings, journeys, redact_selectors=redact_selectors,
                                          start_evidence_number=next_evidence_number)
-        self._attach_redesigns(findings, data.get("url"), self._providers_for(job, ROLE_VISION))
+        # BE-3: every Python-side model call this report itself makes while
+        # building the redesign panels, for _model_usage_summary below.
+        redesign_usage: list[dict[str, Any]] = []
+        self._attach_redesigns(findings, data.get("url"), self._providers_for(job, ROLE_VISION),
+                               usage_sink=redesign_usage)
         # F8: after screenshots are attached (their filenames are the step index
         # this reads), so findings accumulate into the story of the run instead
         # of a severity-shuffled grab-bag. Severity still governs impact_analysis's
@@ -418,6 +422,19 @@ class JobExecutor(ReportAssembler):
                 "thinking at the time. Every quote carries the source it came from (`model.reasoning`, "
                 "`timeline`, or `verdict*`); they are not interchangeable."
             )
+        # A9: model calls at temperature > 0 are not reproducible byte-for-byte --
+        # only a persona's disposition (its compiled behavior/ability profile) is,
+        # not its exact wording on a re-run. Stated once, when there was live model
+        # traffic to say it about.
+        model_usage = self._model_usage_summary(journeys, redesign_usage)
+        if model_usage:
+            limitations.append(
+                "This run's model calls used temperature > 0 (personaActor.js's acting/reflection calls, "
+                "0.7); re-running the same profile against the same page will not reproduce this run's "
+                "persona quotes word for word. What is reproducible is the persona's disposition -- the "
+                "compiled behavior and ability profile a re-run is given -- not its exact phrasing. See "
+                "model_usage for what this run actually cost, by role, and which providers served it."
+            )
         return {"schema_version": "1.1", "mode": "user_journey", "url": data.get("url"),
                 "executive_summary": self._executive_summary(data.get("url"), tasks, personas,
                                                              findings, preserve, journeys),
@@ -427,6 +444,9 @@ class JobExecutor(ReportAssembler):
                 # fallback is a run whose reproducibility claim is different, and a
                 # reader cannot weigh that unless it is stated. Host and model only.
                 "served_by": self._served_by(journeys),
+                # BE-3: what this run actually cost -- tokens and wall time, by
+                # role -- and A9's model/provider naming, both from the same record.
+                "model_usage": model_usage,
                 "critical_pain_points": findings,
                 "run_diagnostics": run_diagnostics,
                 "flow_groups": self._flow_groups(findings, tasks),
@@ -702,7 +722,7 @@ class JobExecutor(ReportAssembler):
                          "above, preserving anything not affected by the request:\n\n"
                          f"```html\n{previous_html}\n```")
         try:
-            content = engine.complete_text(system_prompt, "\n\n".join(parts))
+            content = engine.complete_text(system_prompt, "\n\n".join(parts), role="prototype")
         except RuntimeError:
             return None
         stripped = content.strip()

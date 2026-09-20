@@ -613,6 +613,20 @@ def test_the_intro_slide_states_scope_and_the_evidence_language_stamp():
     assert "evidence_language: observed" in html
 
 
+def test_the_intro_slide_prints_the_model_usage_summary():
+    """BE-3: the economic case, on the one slide a reader would look for it."""
+    report = {"url": "https://example.test/", "executive_summary": "s", "evidence_language": "observed",
+             "journey_outcome": {"tasks": ["Buy an item"]}, "impact_analysis": {},
+             "elements_to_preserve": [], "critical_pain_points": [],
+             "model_usage": {"totalCalls": 2, "totalWallMs": 1500, "totalPromptTokens": 900,
+                             "totalCompletionTokens": 150, "byRole": {}, "providers": [
+                                 {"endpoint": "https://router.example", "model": "auto"}]}}
+    html = JobExecutor._slide_deck(report)
+
+    assert "2 model calls" in html and "1.5s wall time" in html and "1050 tokens" in html
+    assert "auto (https://router.example)" in html
+
+
 def test_severity_derivation_is_printed_beside_the_chip_and_degrades_honestly():
     """B7: why this severity, not just what it is -- built only from numbers a
     finding actually carries, never invented for a source that has none."""
@@ -697,6 +711,54 @@ def test_findings_are_ordered_by_the_step_they_occurred_at_not_by_severity():
     ordered = JobExecutor._order_by_step(findings)
 
     assert [item["title"] for item in ordered] == ["Early issue", "Mid issue", "Late issue", "No derivable step"]
+
+
+# --- BE-3/A9: cost, time, and reproducibility -----------------------------------
+
+def test_model_usage_rolls_up_both_funnels_by_role():
+    """BE-3: the two places a model call can originate -- a journey's own
+    modelUsage (personaActor.js's completion()) and this report's own redesign
+    calls (DirectLLMSemanticEngine) -- roll up into one summary, by role."""
+    journeys = [
+        {"runId": "run_1", "modelUsage": [
+            {"role": "acting", "endpoint": "https://router.example", "model": "auto",
+             "wallMs": 1200, "promptTokens": 800, "completionTokens": 120},
+            {"role": "reflection", "endpoint": "https://router.example", "model": "alias-fast",
+             "wallMs": 300, "promptTokens": 200, "completionTokens": 30},
+        ]},
+    ]
+    redesign_usage = [{"role": "report.redesign", "endpoint": "https://router.example", "model": "auto",
+                       "wallMs": 900, "promptTokens": 500, "completionTokens": 250}]
+
+    summary = JobExecutor._model_usage_summary(journeys, redesign_usage)
+
+    assert summary["totalCalls"] == 3
+    assert summary["totalWallMs"] == 2400
+    assert summary["totalPromptTokens"] == 1500 and summary["totalCompletionTokens"] == 400
+    assert summary["byRole"]["acting"]["calls"] == 1
+    assert summary["byRole"]["report.redesign"]["promptTokens"] == 500
+    assert {"endpoint": "https://router.example", "model": "auto"} in summary["providers"]
+
+    # Nothing measured: None, not a fabricated zero.
+    assert JobExecutor._model_usage_summary([{"runId": "run_1"}], None) is None
+
+
+def test_a_run_with_model_traffic_states_reproducibility_honestly(tmp_path, monkeypatch):
+    """A9: the report says plainly that a persona's exact wording will not
+    reproduce on a re-run -- only its disposition (the compiled profile) does."""
+    completed, report = _run_journey_job(tmp_path, monkeypatch, {
+        "runStatus": "completed",
+        "verdict": {"status": "passed", "criteria": [{"id": "tasks-completed", "result": "met"}],
+                   "blockers": [], "uxFindings": [], "suggestedImprovements": []},
+        "modelUsage": [{"role": "acting", "endpoint": "https://router.example", "model": "auto",
+                        "wallMs": 500, "promptTokens": 100, "completionTokens": 20}],
+        "artifacts": {"screenshots": ["/tmp/run/screenshots/001.png"]},
+    })
+
+    assert completed["status"] == "succeeded"
+    assert report["model_usage"]["totalCalls"] == 1
+    reproducibility = [line for line in report["limitations"] if "not reproduce" in line]
+    assert reproducibility and "disposition" in reproducibility[0]
 
 
 def test_slide_deck_says_predicted_when_no_browser_evidence_was_collected():
@@ -1121,7 +1183,7 @@ def test_redesign_generation_is_bounded_and_targets_the_worst_findings(monkeypat
     monkeypatch.setenv("EYESON_REDESIGN_LIMIT", "2")  # opt back in (conftest disables it)
     asked = []
 
-    def fake_fragment(finding, url, providers=None):
+    def fake_fragment(finding, url, providers=None, usage_sink=None):
         asked.append(finding["title"])
         return f'<div>fix for {finding["title"]}</div>'
 
@@ -1147,8 +1209,8 @@ def test_redesign_fragment_rejects_a_full_document_or_prose(monkeypatch):
     monkeypatch.setenv("EYESON_REDESIGN_LIMIT", "3")  # opt back in (conftest disables it)
 
     class Engine:
-        def __init__(self, reply): self.reply = reply
-        def complete_text(self, system, user): return self.reply
+        def __init__(self, reply): self.reply, self.usage_log = reply, []
+        def complete_text(self, system, user, **kwargs): return self.reply
 
     import services.persona_service.semantic as semantic
 
@@ -1588,8 +1650,8 @@ def test_the_redesign_prompt_is_grounded_in_the_screenshots_own_colours(tmp_path
     captured = {}
 
     class FakeEngine:
-        def __init__(self, **kwargs): pass
-        def complete_text(self, system_prompt, user_prompt):
+        def __init__(self, **kwargs): self.usage_log = []
+        def complete_text(self, system_prompt, user_prompt, **kwargs):
             captured["user_prompt"] = user_prompt
             return "<div>fixed</div>"
 
