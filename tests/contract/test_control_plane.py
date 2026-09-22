@@ -539,6 +539,122 @@ def test_vision_critique_synthesizes_across_personas_with_element_crop(tmp_path,
     assert "Grounded in:" in slides and "Nielsen Norman Group" in slides
 
 
+def test_vision_critique_is_given_what_the_persona_was_experiencing_at_that_screenshot(tmp_path, monkeypatch):
+    """The vision critique used to judge every screenshot cold, with no idea
+    what the persona actually expected or felt at that moment -- two
+    independent pipelines merged only by severity-capping after the fact. It
+    is now given the nearest persona.expectation/reflection/affect moment on
+    the run's own elapsedMs clock (personaContext, in the request sent to the
+    vision model) and the resulting finding carries that same moment's quote
+    as personaEvidence, the same {quote, personaId, personaName} shape every
+    other source in this report uses."""
+    import json as json_module
+    from PIL import Image
+
+    store = Store(f"sqlite:///{tmp_path / 'control.db'}", str(tmp_path / "artifacts"))
+    session = store.create_session({"metadata": {}, "external_ref": {}})
+    persona = store.create_artifact({"session_id": session["session_id"], "kind": "persona.profile",
+        "content_type": "application/json",
+        "content": {"id": "persona_ada", "persona": {"name": "Ada"}, "minibio": "An impatient persona",
+                    "abilities": {}, "behavior": {}, "generation": {"seed": 1}},
+        "metadata": {}})
+
+    run_dir = tmp_path / "run"
+    (run_dir / "screenshots").mkdir(parents=True)
+    (run_dir / "snapshots").mkdir(parents=True)
+    screenshot_path = run_dir / "screenshots" / "step1.png"
+    Image.new("RGB", (200, 150), color="white").save(screenshot_path)
+    snapshot_path = run_dir / "snapshots" / "step1.json"
+    snapshot_path.write_text(json_module.dumps({"elements": [
+        {"selector": "#buy-button", "role": "button", "text": "Buy", "boundingBox": {"x": 20, "y": 30, "width": 60, "height": 20}},
+    ]}))
+
+    verdict = {"status": "passed", "confidence": "high", "summary": "Task completed.",
+        "criteria": [{"id": "tasks-completed", "result": "met"}, {"id": "tasks-blocked", "result": "not-met"}],
+        "blockers": [], "uxFindings": [], "suggestedImprovements": []}
+    timeline = [
+        {"type": "persona.expectation", "elapsedMs": 900,
+         "data": {"expectation": "I expect the price to appear when I click this."}},
+        {"type": "persona.reflection", "elapsedMs": 950,
+         "data": {"matched": "no", "gap": "Clicking it did not reveal any price."}},
+        {"type": "persona.affect", "elapsedMs": 990, "data": {"feeling": "That is annoying."}},
+        # Taken after the moment above, so it resolves as the nearest -- proving
+        # the match is by elapsedMs, not "the first/last moment in the run".
+        {"type": "browser.screenshot", "elapsedMs": 1000, "data": {"path": str(screenshot_path)}},
+    ]
+
+    captured_payload = {}
+
+    def dispatch(req, timeout):
+        class Response:
+            def __init__(self, body): self.body = body
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def read(self): return self.body
+        payload = json_module.loads(req.data)
+        if req.full_url.endswith("/v1/runs"):
+            return Response(json_module.dumps({"runId": payload["runId"], "runStatus": "completed",
+                "profileId": payload["profile"]["id"], "verdict": verdict, "simulationProfile": payload["profile"],
+                "timeline": timeline,
+                "artifacts": {"screenshots": [str(screenshot_path)], "snapshots": [str(snapshot_path)]}}).encode())
+        if req.full_url.endswith("/v1/journey-evidence-analyses"):
+            captured_payload.update(payload)
+            return Response(json_module.dumps({"schemaVersion": "1.0", "painPoints": [{
+                "id": "pain_1", "runId": payload["runId"], "userId": payload["userId"], "route": "https://example.com",
+                "stepIds": ["vision-1"], "title": "Ambiguous button label",
+                "summary": "The label does not describe the action.", "severity": "high", "category": "accessibility",
+                "confidence": 0.7, "screenshotRef": str(screenshot_path), "videoTimestampMs": 0,
+                "behavioralImpact": {"frustrationDelta": 0.4, "confusionDelta": 0.3, "trustDelta": -0.1,
+                    "cognitiveEffortDelta": 0, "physicalEffortDelta": 0, "elapsedCostMs": 0, "retries": 0, "backtracks": 0},
+                "elements": [{"elementId": "#buy-button", "box": {"x": 20, "y": 30, "width": 60, "height": 20},
+                    "role": "trigger", "contribution": 1, "confidence": 0.7}],
+                "diagnosis": {"category": "accessibility", "mechanism": "The label does not describe the action.",
+                    "rootCause": "Ambiguous button label", "observedEvidence": [], "behavioralEvidence": [],
+                    "personaInteraction": "", "confidence": 0.7},
+                "grounding": {"status": "completed", "references": []},
+                "alternatives": [], "overlays": [],
+            }]}).encode())
+        assert req.full_url.endswith("/v1/cohort-aggregation")
+        runs = payload["runs"]
+        all_points = [point for run in runs for point in run["painPoints"]]
+        # The personaEvidence attached in Python before this call must survive
+        # being sent through cohort-aggregation and read back by artifact_id.
+        assert all_points[0]["personaEvidence"] == [
+            {"quote": "That is annoying.", "personaId": "persona_ada", "personaName": "Ada"}]
+        return Response(json_module.dumps({"schemaVersion": "1.0", "rootCauses": [{
+            "id": "root_1", "signature": "sig", "category": "accessibility",
+            "mechanism": "The label does not describe the action.", "elementIds": ["#buy-button"],
+            "painPointIds": [point["id"] for point in all_points],
+            "affectedUsers": ["persona_ada"], "affectedIterations": [run["runId"] for run in runs],
+            "averageStateImpact": {"frustration": 0.4, "confusion": 0.3, "trust": -0.1}, "abandonmentCount": 0,
+            "personaSusceptibility": {}, "alternatives": [],
+        }]}).encode())
+
+    monkeypatch.setenv("JOURNEY_WORKER_URL", "http://journey.invalid")
+    monkeypatch.setenv("EYESON_WORKER_URL", "http://eyeson.invalid")
+    monkeypatch.setattr("apps.api.executor.request.urlopen", dispatch)
+    job, _ = store.create_job({"session_id": session["session_id"], "type": "combined_test", "version": "1.0",
+        "pipeline_run_id": None, "depends_on": [], "input_artifacts": [persona["artifact_id"]], "seed": 1,
+        "metadata": {"url": "https://example.com", "persona_artifacts": [persona["artifact_id"]],
+                    "tasks": ["Buy an item"]},
+        "idempotency_key": None})
+    JobExecutor(store).run(job["job_id"])
+    completed = store.get_job(job["job_id"])
+    assert completed["status"] == "succeeded"
+
+    # The vision model was told what this persona was experiencing at this
+    # exact moment -- not just the screenshot and a generic bio.
+    assert captured_payload["personaContext"] == (
+        'they expected: "I expect the price to appear when I click this."; '
+        'what arrived instead: "Clicking it did not reveal any price."; '
+        'how it left them: "That is annoying."')
+
+    report = json_module.loads(store.read_artifact(completed["output_artifacts"][0]))
+    finding = next(item for item in report["critical_pain_points"] if item["source"] == "eyeson-vision-synthesis")
+    assert finding["personaEvidence"] == [
+        {"quote": "That is annoying.", "personaId": "persona_ada", "personaName": "Ada"}]
+
+
 def test_slide_deck_follows_usability_review_anatomy():
     """Real local slide generation (no GitHub, no external mkslides binary --
     see docs/aux-space-status-overview.md), shaped like a usability review deck

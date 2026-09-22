@@ -29,6 +29,23 @@ test("buildPrompt lists the page's elements by index, and does not show the sele
   assert.doesNotMatch(user, /role=button/);
 });
 
+test("buildPrompt tells the reviewer what this specific visitor experienced, and how to use it", () => {
+  const { system, user } = buildPrompt({
+    url: "https://example.com", task: "Find pricing", elements: [],
+    personaContext: 'they expected: "a price to appear"; what arrived instead: "nothing changed"; '
+      + 'how it left them: "getting annoyed"',
+  });
+  assert.match(user, /What this visitor experienced around this moment: they expected: "a price to appear"/);
+  assert.match(system, /what this specific visitor expected and felt/);
+  assert.match(system, /one person's account of one moment, not a description of the whole page/);
+});
+
+test("buildPrompt omits the persona-context guidance entirely when there is none", () => {
+  const { system, user } = buildPrompt({ url: "https://example.com", task: "Find pricing", elements: [] });
+  assert.doesNotMatch(user, /What this visitor experienced/);
+  assert.doesNotMatch(system, /what this specific visitor expected and felt/);
+});
+
 test("a citation is a line number, and an out-of-range one is not a citation", () => {
   const page = [{ selector: "e1" }, { selector: "e6" }, { selector: "span@316,533" }];
   const cite = (elements) => parseCritique(JSON.stringify({ issues: [{
@@ -97,6 +114,21 @@ test("critiqueScreenshot resolves elements to their real boundingBox and grounds
   assert.equal(calledUrl, "https://router.invalid/v1/chat/completions");
   const sentBody = JSON.parse(calledInit.body);
   assert.equal(sentBody.messages[1].content[1].image_url.url, "data:image/png;base64,Zm9v");
+});
+
+test("critiqueScreenshot carries personaContext into the actual request sent to the model", async (t) => {
+  let sentBody;
+  t.mock.method(global, "fetch", async (url, init) => {
+    sentBody = JSON.parse(init.body);
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
+  });
+  await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "Buy an item", elements: [],
+    personaContext: 'they expected: "a price"; how it left them: "annoyed"',
+    options: { apiKey: "test-key", baseUrl: "https://router.invalid/v1", model: "auto" },
+  });
+  const userMessage = sentBody.messages[1].content[0].text;
+  assert.match(userMessage, /What this visitor experienced around this moment: they expected: "a price"/);
 });
 
 test("critiqueScreenshot retries once on a transient failure then succeeds", async (t) => {

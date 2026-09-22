@@ -152,7 +152,7 @@ function captureSize(base64) {
 // the prompt may claim about the list: a truncated list is not an inventory.
 const LISTED_ELEMENTS = 60;
 
-function buildPrompt({ url, task, personaSummary, elements, capture }) {
+function buildPrompt({ url, task, personaSummary, elements, capture, personaContext }) {
   const detected = (elements || []).length;
   const shown = (elements || []).slice(0, LISTED_ELEMENTS);
   const elementList = shown.map((element, index) =>
@@ -188,6 +188,15 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
       + "- You are looking at one frame of a journey, not the journey. You cannot see what the "
       + "visitor did next, what scrolling revealed, or whether they found what they came for. Report "
       + "what is wrong with this screen; never that it prevented, blocked or stopped anyone.\n"
+      + (personaContext
+          ? "You are also given what this specific visitor expected and felt around the moment this "
+            + "screenshot was taken, in their own words. Use it as evidence, the same way you would use "
+            + "the element list -- it can explain or corroborate something you see (a control that looks "
+            + "ambiguous and that this visitor also could not predict is a stronger finding than either "
+            + "alone), but it is one person's account of one moment, not a description of the whole page. "
+            + "Do not report something as a problem solely because this visitor said so; report what you "
+            + "can actually see, and let their account sharpen or temper it.\n"
+          : "")
       + "Respond with ONLY a JSON array "
       + "(no markdown fences, no commentary), where each item is:\n"
       + `{"category": one of ${JSON.stringify(FINDING_CATEGORIES)}, "severity": "low"|"medium"|"high"|"critical", `
@@ -214,6 +223,7 @@ function buildPrompt({ url, task, personaSummary, elements, capture }) {
       + "do not invent problems to fill it.",
     user: `Target URL: ${url}\nTask the synthetic user was attempting: ${task}\n`
       + (personaSummary ? `Synthetic user: ${personaSummary}\n` : "")
+      + (personaContext ? `What this visitor experienced around this moment: ${personaContext}\n` : "")
       + (capture?.width && capture?.height
           ? `\nThis capture is ${capture.width}x${capture.height} CSS pixels`
             + (capture.height > capture.width * 1.6
@@ -539,7 +549,7 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
  * (boundingBox) so the caller can crop the specific region it refers to.
  */
 async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], url, task,
-  personaSummary, options = {} }) {
+  personaSummary, personaContext, options = {} }) {
   const apiKey = options.apiKey || process.env.OPENAI_API_KEY || process.env.BLABLADOR_API_KEY;
   const baseUrl = options.baseUrl || process.env.OPENAI_COMPATIBLE_ENDPOINT || process.env.OPENAI_BASE_URL || process.env.BLABLADOR_BASE_URL;
   const model = options.model || process.env.OPENAI_MODEL || "auto";
@@ -557,7 +567,7 @@ async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], u
   const fallbackModel = options.fallbackModel || process.env.JOURNEY_FALLBACK_MODEL || process.env.BLABLADOR_MODEL;
   const fallbackBaseUrl = options.fallbackBaseUrl || process.env.JOURNEY_FALLBACK_BASE_URL || process.env.BLABLADOR_BASE_URL;
   const fallbackApiKey = options.fallbackApiKey || process.env.JOURNEY_FALLBACK_API_KEY || process.env.BLABLADOR_API_KEY;
-  const { system, user } = buildPrompt({ url, task, personaSummary, elements,
+  const { system, user } = buildPrompt({ url, task, personaSummary, elements, personaContext,
     capture: captureSize(imageBase64) });
   // The producer downscales and re-encodes before sending, so the bytes are not
   // necessarily PNG any more; mislabelling them breaks strict providers.

@@ -2540,6 +2540,110 @@ class ReportAssembler:
     # Severities that are not usability issues and must not be counted as such.
     _NOT_A_PROBLEM = frozenset({"info"})
 
+    @staticmethod
+    def _screenshot_elapsed_ms(journey: dict[str, Any]) -> dict[str, float]:
+        """When each of this run's screenshots was actually taken, from the run's
+        own `browser.screenshot` timeline events -- the same `elapsedMs` clock
+        every other event on the timeline is stamped with, so a screenshot and a
+        persona.expectation/reflection/affect triple can be placed on one axis
+        and compared."""
+        out: dict[str, float] = {}
+        for event in journey.get("timeline") or []:
+            if event.get("type") != "browser.screenshot":
+                continue
+            path = (event.get("data") or {}).get("path")
+            elapsed = event.get("elapsedMs")
+            if path and isinstance(elapsed, (int, float)):
+                out[path] = float(elapsed)
+        return out
+
+    @staticmethod
+    def _persona_moments(journey: dict[str, Any]) -> list[dict[str, Any]]:
+        """What this persona expected, found, and felt, as a timeline of moments
+        -- one per expectation this run committed to, however far it got before
+        the run ended (a moment with no reflection/affect yet is still kept,
+        anchored at the expectation's own elapsedMs).
+
+        This is the same expectation -> reflection -> affect state walk
+        `_pain_points_from_expectations` uses to build broken-promise findings,
+        reused here for a different purpose: not to decide whether a promise was
+        kept, but to say what this persona was experiencing at a given moment on
+        the run's own clock, so a vision critique of one screenshot can be told
+        what the person looking at that exact screen was thinking."""
+        profile = journey.get("simulationProfile") or {}
+        persona_id = journey.get("profileId") or journey.get("testerProfileId")
+        persona_name = ((profile.get("persona") or {}).get("name")
+                        or profile.get("name") or persona_id or "Synthetic user")
+        moments: list[dict[str, Any]] = []
+        pending: dict[str, Any] | None = None
+        for event in journey.get("timeline") or []:
+            kind, data = event.get("type"), event.get("data") or {}
+            elapsed = event.get("elapsedMs")
+            if kind == "persona.expectation":
+                pending = {"elapsedMs": elapsed, "expectation": str(data.get("expectation") or "").strip(),
+                          "matched": "", "gap": "", "feeling": "",
+                          "personaId": persona_id, "personaName": persona_name}
+                moments.append(pending)
+            elif kind == "persona.reflection" and pending is not None:
+                pending["matched"] = str(data.get("matched") or "").strip()
+                pending["gap"] = str(data.get("gap") or "").strip()
+            elif kind == "persona.affect" and pending is not None:
+                pending["feeling"] = str(data.get("feeling") or "").strip()
+                pending = None
+        return moments
+
+    @staticmethod
+    def _nearest_moment(moments: list[dict[str, Any]], elapsed_ms: float | None) -> dict[str, Any] | None:
+        if elapsed_ms is None or not moments:
+            return None
+        return min(moments, key=lambda moment: abs((moment.get("elapsedMs") or 0) - elapsed_ms))
+
+    @staticmethod
+    def _persona_context_text(moment: dict[str, Any] | None) -> str:
+        """One short, first-person account of a moment, for the vision prompt.
+
+        Prefers what actually happened over the bare expectation -- a reflection
+        or a feeling is the moment resolved, which is more useful context than a
+        prediction that may not even be about this screenshot yet."""
+        if not moment or not moment.get("expectation"):
+            return ""
+        parts = [f'they expected: "{moment["expectation"]}"']
+        if moment.get("matched") == "no" and moment.get("gap"):
+            parts.append(f'what arrived instead: "{moment["gap"]}"')
+        elif moment.get("matched") == "yes":
+            parts.append("it matched what they expected")
+        if moment.get("feeling"):
+            parts.append(f'how it left them: "{moment["feeling"]}"')
+        return "; ".join(parts)
+
+    @staticmethod
+    def _dedupe_quotes(quotes) -> list[dict[str, str]]:
+        """The same {quote, personaId, personaName} dict, once, in first-seen
+        order -- several screenshots from the same run can resolve to the same
+        nearest moment and would otherwise repeat its quote once per screenshot."""
+        seen: set[str] = set()
+        kept: list[dict[str, str]] = []
+        for quote in quotes:
+            text = quote.get("quote")
+            if not text or text in seen:
+                continue
+            seen.add(text)
+            kept.append(quote)
+        return kept
+
+    @staticmethod
+    def _persona_evidence_from_moment(moment: dict[str, Any] | None) -> list[dict[str, str]]:
+        """The one quote worth attaching to a vision finding as personaEvidence,
+        in the same {quote, personaId, personaName} shape every other source
+        here uses. F5: prefer how it felt over what they could see or expected --
+        the feeling is what the summary text does not already say."""
+        if not moment:
+            return []
+        quote = moment.get("feeling") or moment.get("gap") or moment.get("expectation")
+        if not quote:
+            return []
+        return [{"quote": quote, "personaId": moment.get("personaId"), "personaName": moment.get("personaName")}]
+
     @classmethod
     def _collect_vision_pain_points(cls, journeys: list[dict[str, Any]], tasks: list[str],
                                      personas: list[dict[str, Any]], url: str | None,
@@ -2589,6 +2693,12 @@ class ReportAssembler:
             pain_points: list[dict[str, Any]] = []
             if screenshots:
                 persona_summary = persona.get("minibio") or (persona.get("persona") or {}).get("name")
+                # What this persona expected/found/felt, placed on the run's own
+                # elapsedMs clock, so each screenshot can be critiqued alongside
+                # what the person looking at that exact screen was experiencing --
+                # rather than the vision model judging every screenshot cold.
+                screenshot_elapsed = cls._screenshot_elapsed_ms(journey)
+                moments = cls._persona_moments(journey)
                 # Critique the screenshots that have a semantic DOM capture in
                 # preference to the ones that do not: with an element list the model
                 # can name the exact control a finding is about, which is what lets
@@ -2623,11 +2733,14 @@ class ReportAssembler:
                     # already-redacted bytes. Never redact twice, never miss one.
                     screenshot_bytes[screenshot_path] = image_bytes
                     image_b64, image_mime = cls._vision_image_payload(image_bytes)
+                    moment = cls._nearest_moment(moments, screenshot_elapsed.get(screenshot_path))
+                    persona_context = cls._persona_context_text(moment)
                     payload = json.dumps({
                         "imageBase64": image_b64, "imageMimeType": image_mime,
                         "elements": elements, "url": url, "task": task_summary, "personaSummary": persona_summary,
                         "runId": journey.get("runId"), "userId": persona.get("id"),
                         "stepId": f"vision-{step_index + 1}", "screenshotRef": screenshot_path,
+                        **({"personaContext": persona_context} if persona_context else {}),
                         # Only when this workspace configured its own: the worker
                         # resolves from its environment otherwise, and it knows
                         # more about its own deployment than the general chain.
@@ -2642,7 +2755,14 @@ class ReportAssembler:
                     except (request.HTTPError, OSError, ValueError) as error:
                         last_error = cls._worker_error(error)
                         continue
-                    pain_points.extend(result.get("painPoints", []))
+                    # Attached here, not asked of the worker: the moment is
+                    # resolved from this run's own timeline, which is Python's to
+                    # read, and every pain point from this screenshot shares it.
+                    evidence = cls._persona_evidence_from_moment(moment)
+                    for point in result.get("painPoints", []):
+                        if evidence and not point.get("personaEvidence"):
+                            point["personaEvidence"] = evidence
+                        pain_points.append(point)
                     for strength in result.get("strengths", []):
                         strengths.append({**strength, "personaId": persona.get("id"),
                                           "personaName": (persona.get("persona") or {}).get("name") or persona.get("name")})
@@ -3132,6 +3252,13 @@ class ReportAssembler:
                 # rather than in a guess at it.
                 "elements": representative.get("elements") or [],
                 "route": representative.get("route"),
+                # What the persona looking at this exact screen was experiencing --
+                # not the vision model's own read of the page, but the run's own
+                # first-hand account, matched to this screenshot by elapsedMs
+                # (_persona_evidence_from_moment). Deduplicated across every member
+                # pain point the way every other multi-persona finding here is.
+                "personaEvidence": cls._dedupe_quotes(
+                    quote for point in member_points for quote in (point.get("personaEvidence") or [])),
             }
             if crop:
                 finding["screenshotCrop"] = crop

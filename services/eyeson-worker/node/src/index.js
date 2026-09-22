@@ -68,7 +68,8 @@ const server = http.createServer(async (request, response) => {
       if (!payload.imageBase64) return json(response, 422, { error: "invalid_request", message: "imageBase64 is required" });
       const { findings, strengths } = await critiqueScreenshot({ imageBase64: payload.imageBase64,
         imageMimeType: payload.imageMimeType, elements: payload.elements,
-        url: payload.url, task: payload.task, personaSummary: payload.personaSummary, options: payload.options });
+        url: payload.url, task: payload.task, personaSummary: payload.personaSummary,
+        personaContext: payload.personaContext, options: payload.options });
       const context = { runId: payload.runId, userId: payload.userId, route: payload.url,
         stepId: payload.stepId, screenshotRef: payload.screenshotRef, videoTimestampMs: payload.videoTimestampMs };
       const painPoints = findings.map((finding) => toPainPoint(finding, context));
