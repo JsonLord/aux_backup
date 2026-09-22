@@ -437,9 +437,10 @@ function normalizeIssues(value, elements) {
 }
 
 async function completeVision({ systemPrompt, userText, imageBase64, mimeType = "image/png",
-  model, apiKey, baseUrl, maxAttempts = 3, retryWaitMs = 2000, timeoutMs = 60000 }) {
+  model, apiKey, baseUrl, fallbackModel, fallbackApiKey, fallbackBaseUrl,
+  maxAttempts = 3, retryWaitMs = 2000, timeoutMs = 60000 }) {
   const payload = {
-    model, temperature: 0.2,
+    temperature: 0.2,
     messages: [
       { role: "system", content: systemPrompt },
       { role: "user", content: [
@@ -466,15 +467,24 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
   let attemptsSpent = 0;
   let allowed = Math.max(1, maxAttempts);
   const startedAt = Date.now();
+  // Where to go when the primary endpoint stops resolving -- the same recovery
+  // personaActor.js's completeSomewhere already gives the acting/reflection
+  // calls (JOURNEY_FALLBACK_*, defaulting to Blablador). A model, an endpoint
+  // and a key are one setting: only a fallback carrying all three, on a
+  // different host, is offered. Moves once and stays moved -- re-testing a
+  // dead endpoint every attempt would cost the critique a minute a time.
+  const spare = (fallbackBaseUrl && fallbackApiKey && fallbackModel && fallbackBaseUrl !== baseUrl)
+    ? { model: fallbackModel, apiKey: fallbackApiKey, baseUrl: fallbackBaseUrl } : null;
+  let active = { model, apiKey, baseUrl };
   for (let attempt = 1; attempt <= allowed; attempt += 1) {
     attemptsSpent = attempt;
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
-      const response = await fetch(`${baseUrl.replace(/\/$/, "")}/chat/completions`, {
+      const response = await fetch(`${active.baseUrl.replace(/\/$/, "")}/chat/completions`, {
         method: "POST", signal: controller.signal,
-        headers: { "content-type": "application/json", authorization: `Bearer ${apiKey}` },
-        body: JSON.stringify(payload),
+        headers: { "content-type": "application/json", authorization: `Bearer ${active.apiKey}` },
+        body: JSON.stringify({ ...payload, model: active.model }),
       });
       if (!response.ok) {
         const failure = new Error(
@@ -501,6 +511,13 @@ async function completeVision({ systemPrompt, userText, imageBase64, mimeType = 
       // answered unhappily, not less.
       if (unreachable(error) && Date.now() - startedAt < UNREACHABLE_PATIENCE_MS) {
         allowed = Math.max(allowed, UNREACHABLE_ATTEMPTS);
+      }
+      if (spare && active.baseUrl !== spare.baseUrl && unreachable(error)) {
+        active = spare;
+        // The spare gets its own attempt budget rather than inheriting however
+        // many of the primary's were already spent chasing a name that would
+        // not resolve.
+        allowed = Math.max(allowed, attempt + UNREACHABLE_ATTEMPTS);
       }
       if (attempt < allowed) {
         await new Promise((resolve) => setTimeout(resolve,
@@ -531,12 +548,21 @@ async function critiqueScreenshot({ imageBase64, imageMimeType, elements = [], u
       "OPENAI_API_KEY/OPENAI_BASE_URL (or BLABLADOR_* aliases) are required for vision critique",
       503, "vision_not_configured");
   }
+  // Where to go when the primary endpoint stops resolving -- the same
+  // JOURNEY_FALLBACK_*/Blablador chain the journey's own acting and reflection
+  // calls already use (services/journey-worker/node/src/journeytest.js), now
+  // that the fallback model answers image input too. Unset unless the caller
+  // or this deployment's environment actually names all three of a model, an
+  // endpoint and a key.
+  const fallbackModel = options.fallbackModel || process.env.JOURNEY_FALLBACK_MODEL || process.env.BLABLADOR_MODEL;
+  const fallbackBaseUrl = options.fallbackBaseUrl || process.env.JOURNEY_FALLBACK_BASE_URL || process.env.BLABLADOR_BASE_URL;
+  const fallbackApiKey = options.fallbackApiKey || process.env.JOURNEY_FALLBACK_API_KEY || process.env.BLABLADOR_API_KEY;
   const { system, user } = buildPrompt({ url, task, personaSummary, elements,
     capture: captureSize(imageBase64) });
   // The producer downscales and re-encodes before sending, so the bytes are not
   // necessarily PNG any more; mislabelling them breaks strict providers.
   const { content, truncated } = await completeVision({ systemPrompt: system, userText: user, imageBase64,
-    model, apiKey, baseUrl, mimeType: imageMimeType || "image/png",
+    model, apiKey, baseUrl, fallbackModel, fallbackApiKey, fallbackBaseUrl, mimeType: imageMimeType || "image/png",
     maxAttempts: options.maxAttempts, retryWaitMs: options.retryWaitMs, timeoutMs: options.timeoutMs });
   const { issues, strengths } = parseCritique(content, { truncated, elements });
   const byId = new Map(elements.map((element) => [element.selector, element]));

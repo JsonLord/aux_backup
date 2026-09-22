@@ -114,6 +114,57 @@ test("critiqueScreenshot retries once on a transient failure then succeeds", asy
   assert.equal(calls, 2);
 });
 
+test("a vision critique whose primary endpoint disappears moves to the configured fallback", async (t) => {
+  // The same recovery personaActor.js's completeSomewhere already gives the
+  // journey's acting/reflection calls (JOURNEY_FALLBACK_*, Blablador) --
+  // wired in now that the fallback model answers image input too.
+  const asked = [];
+  t.mock.method(global, "fetch", async (url, init) => {
+    const body = JSON.parse(init.body);
+    asked.push(`${url}|${body.model}`);
+    if (url === "https://router.invalid/v1/chat/completions") throw new TypeError("fetch failed");
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
+  });
+  const { findings } = await critiqueScreenshot({
+    imageBase64: "Zm9v", url: "https://example.com", task: "Buy an item", elements: [],
+    options: { apiKey: "k1", baseUrl: "https://router.invalid/v1", model: "auto",
+      fallbackModel: "alias-large", fallbackApiKey: "k2", fallbackBaseUrl: "https://blablador.example/v1",
+      retryWaitMs: 1 },
+  });
+  assert.deepEqual(findings, []);
+  assert.deepEqual(asked, [
+    "https://router.invalid/v1/chat/completions|auto",
+    "https://blablador.example/v1/chat/completions|alias-large",
+  ], "the model travels with the endpoint -- an alias without its token is a 401");
+});
+
+test("critiqueScreenshot falls back to JOURNEY_FALLBACK_*/BLABLADOR_* from the environment when not given options", async (t) => {
+  const original = { JOURNEY_FALLBACK_MODEL: process.env.JOURNEY_FALLBACK_MODEL,
+    JOURNEY_FALLBACK_BASE_URL: process.env.JOURNEY_FALLBACK_BASE_URL,
+    JOURNEY_FALLBACK_API_KEY: process.env.JOURNEY_FALLBACK_API_KEY };
+  process.env.JOURNEY_FALLBACK_MODEL = "alias-large";
+  process.env.JOURNEY_FALLBACK_BASE_URL = "https://blablador.example/v1";
+  process.env.JOURNEY_FALLBACK_API_KEY = "k2";
+  const asked = [];
+  t.mock.method(global, "fetch", async (url) => {
+    asked.push(url);
+    if (url === "https://router.invalid/v1/chat/completions") throw new TypeError("fetch failed");
+    return { ok: true, json: async () => ({ choices: [{ message: { content: "[]" } }] }) };
+  });
+  try {
+    const { findings } = await critiqueScreenshot({
+      imageBase64: "Zm9v", url: "https://example.com", task: "Buy an item", elements: [],
+      options: { apiKey: "k1", baseUrl: "https://router.invalid/v1", model: "auto", retryWaitMs: 1 },
+    });
+    assert.deepEqual(findings, []);
+    assert.deepEqual(asked, ["https://router.invalid/v1/chat/completions", "https://blablador.example/v1/chat/completions"]);
+  } finally {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key]; else process.env[key] = value;
+    }
+  }
+});
+
 test("critiqueScreenshot requires credentials rather than silently returning fake findings", async () => {
   const originalKey = process.env.OPENAI_API_KEY;
   const originalBlablador = process.env.BLABLADOR_API_KEY;
