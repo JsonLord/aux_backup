@@ -59,19 +59,24 @@ def test_replay_reproduces_journey_level_fields(replayed, live_report):
 def test_replay_carries_perception_and_expectation_findings(replayed, live_report):
     """Everything _pain_points_from_perception/_pain_points_from_expectations
     produce is journey-only, so it must survive replay -- the broken-promise
-    findings and the one misfiled run-limit finding SEC-1 will later
-    relocate, byte for byte. The four "Fails WCAG AA contrast" titles do
-    *not* survive unchanged, and that is FND-1 working as intended, not a
-    replay gap: assemble_report is shared, live code, so replaying an old
-    run through today's tree applies every report-side fix made since,
-    including the one that makes those four titles wrong in the first
-    place (see docs/parallel-development-spec.md's FND-1 row)."""
+    findings, byte for byte. Two title families do *not* survive unchanged,
+    and that is two report-side fixes working as intended, not a replay
+    gap: assemble_report is shared, live code, so replaying an old run
+    through today's tree applies every fix made since it shipped (FND-1's
+    four "Fails WCAG AA contrast" titles; SEC-1's "Users could not finish
+    the tasks they came to do" and "The visitor did not get there", both
+    now correctly in run_diagnostics, not critical_pain_points) -- see
+    docs/parallel-development-spec.md's FND-1 and SEC-1 rows."""
     replayed_titles = {f["title"] for f in replayed["critical_pain_points"]}
     live_titles = {f["title"] for f in live_report["critical_pain_points"]}
     unaffected_by_any_report_fix = {
         title for title in live_titles
         if not title.startswith("Download link")  # the one eyeson-vision-synthesis finding
         and not title.startswith("Fails WCAG AA contrast")  # FND-1 reclassifies these
+        and title not in {  # SEC-1 relocates these to run_diagnostics
+            "Users could not finish the tasks they came to do",
+            "The visitor did not get there",
+        }
     }
     assert unaffected_by_any_report_fix <= replayed_titles
     # FND-1's own replacement: the four false contrast findings grouped into
@@ -84,19 +89,29 @@ def test_replay_carries_perception_and_expectation_findings(replayed, live_repor
     assert len(grouped["instances"]) == 4
     assert not any(key.startswith("_") for key in grouped)  # no leaked temp fields
     assert not any(title.startswith("Fails WCAG AA contrast") for title in replayed_titles)
+    # SEC-1: both budget-limited shapes land in run_diagnostics, not here.
+    assert "Users could not finish the tasks they came to do" not in replayed_titles
+    assert "The visitor did not get there" not in replayed_titles
+    replayed_diagnostic_titles = {f["title"] for f in replayed["run_diagnostics"]}
+    assert {"Users could not finish the tasks they came to do", "The visitor did not get there"} <= replayed_diagnostic_titles
 
 
 def test_replay_is_missing_exactly_the_documented_vision_sourced_content(replayed, live_report):
     diff = rr.diff_reports(replayed, live_report)
     # findings_missing_from_replay mixes the one genuine vision gap with the
-    # four "Fails WCAG AA contrast" titles FND-1 correctly retires -- see
-    # diff_reports' own docstring on telling the two kinds apart.
+    # four "Fails WCAG AA contrast" titles FND-1 retires and the one
+    # SEC-1 retires -- see diff_reports' own docstring on telling the
+    # kinds apart. "The visitor did not get there" does not appear here:
+    # the live report already merged it into "Users could not finish..."
+    # (mergedFrom) before SEC-1 existed to keep them apart, so it was
+    # never its own top-level title in live_report to begin with.
     assert set(diff["findings_missing_from_replay"]) == {
         "Download link does not initiate download or navigate to a new page.",
         'Fails WCAG AA contrast: "Video"',
         'Fails WCAG AA contrast: "Italiano"',
         'Fails WCAG AA contrast: "RUРусский"',
         'Fails WCAG AA contrast: "ESEspañol"',
+        "Users could not finish the tasks they came to do",
     }
     assert diff["findings_only_in_replay"] == [
         "4 regions measured a low contrast ratio with unconfirmed ink"
@@ -104,9 +119,10 @@ def test_replay_is_missing_exactly_the_documented_vision_sourced_content(replaye
     # All 6 kept screenshots remap cleanly on this snapshot -- see
     # replay_report.py's module docstring, category 4.
     assert diff["matched_findings_missing_screenshot_crop"] == []
-    assert set(diff["matched_findings_missing_redesign_html"]) == {
-        "Users could not finish the tasks they came to do",
-    }
+    # Empty, not the pre-SEC-1 {"Users could not finish..."}: that title is
+    # no longer a *matched* finding at all now -- it does not appear in
+    # replay's critical_pain_points to compare redesignHtml against.
+    assert diff["matched_findings_missing_redesign_html"] == []
     # Category 2: this run's elements_to_preserve is entirely vision-sourced
     # (confirmed directly: _praise_from_verdicts/_preserved_from_verdicts/
     # _preserved_from_met_expectations all return [] for this journey).

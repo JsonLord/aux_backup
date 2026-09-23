@@ -3323,6 +3323,114 @@ def test_a_couple_of_unverified_contrast_regions_are_named_individually():
     assert all(not any(key.startswith("_") for key in f) for f in grouped)
 
 
+# SEC-1 (docs/parallel-development-spec.md): a run that hits its own step
+# budget (journeytest.js's stepBudget(), min(40, max(12, tasks*8)) -- 12 for
+# one task) ends "inconclusive" with tasks-completed:not-met and a
+# persona-stopped blocker, and a live run filed both as high/critical
+# usability findings with run_diagnostics empty.
+def _budget_journey(run_id="run_1", num_actions=12, status="inconclusive",
+                    criterion_result="not-met", blocker_id="persona-stopped"):
+    return {
+        "runId": run_id, "profileId": "persona_1",
+        "timeline": [{"type": "persona.expectation",
+                      "data": {"expectation": "x", "action": {"type": "CLICK", "target": f"e{i}"}}}
+                     for i in range(num_actions)],
+        "verdict": {
+            "status": status,
+            "criteria": [{"id": "tasks-completed", "result": criterion_result,
+                         "explanation": f"Still going after {num_actions} actions without finishing."}],
+            "blockers": [{"id": blocker_id, "severity": "minor", "category": "blocker",
+                         "title": "The visitor did not get there",
+                         "description": f"Still going after {num_actions} actions without finishing."}],
+        },
+    }
+
+
+def _assembled(journeys, tasks=("Understand the product",)):
+    return JobExecutor.assemble_report(
+        url="https://example.com", tasks=list(tasks),
+        personas=[{"id": "persona_1", "persona": {"name": "Alex"}}],
+        persona_artifacts=[], journeys=journeys, worker_configured=True, job_id="job_x",
+        vision=[], redesign=[])
+
+
+def test_a_budget_hit_criteria_finding_is_a_run_diagnostic_not_a_pain_point():
+    report = _assembled([_budget_journey()])
+    titles = {f["title"] for f in report["critical_pain_points"]}
+    diagnostic_titles = {f["title"] for f in report["run_diagnostics"]}
+    assert "Users could not finish the tasks they came to do" not in titles
+    assert "Users could not finish the tasks they came to do" in diagnostic_titles
+
+
+def test_a_budget_hit_blocker_finding_is_a_run_diagnostic_too():
+    """The same run, reported twice by JourneyTest's own verdict -- once as
+    a pass criterion, once as a blocker with id "persona-stopped". Both are
+    the same harness limit and both must be excluded, or the second title
+    ("The visitor did not get there") survives as a usability finding under
+    a different name."""
+    report = _assembled([_budget_journey()])
+    titles = {f["title"] for f in report["critical_pain_points"]}
+    diagnostic_titles = {f["title"] for f in report["run_diagnostics"]}
+    assert "The visitor did not get there" not in titles
+    assert "The visitor did not get there" in diagnostic_titles
+
+
+def test_a_genuine_give_up_below_budget_is_a_real_finding():
+    """A persona who decides to leave partway through -- ending the run
+    "failed", well under the budget -- produced a genuine finding
+    (docs/next-cycle-worksheet.md's own "the failed run produced a real
+    finding"). SEC-1 must not sweep that up too. The two titles merge into
+    one here (identical "Still going after 3 actions..." summaries clear
+    _merge_similar_findings' own, unrelated threshold) -- pre-existing
+    behaviour this test pins as unaffected by SEC-1, not a SEC-1 outcome:
+    "The visitor did not get there" survives in mergedFrom, and neither
+    title is a run diagnostic."""
+    report = _assembled([_budget_journey(num_actions=3, status="failed")])
+    titles = {f["title"] for f in report["critical_pain_points"]}
+    assert titles == {"Users could not finish the tasks they came to do"}
+    merged_from = {
+        item for f in report["critical_pain_points"] for item in (f.get("mergedFrom") or [])
+    }
+    assert "The visitor did not get there" in merged_from
+    assert report["run_diagnostics"] == []
+
+
+def test_a_blocked_criterion_is_not_swept_up_as_budget_limited():
+    """"blocked" (the run could not even assess the criterion) is a
+    different failure from running out of steps, even on an inconclusive
+    run at the budget -- scoped narrowly on purpose, matching
+    scripts/cycle/measure.py's own check."""
+    report = _assembled([_budget_journey(criterion_result="blocked")])
+    titles = {f["title"] for f in report["critical_pain_points"]}
+    assert "The journey was blocked before the tasks could be judged" in titles
+
+
+def test_a_run_well_under_budget_that_is_still_inconclusive_is_a_real_finding():
+    """Inconclusive alone is not the signal -- only inconclusive *at* the
+    budget is. A run that stopped early for some other reason and never
+    reached a verdict is a real, if unusual, thing to report."""
+    report = _assembled([_budget_journey(num_actions=3, status="inconclusive")])
+    titles = {f["title"] for f in report["critical_pain_points"]}
+    assert "Users could not finish the tasks they came to do" in titles
+    assert report["run_diagnostics"] == []
+
+
+def test_blocker_id_is_not_threaded_onto_other_buckets():
+    """blockerId is meaningful only for the blockers bucket; a uxFinding or
+    suggestedImprovement item must not carry a stray None-valued field that
+    looks like it means something."""
+    journey = {
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [],
+        "verdict": {"status": "completed",
+                    "uxFindings": [{"title": "Small tap target", "description": "d",
+                                    "severity": "medium", "category": "usability"}]},
+    }
+    findings = JobExecutor._pain_points_from_journeys([journey])
+    assert len(findings) == 1
+    assert "blockerId" not in findings[0]
+
+
 def test_a_blocked_journey_says_where_the_patience_went():
     """A live report's most serious finding was "The journey was blocked before
     completion", severity critical, recommendation None. A critical finding with no

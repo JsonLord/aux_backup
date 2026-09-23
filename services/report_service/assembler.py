@@ -36,6 +36,8 @@ from services.report_service.helpers import (  # noqa: F401  (used by moved code
     _reads_as_praise,
     _stem,
     _is_run_diagnostic,
+    _is_budget_limited_finding,
+    _budget_hit_run_ids,
     _instrument_diagnostics,
     plural,
     verb,
@@ -247,7 +249,14 @@ class ReportAssembler:
         # A harness failure is real but is not a usability finding about the product;
         # numbering it among the user issues (as "Pi director did not finish the
         # journey" was) misrepresents both.
-        run_diagnostics = [finding for finding in findings if _is_run_diagnostic(finding)]
+        # SEC-1: a run that hit its own step budget is the same shape of
+        # harness limit, from a different source (JourneyTest's own
+        # tasks-completed criterion, not a pattern in the finding's text) --
+        # a live run filed "Users could not finish the tasks they came to
+        # do" at high severity on exactly this, with run_diagnostics empty.
+        budget_hit_ids = _budget_hit_run_ids(journeys, len(tasks))
+        run_diagnostics = [finding for finding in findings
+                           if _is_run_diagnostic(finding) or _is_budget_limited_finding(finding, budget_hit_ids)]
         findings = cls._merge_similar_findings([finding for finding in findings if finding not in run_diagnostics])
         # Added after the split, not before: an instrument failure is a diagnostic by
         # construction and must never be merged into, or dropped by, the usability
@@ -2176,6 +2185,14 @@ class ReportAssembler:
                         "evidenceScreenshot": (item.get("evidence") or {}).get("screenshot"),
                         "observation": (item.get("evidence") or {}).get("observation"),
                         "source": bucket, "runId": run_id, "personaId": persona_id,
+                        # SEC-1: journeytest-core's own blocker id -- "persona-stopped"
+                        # is the same run-hit-its-budget shape criteria's
+                        # tasks-completed carries, from a different bucket and under
+                        # a different title ("The visitor did not get there" rather
+                        # than "Users could not finish the tasks they came to do").
+                        # None on every other bucket; only blockers carries an id
+                        # journeytest-core defines this narrowly.
+                        **({"blockerId": item.get("id")} if bucket == "blockers" else {}),
                     })
             for criterion in verdict.get("criteria", []):
                 result, criterion_id = criterion.get("result"), criterion.get("id")

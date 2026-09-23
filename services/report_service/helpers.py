@@ -174,6 +174,57 @@ def _is_run_diagnostic(finding: dict[str, Any]) -> bool:
     return any(pattern.search(text) for pattern in _RUN_DIAGNOSTIC_PATTERNS)
 
 
+def step_budget(num_tasks: int) -> int:
+    """journeytest.js's own stepBudget(): `min(40, max(12, tasks.length * 8))`
+    (services/journey-worker/node/src/journeytest.js). Kept here, once, so
+    SEC-1's diagnostic split and scripts/cycle/measure.py's own scoring agree
+    on when a run hit this limit rather than reaching a real conclusion --
+    the worksheet's own finding that 11 of 12 inconclusive runs in the
+    cycle 44-51 record ended on exactly this number."""
+    return min(40, max(12, num_tasks * 8))
+
+
+def _actions_taken(journey: dict[str, Any]) -> int:
+    """One `persona.expectation` event per action the persona decided to
+    take -- the same count the report's own `scorecard.runs[].actionsTaken`
+    carries (verified against last_runs/: 12 events, 12 actionsTaken)."""
+    return sum(1 for event in (journey.get("timeline") or []) if event.get("type") == "persona.expectation")
+
+
+def _budget_hit_run_ids(journeys: list[dict[str, Any]], num_tasks: int) -> set[str]:
+    """Runs that ended inconclusive because the step budget ran out, not
+    because the persona reached a real conclusion. See `step_budget()`."""
+    budget = step_budget(num_tasks)
+    return {
+        journey.get("runId")
+        for journey in journeys
+        if ((journey.get("verdict") or {}).get("status") or "").lower() == "inconclusive"
+        and _actions_taken(journey) >= budget
+    }
+
+
+def _is_budget_limited_finding(finding: dict[str, Any], budget_hit_run_ids: set[str]) -> bool:
+    """SEC-1: true when a finding describes a run that hit its step budget
+    rather than reaching a real conclusion -- the harness's own limit, not
+    a usability claim about the product. Two independent shapes carry this,
+    found by running a live snapshot through the fix rather than by
+    inspection: JourneyTest's own `tasks-completed` criterion ("Users could
+    not finish the tasks they came to do", `source: criteria`), and its
+    `blockers` bucket's own "persona-stopped" id ("The visitor did not get
+    there", `source: blockers`) -- the same run, reported twice, under two
+    different titles, from two different parts of the same verdict. Both
+    are scoped to the run actually being inconclusive-on-budget (`runId in
+    budget_hit_run_ids`), matching scripts/cycle/measure.py's own check:
+    `criterionResult: "blocked"` (a different failure -- the run could not
+    even assess the criterion) and a genuine GIVE_UP (which ends a run
+    "failed", not "inconclusive") are both left as real findings."""
+    if finding.get("runId") not in budget_hit_run_ids:
+        return False
+    return (finding.get("criterionId") == "tasks-completed" and finding.get("criterionResult") == "not-met") or (
+        finding.get("blockerId") == "persona-stopped"
+    )
+
+
 # A run's own instruments failing. Each is recorded by the persona director the
 # moment it happens, and each makes the run weaker in a way a reader cannot infer
 # from the findings: the measurement stopped, so an absence of findings means
