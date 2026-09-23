@@ -56,7 +56,8 @@ const CAPTURE_ATTEMPTS = 3;
 // Between attempts. A page that was still assembling itself wants time more than
 // it wants anything else, and on a two-core box it wants more of it.
 const CAPTURE_BACKOFF_MS = 600;
-const { MATCH_OUTCOMES, affectInWords } = require("./personaActor");
+const { MATCH_OUTCOMES, affectInWords, describeTarget } = require("./personaActor");
+const { actionKey, detectLoop, loopNotice } = require("./loopDetector");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
 const { holdRevealKeeper, releaseRevealKeeper, revealOnce } = require("./revealKeeper");
 const { latestFrame, recentFrames } = require("./viewportStream");
@@ -128,8 +129,14 @@ const sleep = (ms) => new Promise((resolve) => {
  * nothing is worse than it looks: "I clicked and the page ignored me" is the
  * shape of most real frustration, and it is invisible if only exceptions count.
  */
-function outcomeEvent(action, { failed, changed, error, matched }) {
-  const repeatKey = `${action.type}:${action.target}`;
+function outcomeEvent(action, { failed, changed, error, matched }, label) {
+  // JRN-2: by label when one is known, not by ref. A ref is only ever good for
+  // one page load -- the same "Pricing" link clicked under three different refs
+  // in one real run never repeated by this count, so the escalating-impact math
+  // reduceState() already has for exactly this case never engaged. Omitted
+  // entirely (as every caller before this did), it falls back to the ref
+  // exactly as before.
+  const repeatKey = `${action.type}:${label || action.target}`;
   if (failed) {
     return { type: "user_error", severity: 0.75, goalBlocked: true, repeatKey,
       attribution: { software: 0.6, user: 0.4 }, detail: String(error || "").slice(0, 200) };
@@ -313,6 +320,10 @@ class PersonaDirector {
     const controller = new BehaviorController(this.profile);
     const tasks = (journey.tasks || []).map(taskText).filter(Boolean);
     const history = [];
+    // JRN-2: the same, ordered, by label -- so a loop can be recognised across
+    // refs and as A/B alternation, neither of which a flat per-key count (what
+    // behavior.js's own repeatedEventCounts is) can tell apart from progress.
+    let actionKeys = [];
     let steps = 0;
     let ending = null;              // {type: "done"|"gave_up"|"abandoned"|"exhausted"|"diagnostic", detail}
     let lastUrl = "";
@@ -534,16 +545,23 @@ class PersonaDirector {
 
       // What they see and what they expect, before anything happens. Committing
       // to an expectation is what makes the next step falsifiable.
+      //
+      // What the thing acted on says on it, from the walk rather than from the
+      // sentence. The report had been recovering this by reading the persona's
+      // prose, which works right up until the persona writes "The Pricing page
+      // will load" instead of naming a control -- and then a report headline
+      // reads "Promised more than it did: e6". Kept bare (empty when unknown)
+      // for targetName below, which has always meant "or nothing" -- and
+      // separately with a same-page fallback to the ref for JRN-2's loop
+      // tracking, which needs some identity for this control even when
+      // perception cannot name it.
+      const perceivedLabel = nameOf(decision.action.target, perception);
+      const targetLabel = perceivedLabel || decision.action.target || "";
       await recorder.record("persona.expectation",
         decision.expectation || `${decision.action.type}`, {
           visible: decision.visible, expectation: decision.expectation,
           action: decision.action,
-          // What the thing acted on says on it, from the walk rather than from
-          // the sentence. The report had been recovering this by reading the
-          // persona's prose, which works right up until the persona writes "The
-          // Pricing page will load" instead of naming a control -- and then a
-          // report headline reads "Promised more than it did: e6".
-          targetName: nameOf(decision.action.target, perception) || undefined,
+          targetName: perceivedLabel || undefined,
           // Where it sat, so a finding about it can show it rather than the page
           // it was somewhere on.
           targetBox: boxOf(decision.action.target, perception) || undefined,
@@ -607,8 +625,32 @@ class PersonaDirector {
         await this.capture(browser, context, `page-${steps}`);
       }
       lastUrl = after.url || lastUrl;
-      history.push(`${decision.action.type}${decision.action.target ? ` ${decision.action.target}` : ""}`
+      history.push(`${decision.action.type}${describeTarget(decision.action, perceivedLabel)}`
         + (performed.failed ? " (it did not work)" : ""));
+
+      // JRN-2: recognised by label, so the three different refs a live run
+      // pointed "Pricing" through are one control repeated, not three different
+      // ones tried once each. Scoped to CLICK/TYPE with a real target: SCROLL's
+      // own "target" is a distance, GO_BACK and READ name nothing, and a loop
+      // in either sense needs a thing that is the same, or reliably different,
+      // twice.
+      let loop = { repeated: 0, alternating: null };
+      if ((decision.action.type === "CLICK" || decision.action.type === "TYPE") && decision.action.target) {
+        const current = { key: actionKey(decision.action.type, targetLabel), label: targetLabel,
+          type: decision.action.type };
+        loop = detectLoop(actionKeys, current);
+        actionKeys = loop.pushed;
+        if (loop.repeated || loop.alternating) {
+          const notice = loopNotice(loop);
+          await recorder.record("persona.loop", notice,
+            { repeated: loop.repeated || undefined, alternating: loop.alternating || undefined,
+              action: decision.action, label: targetLabel });
+          // Told back to them the same way everything else they have done is,
+          // so the very next decision is made knowing this rather than being
+          // inferred (or not) from re-reading the raw list themselves.
+          history.push(notice);
+        }
+      }
 
       if (decision.action.type === "DONE") { ending = { type: "done", detail: decision.action.content }; break; }
       if (decision.action.type === "GIVE_UP") { ending = { type: "gave_up", detail: decision.action.content }; break; }
@@ -654,9 +696,13 @@ class PersonaDirector {
       }
 
       const applied = controller.apply(
-        { ...outcomeEvent(decision.action, { ...performed, changed, matched: reflection?.matched }),
+        { ...outcomeEvent(decision.action, { ...performed, changed, matched: reflection?.matched }, targetLabel),
           durationMs: readMs },
-        { taskImportance: 0.6, progressVisible: changed });
+        // JRN-2: what copingScores needs to prefer a way out of a loop over a
+        // bigger version of whatever is already losing inside it -- computed
+        // above, by label, so it survives a control changing ref between clicks.
+        { taskImportance: 0.6, progressVisible: changed,
+          loopRepeatCount: loop.repeated, loopAlternating: Boolean(loop.alternating) });
       await recorder.record("persona.affect", `frustration ${applied.after.frustration.toFixed(2)}, `
         + `confusion ${applied.after.confusion.toFixed(2)}, coping ${applied.coping.decision.type}`, {
         state: applied.after, coping: applied.coping.decision, feeling: affectInWords(applied.after),

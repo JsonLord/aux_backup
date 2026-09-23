@@ -39,7 +39,7 @@ defects to fix. They are not trends.
 | **1.03–1.13:1** | The ratios of all four "Fails WCAG AA" findings. The two crops opened, "Video" and "Italiano", are blank page. The summary's "one thing to change" is one of them. | EVD-1, FND-1 |
 | **0.033 → 0.615** | The highest probability of abandoning, reached at frustration 1.00. The tolerance check at `behavior.js:160` is overwritten at `:163`. Closed in code (the right-hand figure is this same real state, re-scored against the fix); not yet confirmed live. | JRN-1 |
 | **2 of 3** | Actions the adherence gate failed (scores 3, 4 and 0) confirmed to have run anyway, via a matching pointer event (the 3rd has no pointer event either way). The gate also judged `e367` "unrelated" when it was the Pricing link. | JRN-3 |
-| **7 clicks** | Alternating between Pricing and "Start free for 30 days". Pricing was clicked under three refs, so no per-ref counter saw a repeat. | JRN-2 |
+| **7 clicks → recognised by action 7** | Alternating between Pricing and "Start free for 30 days". Pricing was clicked under three refs, so no per-ref counter saw a repeat. Closed in code, checked against this exact sequence (`loopDetector.detectLoop` fires on the second Pricing→Start-free round trip); not yet confirmed live. | JRN-2 |
 | **1** | The run hit its step budget, and that was filed as a high-severity usability finding. `run_diagnostics` is empty. | SEC-1, JRN-4 |
 | **47%** | The adherence judge's share of the run's 176 s of model time. It is the largest single lever on run speed. | JRN-3, OPS-3 |
 | **0 / 8** | Findings about the site with a video timestamp, though every timeline event carries `videoTimeMs` (9 findings carry `evidenceScreenshot`, one of them the misfiled run-limit finding SEC-1 relocates). | SEC-5 |

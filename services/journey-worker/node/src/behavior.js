@@ -138,6 +138,37 @@ function copingScores(profile, state, context = {}) {
   if (state.consecutiveFailures > 1 && state.frustration > abandonTolerance(profile)) {
     scores.abandon += 1 + clamp(state.frustration - abandonTolerance(profile)) * 4;
   }
+  // JRN-2: the same control again, or two controls alternating, told apart from
+  // a bigger version of whatever is already winning. `retry`/`continue`/
+  // `impulsive_retry` are exactly the options that produced the loop in the
+  // first place -- boosting `explore`/`backtrack` alone still let `reread`
+  // (which does not touch what happens next) lead on a real run's own
+  // recorded states at the point a loop first became visible, so this
+  // suppresses the repeat-reinforcing three rather than only lifting their
+  // replacements. `abandon` gets a smaller share of the same boost: a loop is
+  // itself a reason to leave, not only a reason to try something else, and
+  // without its own share here the flat lift to `explore`/`backtrack` diluted
+  // it under softmax renormalisation exactly where JRN-1 had just made it
+  // competitive -- measured on the same real run this profile's tolerance
+  // check (0.78) is calibrated against: at frustration 1.00 with a real
+  // alternation resolving into a third repeat of the same control,
+  // unboosted p(abandon) 0.615 fell to 0.284 with only explore/backtrack
+  // lifted, and holds at 0.617 with this smaller abandon share included.
+  // Below tolerance the same run shows the boost doing the other job: at
+  // frustration 0.55, two clicks into an A/B alternation and nowhere near
+  // this profile's tolerance, reread led at 0.416 and abandon barely moved
+  // (0.010 to 0.015) while explore took over at 0.412 -- a nudge toward
+  // trying something else, not a push toward leaving before there is
+  // reason to.
+  const looping = Boolean(context.loopAlternating) || Number(context.loopRepeatCount || 0) > 0;
+  if (looping) {
+    scores.explore += 1.1;
+    scores.backtrack += 1.1;
+    scores.abandon += 0.7;
+    scores.continue -= 0.8;
+    scores.retry -= 0.8;
+    scores.impulsive_retry -= 0.6;
+  }
   return scores;
 }
 

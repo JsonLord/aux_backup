@@ -2181,3 +2181,111 @@ test("with no hatExtras, the faculty is unchanged from before CAP-2", () => {
   assert.ok(director.faculty.actionTypes.includes("CLICK"));
   assert.ok(!director.faculty.actionTypes.includes("PING"));
 });
+
+// --- JRN-2: loops recognised by label, not by ref -------------------------
+
+test("the outcome event's repeat key is the label, and falls back to the ref exactly as before", () => {
+  // A label, when the caller has one: this is the whole fix. "Pricing" clicked
+  // under three different refs is now three occurrences of one key, where
+  // before it was three keys used once each.
+  const named = outcomeEvent({ type: "CLICK", target: "e367" }, { failed: false, changed: false }, "Pricing");
+  assert.equal(named.repeatKey, "CLICK:Pricing");
+
+  // No third argument -- every caller before this one -- is unchanged: the ref
+  // is still the key.
+  const unnamed = outcomeEvent({ type: "CLICK", target: "e367" }, { failed: false, changed: false });
+  assert.equal(unnamed.repeatKey, "CLICK:e367");
+});
+
+/** A perception mock that resolves a fixed set of selectors to fixed names,
+ * regardless of what was walked or captured -- enough for nameOf() to work,
+ * which is all these tests need from it. */
+function namingPerception(named) {
+  const box = { x: 0, y: 0, width: 40, height: 10 };
+  return { available: true, async perceive() {
+    return { observation: "a page", eyes: {}, scan: {},
+      counts: { elements: named.length, legible: named.length, fixated: named.length,
+        notPerceived: 0, notLookedAt: 0 },
+      notPerceived: [], notLookedAt: [],
+      perceived: named.map(([selector, name]) => ({ selector, name, box })) };
+  } };
+}
+function namingWalk(named) {
+  const box = { x: 0, y: 0, width: 40, height: 10 };
+  return async () => ({
+    elements: named.map(([selector, name]) => ({ selector, role: "link", name, box })),
+    viewport: { width: 1280, height: 900 }, screenshotBase64: "AAA", refs: {}, snapshot: "", scrollY: 0 });
+}
+
+test("the same control clicked under three different refs is one repeat, not three tries at different things", async () => {
+  // The real defect this lane was built to close: a live run clicked "Pricing"
+  // under e153, e27 and e367, and repeatedEventCounts -- keyed by ref before
+  // this fix -- never saw a repeat at all.
+  const named = [["e1", "Pricing"], ["e2", "Pricing"], ["e4", "Pricing"]];
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: namingPerception(named),
+    frames: () => [], walk: namingWalk(named),
+    actor: scriptedActor([
+      { type: "CLICK", target: "e1" }, { type: "CLICK", target: "e2" }, { type: "CLICK", target: "e4" },
+      { type: "DONE", content: "gave up" },
+    ]),
+  });
+  const recorder = fakeRecorder();
+  // A page that takes the click and does nothing -- like the real run this is
+  // built against, where "Pricing" kept landing back on itself. Only matters
+  // here so the outcome is "ambiguous_feedback" rather than "success", which
+  // is what makes outcomeEvent's label-aware repeatKey the one that runs;
+  // either way the loop is tracked by what was clicked, not by what happened.
+  await run(director, fakeBrowser({ dead: true }), recorder);
+
+  const loop = recorder.events.find((event) => event.type === "persona.loop");
+  assert.ok(loop, "three tries at the same control, by label, is reported as a loop");
+  assert.equal(loop.data.repeated, 3);
+  assert.equal(loop.data.label, "Pricing");
+  assert.equal(loop.data.action.target, "e4", "the ref of the click that completed the pattern");
+  assert.equal(loop.data.alternating, undefined, "three tries at one thing is not two things alternating");
+
+  // And the escalating-impact math already in reduceState(), which needs a
+  // repeat to see one, now does: the label fix is not only the new explicit
+  // event, it is the old counter finally counting correctly.
+  const ended = recorder.events.find((event) => event.type === "agent.end");
+  assert.equal(ended.data.finalState.repeatedEventCounts["CLICK:Pricing"], 3);
+});
+
+test("two controls alternated four times, by label and across refs, is told back to the persona as a loop", async () => {
+  const named = [["e1", "Pricing"], ["e2", "Pricing"], ["e3", "Start free for 30 days"]];
+  const seenHistory = [];
+  let index = 0;
+  const script = [
+    { type: "CLICK", target: "e1" },   // Pricing
+    { type: "CLICK", target: "e3" },   // Start free
+    { type: "CLICK", target: "e2" },   // Pricing again, a different ref
+    { type: "CLICK", target: "e3" },   // Start free -- A, B, A, B by label: the loop
+    { type: "DONE", content: "gave up" },
+  ];
+  const actor = async (ask) => {
+    seenHistory.push((ask.history || []).slice());
+    const step = script[Math.min(index, script.length - 1)];
+    index += 1;
+    return { visible: "", expectation: "", action: { type: step.type, target: step.target || "",
+      content: step.content || "" } };
+  };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: namingPerception(named),
+    frames: () => [], walk: namingWalk(named), actor,
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const loop = recorder.events.find((event) => event.type === "persona.loop");
+  assert.ok(loop, "an A/B alternation across refs is reported as a loop");
+  assert.deepEqual(loop.data.alternating, { a: "Pricing", b: "Start free for 30 days" });
+  assert.equal(loop.summary,
+    'You keep going back and forth between "Pricing" and "Start free for 30 days" without getting anywhere.');
+
+  // Told back to them: the very next decision -- the DONE that ends this run --
+  // was asked for with this in its own history, not only recorded for a report
+  // nobody in the run itself ever reads.
+  assert.ok(seenHistory.at(-1).some((line) => line.includes("going back and forth")),
+    "the next actor call is shown the loop, not only the recorder");
+});

@@ -202,3 +202,72 @@ test("apply() can now actually produce abandonment, not just a discarded label",
   assert.equal(second.after.abandoned, true);
   assert.equal(second.after.copingMode, "abandoning");
 });
+
+test("with no loop context, coping scores are exactly as before JRN-2", () => {
+  const controller = new BehaviorController(profile);
+  const stuck = { ...initialState(), frustration: 0.2, confusion: 0.3, anger: 0.1, perceivedProgress: 0,
+    consecutiveFailures: 2, fatigue: 0.1 };
+  const bare = copingScores(controller.profile, stuck, {});
+  const explicitlyNotLooping = copingScores(controller.profile, stuck,
+    { loopRepeatCount: 0, loopAlternating: false });
+  assert.deepEqual(bare, explicitlyNotLooping);
+});
+
+test("a loop -- repeated or alternating -- lifts explore, backtrack and abandon, and suppresses the three that made it", () => {
+  const controller = new BehaviorController(profile);
+  // Below this profile's own abandon tolerance (0.2875, from the formula
+  // test above), so JRN-1's own boost is not also in play here -- isolating
+  // what the loop context alone does to the distribution.
+  const stuck = { ...initialState(), frustration: 0.2, confusion: 0.3, anger: 0.1, perceivedProgress: 0,
+    consecutiveFailures: 2, fatigue: 0.1 };
+  assert.ok(stuck.frustration <= abandonTolerance(controller.profile), "fixture must stay below tolerance");
+  const base = copingScores(controller.profile, stuck, {});
+
+  for (const loopContext of [{ loopRepeatCount: 3 }, { loopAlternating: true }]) {
+    const looping = copingScores(controller.profile, stuck, loopContext);
+    // Exact, not approximate: the same six terms this file's own comment on
+    // the boost names, nothing else moved.
+    const expected = { ...base };
+    expected.explore += 1.1; expected.backtrack += 1.1; expected.abandon += 0.7;
+    expected.continue -= 0.8; expected.retry -= 0.8; expected.impulsive_retry -= 0.6;
+    assert.deepEqual(looping, expected, `${JSON.stringify(loopContext)} should apply exactly this boost`);
+  }
+
+  // And the distribution actually moves where it matters: on this fixture,
+  // unboosted, seek_help and impulsive_retry tie for the lead (0.217 each) --
+  // clicking the same failing thing again, just picked by a coin flip among
+  // near-identical options. A loop is direct evidence against exactly that
+  // being a good idea.
+  const baseLeader = Object.entries(probabilities(base)).sort((a, b) => b[1] - a[1])[0];
+  assert.equal(baseLeader[0], "seek_help");
+  const loopDist = probabilities(copingScores(controller.profile, stuck, { loopRepeatCount: 3 }));
+  const loopLeader = Object.entries(loopDist).sort((a, b) => b[1] - a[1])[0];
+  assert.equal(loopLeader[0], "backtrack", "a control that keeps failing should be left, not retried");
+  assert.ok(loopDist.impulsive_retry < 0.05,
+    `impulsive_retry re-clicks the same thing immediately -- the worst option once a loop is known, `
+    + `got ${loopDist.impulsive_retry}`);
+});
+
+test("a loop past this profile's abandon tolerance boosts abandon on top of JRN-1's own boost, not instead of it", () => {
+  // Calibrated against a real run (docs/parallel-development-spec.md's JRN-2
+  // row): boosting explore/backtrack alone, with no share for abandon, took
+  // p(abandon) on that run's own last step from 0.615 (JRN-1 alone) down to
+  // 0.284 -- diluted by softmax renormalisation exactly where JRN-1 had just
+  // made it competitive. Reproduced here on the shared fixture: composing
+  // JRN-2's smaller +0.7 with JRN-1's own tolerance-crossing boost must leave
+  // abandon at least as strong as JRN-1 alone left it, not weaker.
+  const controller = new BehaviorController(profile);
+  const pastTolerance = { ...initialState(), frustration: 0.9, confusion: 0.3, anger: 0.1,
+    perceivedProgress: 0, consecutiveFailures: 3, fatigue: 0.2 };
+  assert.ok(pastTolerance.frustration > abandonTolerance(controller.profile));
+
+  const tolerance = abandonTolerance(controller.profile);
+  const abandonOnly = copingScores(controller.profile, pastTolerance, {}).abandon;
+  const withLoopToo = copingScores(controller.profile, pastTolerance, { loopRepeatCount: 4 }).abandon;
+  const expectedAbandonOnly = pastTolerance.frustration * 1.3 + pastTolerance.fatigue * 0.8
+    - controller.profile.persistence * 0.9 - 0.5 * 0.5
+    + 1 + Math.min(1, pastTolerance.frustration - tolerance) * 4;
+  assert.ok(Math.abs(abandonOnly - expectedAbandonOnly) < 1e-9);
+  assert.equal(withLoopToo, abandonOnly + 0.7, "the loop's own share of the boost, added on top");
+  assert.ok(withLoopToo > abandonOnly, "a loop found on top of crossed tolerance should not make leaving less likely");
+});
