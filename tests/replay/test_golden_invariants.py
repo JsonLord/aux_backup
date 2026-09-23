@@ -17,12 +17,11 @@ Each invariant is proven both ways in this file, not asserted on faith:
 
 A golden test pins a *specific, current* number (`ASSERTED_CONTRACT`
 below), not an aspirational one: the §30 contract is not fully met yet
-(vision is absent under replay by design, and several lanes -- FND-4, SEC-3,
-SEC-4, EVD-2 -- have not landed). Update `ASSERTED_CONTRACT` in the same PR
-that closes one of those gaps, with a comment saying which item did it;
-letting this test silently start failing (or silently stop meaning
-anything, by loosening the assertion) is the failure mode a golden test
-exists to prevent.
+(vision is absent under replay by design, and SEC-4 and EVD-2 have not
+landed). Update `ASSERTED_CONTRACT` in the same PR that closes one of those
+gaps, with a comment saying which item did it; letting this test silently
+start failing (or silently stop meaning anything, by loosening the
+assertion) is the failure mode a golden test exists to prevent.
 """
 from __future__ import annotations
 
@@ -43,7 +42,14 @@ LAST_RUNS = Path(__file__).resolve().parents[2] / "last_runs"
 
 # Pinned to today's tree. See the module docstring: update this, with a
 # reason, in the PR that closes one of the two remaining "missing" sections.
-ASSERTED_CONTRACT = {"met": 5, "partial": 2, "missing": 2}
+# FND-3/FND-4/SEC-3: section 7 (alternative solutions) moved partial -> met
+# -- every finding now carries at least one alternative, each with a judged
+# effort and a trade-off sentence, and `ranked_alternatives` aggregates and
+# ranks them by impact x personas x confidence / effort with the rule
+# stated. Section 6 (eyeson UX review) stays "missing" under replay
+# specifically, by the design already noted above -- confirmed unaffected by
+# reading the recomputed sections dict, not assumed.
+ASSERTED_CONTRACT = {"met": 6, "partial": 1, "missing": 2}
 
 
 def _require_snapshot():

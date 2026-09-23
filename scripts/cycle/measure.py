@@ -477,6 +477,11 @@ def report_contract_sections(report: dict[str, Any]) -> dict[str, Any]:
             (f.get("evidenceScreenshot") or f.get("elementBox"))
             and f.get("evidence")
             and f.get("recommendation")
+            # FND-4: "alternatives" is one of spec.md §30.5's own nine
+            # sub-bullets for this section, same standing as evidence and
+            # recommendation above -- not checked until every finding
+            # actually carried one.
+            and f.get("alternatives")
         )
 
     core_ok = [f for f in findings if _core_ok(f)]

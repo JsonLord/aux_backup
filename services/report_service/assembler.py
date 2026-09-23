@@ -244,6 +244,30 @@ class ReportAssembler:
                             if cut_short else
                             "Neither JourneyTest's verdict nor the vision-based UX critique reported "
                             "any blockers, UX findings, or failed pass criteria for the configured tasks."),
+                "recommendation": ("Re-run with a longer step budget or fewer tasks per run so the persona "
+                                   "has room to reach a verdict." if cut_short else
+                                   "No action needed. Re-run after any future change to confirm it still holds."),
+                # FND-4: even a placeholder "nothing to report" finding gets a
+                # real alternative -- the other reasonable choice, not a
+                # templated stand-in.
+                "alternatives": [{
+                    "proposedChange": (
+                        "Keep the current budget and treat a cut-short run as inconclusive rather than "
+                        "investing in a longer one." if cut_short else
+                        "Add one more, more skeptical or more thorough persona to this cohort before "
+                        "trusting a clean result."),
+                    "rationale": ("Costs nothing extra per run, at the price of never getting a real "
+                                 "verdict from a persona this slow." if cut_short else
+                                 "A single clean run is weaker evidence than a clean run across several "
+                                 "different dispositions."),
+                    "effort": "behaviour",
+                    "tradeOff": (
+                        "Avoids lengthening every run just for the personas that need it, but this "
+                        "specific task/persona combination will keep ending early until the budget "
+                        "changes." if cut_short else
+                        "Costs another live run now, in exchange for more confidence than one persona's "
+                        "clean pass alone provides."),
+                }],
                 "evidence": "See journey_outcome.runs[].verdict for the full per-run verdict.",
                 "source": "verdict"})
         # A harness failure is real but is not a usability finding about the product;
@@ -263,6 +287,16 @@ class ReportAssembler:
         # assigned by which builder produced the finding. After the merge, so
         # it reads whichever runId a merged finding actually settled on.
         cls._attach_task_blocked(findings, journeys)
+        # FND-3: a real, derived confidence per finding -- needs reproducedIn
+        # (set by the merge above) and runs entirely off journeys/personas,
+        # so it has no ordering dependency on _attach_task_blocked beyond
+        # sharing this spot in the pipeline.
+        cls._attach_confidence(findings, journeys, personas)
+        # FND-4: every finding gets at least one alternative, and every
+        # alternative carries a judged effort and a trade-off sentence. Last
+        # of the three, since it is a safety net over whatever the two calls
+        # above (and every finding builder before them) already produced.
+        cls._ensure_alternatives(findings)
         # Added after the split, not before: an instrument failure is a diagnostic by
         # construction and must never be merged into, or dropped by, the usability
         # findings it is reported alongside.
@@ -386,6 +420,10 @@ class ReportAssembler:
                 "flow_groups": cls._flow_groups(findings, tasks),
                 "elements_to_preserve": preserve,
                 "impact_analysis": cls._impact_analysis(findings, personas),
+                # SEC-3 (spec.md §30.7): every alternative across every
+                # finding, ranked by impact x personas x confidence / effort,
+                # with the rule stated rather than left implicit.
+                "ranked_alternatives": cls._ranked_alternatives(findings),
                 # A2: task success, actions taken, expectations met vs missed --
                 # the hit rate a report that only shows misses would otherwise hide.
                 "scorecard": cls._run_scorecard(journeys, personas, persona_names),
@@ -900,6 +938,211 @@ class ReportAssembler:
                                "affectedPersonas": item.get("affectedPersonas"),
                                "category": item.get("category")} for item in ranked[:10]],
             "mostSusceptibleTraits": sorted(traits, key=lambda trait: -traits[trait])[:5],
+        }
+
+    # FND-3 (spec.md B8, A10's residue): derived from four real,
+    # already-recorded inputs -- never asserted, and never copied from
+    # severity, which answers a different question (how bad, not how sure).
+    # Equally weighted: spec.md does not rank the four relative to each
+    # other, so no single input is allowed to dominate the average.
+    @classmethod
+    def _finding_confidence(cls, finding: dict[str, Any], cohort_size: int,
+                            degraded_run_ids: set[str]) -> float:
+        # Capture trust: a real "as they saw it" capture beats a clean one,
+        # which beats no screenshot at all (still real evidence -- a
+        # JourneyTest verdict quote or a DOM measurement -- just not visual).
+        capture_trust = (1.0 if finding.get("evidenceScreenshot") and finding.get("evidenceIsAsTheySawIt")
+                         else 0.7 if finding.get("evidenceScreenshot")
+                         else 0.4)
+        # Persona agreement: how much of the cohort that actually ran hit
+        # this, not an absolute persona count -- a single-persona cohort
+        # where that one persona hit it is full agreement, not weak evidence.
+        persona_agreement = min(1.0, int(finding.get("affectedPersonas") or 1) / max(1, cohort_size))
+        # Reproduced: seen across two or more independent runs (BE-5's own
+        # reproducedIn, set by _merge_similar_findings) is meaningfully more
+        # confident than seen once.
+        reproduced = min(1.0, int(finding.get("reproducedIn") or 1) / 2)
+        run_id = finding.get("runId")
+        if run_id is None:
+            # Cross-persona aggregated (vision synthesis): no single run to
+            # credit or blame, so this input holds neutral rather than
+            # penalising a finding the per-run signal cannot speak to.
+            run_completed = 1.0
+        else:
+            # Whether the *evidence-gathering* finished cleanly (JRN-4/RUN-3's
+            # own harnessError), not whether the *persona* finished their task
+            # (FND-2's taskBlocked) -- a persona can fail a real task on a run
+            # that otherwise ran to completion, and that failure does not make
+            # the finding it produced any less trustworthy.
+            run_completed = 0.7 if run_id in degraded_run_ids else 1.0
+        return round((capture_trust + persona_agreement + reproduced + run_completed) / 4, 2)
+
+    @classmethod
+    def _attach_confidence(cls, findings: list[dict[str, Any]], journeys: list[dict[str, Any]],
+                           personas: list[dict[str, Any]]) -> None:
+        """FND-3: a real, derived `confidence` on every finding, read by SEC-3's
+        ranking below. Mutates in place, after the merge (so `reproducedIn`
+        and `affectedPersonas` are the finding's own final, settled numbers)."""
+        degraded_run_ids = {journey.get("runId") for journey in journeys
+                            if journey.get("harnessError") and journey.get("runId")}
+        cohort_size = len(personas) or 1
+        for finding in findings:
+            finding["confidence"] = cls._finding_confidence(finding, cohort_size, degraded_run_ids)
+
+    # FND-4: the taxonomy alternatives[].effort is judged against -- what
+    # KIND of change a proposal is, not how large it is (a different axis
+    # from the vision-critique worker's own low/medium/high magnitude scale,
+    # answering a different question). Copy is cheapest and safest to ship;
+    # layout touches visual/spatial rules; behaviour is new or changed
+    # runtime logic, the most expensive and riskiest of the three.
+    _VALID_EFFORTS = ("copy", "layout", "behaviour")
+    _COPY_EFFORT_MARKERS = ("label", "reword", "wording", "rename", "relabel", "copy", "microcopy",
+                            "message", "text says")
+    _LAYOUT_EFFORT_MARKERS = ("contrast", "size", "spacing", "position", "layout", "prominent",
+                              "visible", "colour", "color", "move", "reorder", "font", "background")
+
+    @classmethod
+    def _sniff_effort(cls, text: str) -> str:
+        """Classify a proposed change by what its own words describe. The
+        fallback for a source with no controlled-vocabulary category to key
+        off (JourneyTest's free-form verdict text; the vision-critique
+        worker's own effort field, which is low/medium/high magnitude, not
+        this taxonomy, and is re-classified here rather than trusted as-is)."""
+        lowered = text.casefold()
+        if any(marker in lowered for marker in cls._COPY_EFFORT_MARKERS):
+            return "copy"
+        if any(marker in lowered for marker in cls._LAYOUT_EFFORT_MARKERS):
+            return "layout"
+        # A default, not a guess abstained from: every alternative must carry
+        # one of the three, and an unclassified UX/functional finding is more
+        # often a real behaviour gap than a pure copy or layout tweak.
+        return "behaviour"
+
+    @classmethod
+    def _coerce_effort(cls, alternative: dict[str, Any], finding: dict[str, Any]) -> str:
+        effort = alternative.get("effort")
+        if effort in cls._VALID_EFFORTS:
+            return effort
+        return cls._sniff_effort(f"{alternative.get('proposedChange', '')} "
+                                 f"{alternative.get('rationale', '')} {finding.get('category', '')}")
+
+    @classmethod
+    def _synthesize_trade_off(cls, alternative: dict[str, Any], finding: dict[str, Any],
+                              raw_effort: Any = None) -> str:
+        """One sentence, built from this alternative's and this finding's own
+        real text -- never a static string repeated across findings (RPT-1's
+        own standard for recommendations, extended here to trade-offs)."""
+        proposed = (alternative.get("proposedChange") or "").rstrip(". ")
+        recommendation = (finding.get("recommendation") or "").rstrip(". ")
+        # The vision model's own magnitude estimate is real signal; noted
+        # rather than silently dropped when this alternative's effort was
+        # re-classified away from it above.
+        estimate = (f" (the vision model's own estimate for this alternative: {raw_effort} effort)"
+                   if isinstance(raw_effort, str) and raw_effort not in cls._VALID_EFFORTS else "")
+        if proposed and recommendation and proposed.casefold() != recommendation.casefold():
+            return (f"Trades the committed fix -- “{recommendation}” -- for “{proposed}”: "
+                   f"a different lever on the same finding, not a smaller version of the same one{estimate}.")
+        if proposed:
+            return (f"“{proposed}” is a real option here, weighed against leaving the finding as "
+                   f"reported{estimate}.")
+        return "No proposed change was recorded for this alternative, so no trade-off could be derived from it."
+
+    @classmethod
+    def _fallback_alternative(cls, finding: dict[str, Any]) -> dict[str, Any]:
+        """FND-4's safety net for a finding whose own builder did not construct
+        one: JourneyTest's own verdict text (blockers/uxFindings/
+        suggestedImprovements/criteria) and the two harness-status
+        placeholders, none of which is this codebase's own prose to redesign
+        per finding. A universal, honestly-framed alternative that holds for
+        any finding shape -- ship a smaller mitigation now and treat the full
+        fix as a follow-up -- rather than disputing the finding or inventing
+        specifics it never gave us."""
+        title = finding.get("title") or "this finding"
+        recommendation = (finding.get("recommendation") or "").strip()
+        effort = cls._sniff_effort(f"{finding.get('category', '')} {title} {recommendation}")
+        if recommendation:
+            proposed = (f"Ship a smaller, partial mitigation for “{title}” now, and treat "
+                       f"“{recommendation.rstrip('.')}” as a follow-up rather than a blocking fix.")
+            trade_off = (f"Reduces the immediate impact faster and cheaper than the full recommended fix, "
+                        f"but leaves the underlying cause -- and the {effort} work the full fix needs -- "
+                        f"unresolved until the follow-up lands.")
+        else:
+            proposed = (f"Reproduce “{title}” in a second run before scoping a fix -- no specific "
+                       f"recommendation was recorded for it yet.")
+            trade_off = ("Costs one more run before anything changes, rather than committing engineering "
+                        "time with no specific fix yet defined.")
+        return {"proposedChange": proposed, "effort": effort, "tradeOff": trade_off,
+                "rationale": "No finding-specific alternative was generated for this source; this is the "
+                            "general, source-agnostic fallback."}
+
+    @classmethod
+    def _ensure_alternatives(cls, findings: list[dict[str, Any]]) -> None:
+        """FND-4: every site finding gets at least one alternative, and every
+        alternative carries a judged `effort` and a `tradeOff` sentence.
+        Findings that already construct grounded alternatives (broken-
+        promise, unreadable, never-looked-at, the two harness-status
+        placeholders) pass through unchanged below -- every field this loop
+        would otherwise fill is already present and valid. Mutates in place,
+        after the merge, so a merged finding's own combined `alternatives`
+        (see `_merge_similar_findings`) is what gets completed, not a
+        pre-merge duplicate's."""
+        for finding in findings:
+            alternatives = finding.get("alternatives") or []
+            if not alternatives:
+                alternatives = [cls._fallback_alternative(finding)]
+                finding["alternatives"] = alternatives
+            for alternative in alternatives:
+                raw_effort = alternative.get("effort")
+                alternative["effort"] = cls._coerce_effort(alternative, finding)
+                if not alternative.get("tradeOff"):
+                    alternative["tradeOff"] = cls._synthesize_trade_off(alternative, finding, raw_effort)
+
+    # SEC-3 (spec.md §30.7): the same severity judgement _highest_impact ranks
+    # by, rescaled to a strictly positive integer -- _SEVERITY_RANK's own -1
+    # (info) would zero or invert a multiplicative score, which a *rank*
+    # (max/sort) is never asked to do.
+    _RANK_IMPACT_WEIGHT = {"info": 1, "low": 2, "medium": 3, "high": 4, "critical": 5}
+    # Cost to implement, cheapest first -- the divisor in "impact x personas x
+    # confidence / effort": a high-effort fix needs proportionally more
+    # impact (or reach, or confidence) to outrank a cheap one.
+    _RANK_EFFORT_WEIGHT = {"copy": 1, "layout": 2, "behaviour": 3}
+
+    @classmethod
+    def _ranked_alternatives(cls, findings: list[dict[str, Any]]) -> dict[str, Any]:
+        """SEC-3 / spec.md §30.7: every alternative across every finding,
+        aggregated into one section and ranked by impact x personas x
+        confidence / effort -- printed as `rule` so the order can be checked
+        against a stated formula rather than trusted.
+
+        Ranks `alternatives[]` specifically, not each finding's committed
+        `recommendation`: `alternatives` is this codebase's own name (see
+        `_committed_recommendation`) for the options *not* committed to, and
+        only those carry a judged `effort` (FND-4). A reader who wants to
+        weigh a different lever than the one this report already committed
+        to is exactly who this section is for.
+        """
+        items = []
+        for finding in findings:
+            impact = cls._RANK_IMPACT_WEIGHT.get(str(finding.get("severity")), cls._RANK_IMPACT_WEIGHT["medium"])
+            personas = max(1, int(finding.get("affectedPersonas") or 1))
+            confidence = finding.get("confidence")
+            confidence = confidence if isinstance(confidence, (int, float)) else 0.5
+            for alternative in finding.get("alternatives") or []:
+                effort_weight = cls._RANK_EFFORT_WEIGHT.get(alternative.get("effort"),
+                                                             cls._RANK_EFFORT_WEIGHT["layout"])
+                score = round((impact * personas * confidence) / effort_weight, 3)
+                items.append({
+                    "findingTitle": finding.get("title"), "severity": finding.get("severity"),
+                    "proposedChange": alternative.get("proposedChange"),
+                    "rationale": alternative.get("rationale"), "tradeOff": alternative.get("tradeOff"),
+                    "effort": alternative.get("effort"), "affectedPersonas": personas,
+                    "confidence": confidence, "score": score,
+                })
+        items.sort(key=lambda item: -item["score"])
+        return {
+            "rule": ("Ranked by impact (severity) x personas affected x confidence / effort "
+                    "(copy < layout < behaviour), highest first."),
+            "items": items,
         }
 
     @staticmethod
@@ -1874,12 +2117,22 @@ class ReportAssembler:
                         f"right now nothing does. Kept as the fallback, not the recommendation: it "
                         f"treats the symptom rather than the control, and a visitor who reads the "
                         f"new wording correctly still gets nothing for the click.")
+            # FND-4: the alternative not committed to above is always the
+            # reword, in both branches -- copy, never layout or behaviour.
+            effort = "copy"
+            trade_off = (f"Ships as a copy change alone, faster than building the behaviour "
+                        f"\u201c{label}\u201d already promises -- but the visitor still cannot do the "
+                        f"thing the control led them to expect, only stops expecting it.")
         else:
             commit = (f"Relabel \u201c{label}\u201d to {verb}.")
             rejected = (f"Change what \u201c{label}\u201d does so it matches its current label. Kept "
                         f"as the fallback: the existing behaviour may be the one worth keeping, and "
                         f"relabelling is the cheaper of the two changes to be wrong about.")
-        return commit, [{"proposedChange": rejected,
+            effort = "behaviour"
+            trade_off = (f"Costs real behaviour work, well beyond the relabel committed to above -- but "
+                        f"the visitor keeps getting what \u201c{label}\u201d already tells them to expect, "
+                        f"rather than a corrected label for a control that still does the old thing.")
+        return commit, [{"proposedChange": rejected, "effort": effort, "tradeOff": trade_off,
                          "rationale": "The half of the either/or not committed to above."}]
 
     @staticmethod
@@ -2239,6 +2492,19 @@ class ReportAssembler:
                 "recommendation": ("Check this element renders on a settled page. If it is part of an "
                                    "animation, nothing is wrong; if it is not, the page is announcing "
                                    "text to assistive technology that a sighted visitor never sees."),
+                # FND-4: the alternative to confirming first is acting first --
+                # skip the wait and make the DOM match first paint, whether or
+                # not this turns out to be animation timing.
+                "alternatives": [{
+                    "proposedChange": (f"Skip the confirmation step and make {what} render before the "
+                                       f"accessibility tree announces it, whether or not this turns out "
+                                       f"to be animation timing."),
+                    "rationale": "Acts immediately instead of waiting for a clean capture to confirm the region actually holds rendered text.",
+                    "effort": "behaviour",
+                    "tradeOff": (f"Faster to ship if the guess is right, but spends real timing/rendering "
+                                f"work on {what} before the evidence above actually confirms there is a "
+                                f"defect here rather than an animation still settling."),
+                }],
                 "evidence": (f"no ink in a {int((item.get('box') or {}).get('width', 0))}x"
                              f"{int((item.get('box') or {}).get('height', 0))} region the tree says "
                              f"holds text, on {plural(group['steps'], 'step')}"),
@@ -2284,6 +2550,17 @@ class ReportAssembler:
                 "recommendation": ("Check this element renders on a settled page before trusting this "
                                    "number. If it reliably measures real ink here on a clean capture, "
                                    "it is a genuine low-contrast defect and should be filed as one."),
+                "alternatives": [{
+                    "proposedChange": (f"Skip the re-check and raise the contrast on {what} now, on the "
+                                       f"assumption the measurement is real."),
+                    "rationale": "Acts immediately instead of waiting for a clean capture to confirm the region actually holds rendered text.",
+                    "effort": "layout",
+                    "tradeOff": (f"Faster if this really is a contrast defect, but there is currently no "
+                                f"confirmed ink in this region ({measured_ink if measured_ink is not None else 0}, "
+                                f"against the {cls._INK_VERIFIED_MIN} this codebase already requires) -- "
+                                f"fixing contrast that was never actually painted spends the change and "
+                                f"still leaves the real capture-timing question unanswered."),
+                }],
                 "evidence": (f"ratio {ratio}:1, ink {measured_ink if measured_ink is not None else 0} "
                              f"(needs >= {cls._INK_VERIFIED_MIN} to count as detected text), seen on "
                              f"{plural(group['steps'], 'step')}"),
@@ -2321,6 +2598,18 @@ class ReportAssembler:
                 "colours is not enough -- an overlay, a gradient or an image behind the text will "
                 "not show up there.",
             ]))
+            # FND-4: WCAG AA's own large-text exception is a second, real lever
+            # on the same guideline -- useful when the palette is constrained
+            # and colour cannot move.
+            alternatives = [{
+                "proposedChange": (f"Instead of (or alongside) raising colour contrast, increase "
+                                   f"{what}'s size or weight -- WCAG AA's own contrast minimum drops "
+                                   f"for large text, so a big enough size change can also close the gap."),
+                "rationale": "A second lever on the same guideline, useful when the palette is constrained and colour cannot move.",
+                "effort": "layout",
+                "tradeOff": ("Preserves the current colour palette, but a real size or weight change "
+                            "may reflow the surrounding layout in a way a colour-only fix would not."),
+            }]
         elif len(personas) > 1:
             # The page clears the guideline and several different people still could
             # not read it, which is worth saying and is not a compliance claim.
@@ -2333,6 +2622,15 @@ class ReportAssembler:
                        "one visitor.")
             recommendation = ("Meeting the minimum is not the same as being easy to read. Increase the "
                               "size or the weight, or give it more contrast than the guideline floor.")
+            alternatives = [{
+                "proposedChange": (f"Instead of changing {what} itself, add a solid background panel or "
+                                   f"outline behind it so it reads clearly against whatever is currently "
+                                   f"behind it."),
+                "rationale": "Leaves the text's own styling untouched, which matters if it is reused somewhere the current styling is correct.",
+                "effort": "layout",
+                "tradeOff": ("Adds a visual element rather than only adjusting existing properties, which "
+                            "is a bigger visual change even though it touches fewer style rules."),
+            }]
         elif rare_only:
             # The honest version of a finding that cannot carry more weight than
             # this: kept out of the numbered problems, and still said.
@@ -2347,6 +2645,14 @@ class ReportAssembler:
                        "simulated visitor is not evidence that it is not.")
             recommendation = ("No change is required for compliance. If this audience matters to you, "
                               "the element would need to go well beyond the minimum.")
+            alternatives = [{
+                "proposedChange": ("Add a user-toggleable high-contrast or larger-text mode rather than "
+                                   "changing the default for every visitor."),
+                "rationale": "Serves this audience without changing what the compliant majority already sees.",
+                "effort": "behaviour",
+                "tradeOff": ("Reaches this profile without touching the default design, but is real, "
+                            "ongoing feature work rather than a one-line style change."),
+            }]
         else:
             severity, category = "low", "legibility"
             title = f"One persona could not read: {what}"
@@ -2354,10 +2660,18 @@ class ReportAssembler:
                        f"still could not resolve it: {item.get('reason') or 'it does not stand out'}. "
                        "Only one, so treat it as a hint rather than a finding.")
             recommendation = "Worth a look if it is important; not yet evidence of a problem."
+            alternatives = [{
+                "proposedChange": (f"Treat it as a real defect now and increase {what}'s contrast or size "
+                                   f"rather than waiting for a second occurrence."),
+                "rationale": "Costs the fix once instead of tracking the finding until it recurs.",
+                "effort": "layout",
+                "tradeOff": ("Faster to resolve for good, but spends effort on something only one "
+                            "simulated visitor hit."),
+            }]
 
         return {
             "severity": severity, "category": category, "title": title, "summary": summary,
-            "recommendation": recommendation,
+            "recommendation": recommendation, "alternatives": alternatives,
             "evidence": (f"contrast {ratio}:1 (needs {required}:1); internal "
                          f"{item.get('internalContrast')}, edge {item.get('edgeContrast')}, "
                          f"seen on {plural(group['steps'], 'step')} by {plural(len(personas) or 1, 'person', 'people')}"),
@@ -2396,6 +2710,16 @@ class ReportAssembler:
             "recommendation": ("Put it where this scan pattern actually goes, or make it compete: this "
                                "is a prominence problem, not a wording one. The element is present and "
                                "readable, so adding copy about it elsewhere will not help."),
+            # FND-4: a real second lever -- leave the position and reach the
+            # scan instead of moving to meet it.
+            "alternatives": [{
+                "proposedChange": (f"Instead of repositioning {what}, add a prompt that appears once a "
+                                   f"visitor's scan has passed it without a click."),
+                "rationale": "A smaller change than relayout, if the element's current position is otherwise correct.",
+                "effort": "behaviour",
+                "tradeOff": ("Avoids disturbing a layout that may be tuned for other goals, but adds new "
+                            "interactive logic to build and risks feeling intrusive if it fires too eagerly."),
+            }],
             "evidence": (f"goal match {item.get('goalAffinity')}, never fixated across "
                          f"{plural(group['steps'], 'step')} and {plural(len(personas) or 1, 'person', 'people')}"),
             "evidenceScreenshot": None, "evidenceIsAsTheySawIt": False,

@@ -4927,3 +4927,176 @@ def test_a_broken_promise_finding_carries_its_own_severity_basis():
     promise = next(f for f in report["critical_pain_points"] if f["source"] == "persona.expectation")
     assert promise["taskBlocked"] is True
     assert promise["claimedImpact"]["frustration"] > 0
+
+
+# FND-3 (per-finding confidence), FND-4 (complete alternatives) and SEC-3
+# (ranked alternatives, aggregated). docs/parallel-development-spec.md's own
+# ordering item 10 -- SEC-3's ranking formula needs FND-4's effort on every
+# alternative and FND-3's confidence on every finding to be real numbers,
+# not placeholders, so all three land together.
+
+def test_broken_promise_alternative_carries_effort_and_trade_off_both_branches():
+    """_committed_recommendation's alternative is always the option not
+    committed to -- reword (copy) when the commit is to build the missing
+    behaviour, or build the behaviour when the commit is to reword. FND-4
+    adds effort/tradeOff without changing which branch proposes what.
+
+    `silent` is derived by `_expectation_shape` from the gap quote's own
+    words (_DID_NOTHING), not read from a "silent" key -- so the two
+    branches here are two different gap quotes, matching how the run's own
+    reflection text actually distinguishes them."""
+    base = {"label": "Start free trial", "hits": 1, "expectations": ["go to a sign-up flow"],
+           "runs": ["run_1"], "personas": ["p1"], "cost": 0.3, "boxes": [None],
+           "feelings": [], "sightings": []}
+    silent_group = {**base, "gaps": [{"quote": "nothing happened"}]}
+    commit, alternatives = JobExecutor._committed_recommendation(silent_group)
+    assert "Make" in commit
+    assert alternatives[0]["effort"] == "copy"
+    assert alternatives[0]["tradeOff"]
+
+    talkative_group = {**base, "gaps": [{"quote": "a contact form appeared instead"}]}
+    commit, alternatives = JobExecutor._committed_recommendation(talkative_group)
+    assert "Relabel" in commit
+    assert alternatives[0]["effort"] == "behaviour"
+    assert alternatives[0]["tradeOff"]
+
+
+def test_sniff_effort_classifies_by_the_proposed_changes_own_words():
+    assert JobExecutor._sniff_effort("Reword the button label") == "copy"
+    assert JobExecutor._sniff_effort("Increase the colour contrast and size") == "layout"
+    # No copy/layout marker present: the stated default, not a guess
+    # abstained from.
+    assert JobExecutor._sniff_effort("Wire up a real sign-up flow behind the button") == "behaviour"
+
+
+def test_coerce_effort_keeps_a_valid_value_and_reclassifies_an_invalid_one():
+    valid = {"effort": "copy", "proposedChange": "irrelevant text"}
+    assert JobExecutor._coerce_effort(valid, {}) == "copy"
+    # The vision-critique worker's own vocabulary (low/medium/high) answers a
+    # different question -- magnitude, not kind -- so it is never trusted as
+    # this taxonomy's value; it is re-classified from the proposal's own text.
+    from_vision = {"effort": "medium", "proposedChange": "Raise the colour contrast on the CTA"}
+    assert JobExecutor._coerce_effort(from_vision, {}) == "layout"
+
+
+def test_fallback_alternative_is_grounded_in_the_findings_own_text():
+    with_recommendation = {"title": "Checkout button unresponsive",
+                           "recommendation": "Wire the button to the checkout flow.",
+                           "category": "blocker"}
+    alt = JobExecutor._fallback_alternative(with_recommendation)
+    assert "Checkout button unresponsive" in alt["proposedChange"]
+    assert "Wire the button to the checkout flow" in alt["proposedChange"]
+    assert alt["effort"] in JobExecutor._VALID_EFFORTS
+    assert alt["tradeOff"]
+
+    without_recommendation = {"title": "Some external finding", "recommendation": None, "category": ""}
+    alt = JobExecutor._fallback_alternative(without_recommendation)
+    assert "Some external finding" in alt["proposedChange"]
+    assert alt["tradeOff"]
+
+
+def test_ensure_alternatives_fills_every_finding_and_every_missing_field():
+    findings = [
+        {"title": "already complete", "recommendation": "x",
+         "alternatives": [{"proposedChange": "y", "rationale": "z", "effort": "copy", "tradeOff": "already stated"}]},
+        {"title": "has an alternative missing effort and tradeOff", "recommendation": "raise contrast",
+         "alternatives": [{"proposedChange": "increase font size", "rationale": "r"}]},
+        {"title": "no alternatives at all", "recommendation": "fix the thing", "category": "ux"},
+    ]
+    JobExecutor._ensure_alternatives(findings)
+    by_title = {f["title"]: f for f in findings}
+
+    # Untouched where it was already complete.
+    assert by_title["already complete"]["alternatives"][0]["tradeOff"] == "already stated"
+
+    partial = by_title["has an alternative missing effort and tradeOff"]["alternatives"][0]
+    assert partial["effort"] in JobExecutor._VALID_EFFORTS
+    assert partial["tradeOff"]
+
+    synthesized = by_title["no alternatives at all"]["alternatives"]
+    assert len(synthesized) == 1
+    assert synthesized[0]["effort"] in JobExecutor._VALID_EFFORTS
+    assert synthesized[0]["tradeOff"]
+
+    # The invariant FND-4's own "done when" states, checked directly: every
+    # finding has at least one alternative, and every alternative carries
+    # both new fields.
+    for finding in findings:
+        assert finding["alternatives"]
+        for alternative in finding["alternatives"]:
+            assert alternative["effort"] in JobExecutor._VALID_EFFORTS
+            assert alternative["tradeOff"]
+
+
+def test_finding_confidence_uses_all_four_named_inputs():
+    """spec.md's own four inputs (capture trust, persona count, reproducedIn,
+    whether the run completed), each checked in isolation by holding the
+    other three at their strongest."""
+    degraded = {"run_bad"}
+    strong = {"evidenceScreenshot": "shot.png", "evidenceIsAsTheySawIt": True,
+             "affectedPersonas": 2, "reproducedIn": 2, "runId": "run_good"}
+    assert JobExecutor._finding_confidence(strong, cohort_size=2, degraded_run_ids=degraded) == 1.0
+
+    weak = {"affectedPersonas": 1, "reproducedIn": 1, "runId": "run_bad"}
+    assert JobExecutor._finding_confidence(weak, cohort_size=4, degraded_run_ids=degraded) == 0.46
+
+    # No runId: cross-persona vision synthesis, no single run to credit or
+    # blame -- held neutral (1.0) rather than penalised.
+    aggregated = {"evidenceScreenshot": "shot.png", "affectedPersonas": 3, "reproducedIn": 1}
+    assert JobExecutor._finding_confidence(aggregated, cohort_size=3, degraded_run_ids=degraded) == 0.8
+
+
+def test_ranked_alternatives_states_the_rule_and_sorts_by_score():
+    findings = [
+        {"title": "high impact, cheap fix", "severity": "high", "affectedPersonas": 2, "confidence": 0.8,
+         "alternatives": [{"proposedChange": "a", "effort": "copy"}]},
+        {"title": "critical, effort unclassified", "severity": "critical", "affectedPersonas": 1, "confidence": 1.0,
+         "alternatives": [{"proposedChange": "b"}]},
+        {"title": "medium impact, expensive fix", "severity": "medium", "affectedPersonas": 1, "confidence": 1.0,
+         "alternatives": [{"proposedChange": "c", "effort": "behaviour"}]},
+    ]
+    result = JobExecutor._ranked_alternatives(findings)
+    assert "impact" in result["rule"] and "personas" in result["rule"] and "confidence" in result["rule"] and "effort" in result["rule"]
+    titles_in_order = [item["findingTitle"] for item in result["items"]]
+    assert titles_in_order == ["high impact, cheap fix", "critical, effort unclassified", "medium impact, expensive fix"]
+    scores = [item["score"] for item in result["items"]]
+    assert scores == sorted(scores, reverse=True)
+    assert result["items"][0]["score"] == pytest.approx(4 * 2 * 0.8 / 1)
+
+
+def test_every_finding_in_an_assembled_report_has_a_complete_alternative_and_confidence():
+    """The end-to-end invariant FND-4/FND-3's own "done when" states: run
+    through the real pipeline (not the unit-level helpers above), mixing a
+    source that already builds its own alternative (_broken_promise_finding)
+    with one that never did (_pain_points_from_journeys' uxFindings) --
+    every finding that reaches critical_pain_points must come out complete
+    either way."""
+    journeys = [
+        _verdict_journey("run_1", "failed",
+                         ux_findings=[{"title": "Silent submit button", "category": "usability",
+                                       "severity": "major",
+                                       "description": "Clicking submit fails to respond in any way."}]),
+    ]
+    journeys[0]["timeline"] = [
+        {"type": "persona.expectation", "data": {"expectation": "the price",
+         "action": {"type": "CLICK", "target": "e1"}, "targetName": "Pricing"}},
+        {"type": "persona.reflection", "data": {"matched": "no", "observed": "a contact form",
+                                                 "gap": "no prices anywhere"}},
+        {"type": "persona.affect", "data": {"state": {"frustration": 0.4}}},
+    ]
+    report = _assembled(journeys)
+    findings = report["critical_pain_points"]
+    assert len(findings) >= 2, "fixture sanity: both the verdict finding and the broken-promise finding survived"
+    for finding in findings:
+        assert finding.get("alternatives"), f"{finding['title']!r} has no alternatives"
+        for alternative in finding["alternatives"]:
+            assert alternative.get("effort") in JobExecutor._VALID_EFFORTS, finding["title"]
+            assert alternative.get("tradeOff"), finding["title"]
+        assert isinstance(finding.get("confidence"), (int, float)), finding["title"]
+        assert 0.0 <= finding["confidence"] <= 1.0, finding["title"]
+
+    ranked = report["ranked_alternatives"]
+    assert ranked["rule"]
+    assert len(ranked["items"]) >= len(findings)
+    scores = [item["score"] for item in ranked["items"]]
+    assert scores == sorted(scores, reverse=True)
