@@ -38,11 +38,11 @@ defects to fix. They are not trends.
 |---|---|---|
 | **1.03–1.13:1** | The ratios of all four "Fails WCAG AA" findings. The two crops opened, "Video" and "Italiano", are blank page. The summary's "one thing to change" is one of them. | EVD-1, FND-1 |
 | **0.033** | The highest probability of abandoning, reached at frustration 1.00. The tolerance check at `behavior.js:160` is overwritten at `:163`. | JRN-1 |
-| **3 of 3** | Actions the adherence gate failed (scores 3, 4 and 0) that ran anyway. The gate also judged `e367` "unrelated" when it was the Pricing link. | JRN-3 |
+| **2 of 3** | Actions the adherence gate failed (scores 3, 4 and 0) confirmed to have run anyway, via a matching pointer event (the 3rd has no pointer event either way). The gate also judged `e367` "unrelated" when it was the Pricing link. | JRN-3 |
 | **7 clicks** | Alternating between Pricing and "Start free for 30 days". Pricing was clicked under three refs, so no per-ref counter saw a repeat. | JRN-2 |
 | **1** | The run hit its step budget, and that was filed as a high-severity usability finding. `run_diagnostics` is empty. | SEC-1, JRN-4 |
 | **47%** | The adherence judge's share of the run's 176 s of model time. It is the largest single lever on run speed. | JRN-3, OPS-3 |
-| **0 / 9** | Findings with a video timestamp, though every timeline event carries `videoTimeMs`. | SEC-5 |
+| **0 / 8** | Findings about the site with a video timestamp, though every timeline event carries `videoTimeMs` (9 findings carry `evidenceScreenshot`, one of them the misfiled run-limit finding SEC-1 relocates). | SEC-5 |
 | **5 empty** | Evidence channels: snapshots, console, network, UI changes and video clips. `REPORT_CRITERIA.md` rates §30.9 higher than this supports. | EVD-2 |
 | **47 → 0** ✓ | Elements not yet looked at, over the run. The scan now remembers, confirmed live: 12 of 12 captures trusted, 10 of 10 pointer boxes measured. | CAP-0, held |
 
@@ -96,7 +96,7 @@ The rules, in brief:
 | **L1 · JRN**, journeys that finish | 0 | journey-worker `behavior`, `personaDirector`, `personaActor`, `adherence`, `journeytest` | **JRN-1**: make abandoning reachable once tolerance is crossed. **JRN-2**: break loops, recognising a control by its label across refs, and A↔B alternation. **JRN-3**: make the gate a gate, give the judge the label rather than the ref, and cut its cost. | Budget-hit share 1/1 → ≤ 1/3. Loops 1 → 0. Fed-up runs still browsing 1 → 0. |
 | **L2 · EVD**, perception and evidence capture | 0 | `perception_service/`, `perception`, `revealKeeper`, `cursorKeeper`, `viewportStream` | **EVD-1**: detect no ink on a patterned background, with the two blank crops as fixtures. **EVD-2**: fill snapshots, console, network, UI changes and clips, or state why each is missing. **EVD-3**: check pointer boxes on the taoshq billing toggle. | False contrast 4 → 0. §30.9 rated met, on evidence. |
 | **L3 · FND**, findings and judgement | 1 | `report_service/findings/`, `media.py`, `eyeson-worker/`, `knowledge-service/` | **FND-1**: a report-side ink guard, plus one finding per component. **FND-2**: judge severity from the task path, the change in affect, and reach. **FND-4**: complete alternatives, each with an effort class and a trade-off. | Alternatives with effort 1/13 → 13/13. Confidence 0 → 13/13. Contradictions 1 → 0. |
-| **L4 · SEC**, the report contract (§29–§31) | 1 | `report_service/sections/`, `assemble.py`, `docs/contracts/ux-report.md` | **SEC-1**: move budget endings to `run_diagnostics`. **SEC-2**: the experience trajectory above, as a report section. **SEC-5**: video timestamps from each capture's own `videoTimeMs`. | §30 met / partial / missing 6/2/1 → 9/0/0, computed by the scorer. |
+| **L4 · SEC**, the report contract (§29–§31) | 1 | `report_service/sections/`, `assemble.py`, `docs/contracts/ux-report.md` | **SEC-1**: move budget endings to `run_diagnostics`. **SEC-2**: the experience trajectory above, as a report section. **SEC-5**: video timestamps from each capture's own `videoTimeMs`. | §30 met / partial / missing 4/4/1 (measure.py) → 9/0/0, computed by the scorer. |
 | **L5 · PRS**, presentation and craft | 1 | `report_service/render/`, deck fit tests, the Gradio report viewer | **PRS-1**: the trajectory chart, once SEC-2 lands. **PRS-2**: PDF export, a page break per slide. **PRS-4**: a step and video-time stamp on each evidence figure. | E12, A4, G1 and F4 closed. §48.13 verified. |
 | **L6 · SCL**, scale and the closed loop | 1 | the run half of `executor.py`, job types | **SCL-1**: repeat seeds dispatched as `persona_id#seed`. **SCL-3**: a retest job that reports whether the fix held. | `reproducedIn` ≥ 2 on ≥ 1/3 of findings. The first validated fix. |
 | **L7 · HAT**, reach: sign-in and hats | 0 and 2 | `webui/`, `hats.py`, `credentials.py`, `developerTool`, `loginCapture` | **HAT-1**: the first signed-in run, on a site the operator controls. **HAT-2**: developer mode on open-design.ai's download. | No account identifier in any artifact. A finding with its command transcript attached. |
@@ -115,7 +115,7 @@ to fix, not a measured rate.
 | Budget-hit share | 1 / 1 | ≤ 1/3 | failing | L1 |
 | Runs ending at frustration ≥ 0.9 still browsing | 1 | 0 | failing | L1 |
 | Loops (a label clicked ≥ 3 times, or A↔B ≥ 2) | 1 | 0 | failing | L1 |
-| Actions executed below the adherence threshold | 3 | 0 | failing | L1 |
+| Actions executed below the adherence threshold | 2 (pointer-confirmed) | 0 | failing | L1 |
 | Captures / refused | 12 / 0 | within the floor | unmeasured | L2 |
 | Pointer boxes measured | 10 / 10 | ≥ 95% | meets | L2 |
 | Findings about the site / positives | 13 / 1 | ≥ 10 / ≥ 2 | partial | L3 |
@@ -124,8 +124,8 @@ to fix, not a measured rate.
 | Same control both preserved and faulted | 1 | 0 unreconciled | failing | L3 |
 | Alternatives with an effort class | 1 / 13 | 13 / 13 | failing | L3 |
 | Per-finding confidence | 0 / 13 | 13 / 13 | failing | L3 |
-| Video timestamp, where a screenshot exists | 0 / 9 | 9 / 9 | failing | L4 |
-| §30 sections met / partial / missing | 6 / 2 / 1 | 9 / 0 / 0 | partial | L4 |
+| Video timestamp, where a screenshot exists | 0 / 8 | 8 / 8 | failing | L4 |
+| §30 sections met / partial / missing | 4 / 4 / 1 | 9 / 0 / 0 | partial | L4 |
 | Adherence share of model time | 47% | ≤ 25% | failing | L1, L9 |
 | Cohort wall time, 3 personas × 2 targets | not measured | ≤ 8 min | unmeasured | L0, L9 |
 | Findings reproduced in ≥ 2 runs | not measured | ≥ 1/3 | unmeasured | L6 |
