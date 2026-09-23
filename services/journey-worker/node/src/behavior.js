@@ -78,10 +78,22 @@ function computeWaitTolerance(profile, state, context = {}) {
     factors: { progressVisible: Boolean(context.progressVisible), taskImportance: clamp(context.taskImportance ?? 0.5), timePressure: clamp(context.timePressure ?? 0), expectedComplexity: clamp(context.expectedComplexity ?? 0.5) } };
 }
 
+// JRN-1: how much frustration this profile tolerates, sustained across more
+// than one failure in a row, before abandoning has to become reachable --
+// persistence raises it, the same way it already raises `retry`'s own score.
+// Shared by copingScores below and by whoever needs to know the threshold
+// itself (previously computed a second time in BehaviorController.apply,
+// only to set a copingMode label that the very next lines overwrote
+// unconditionally -- the label was dead code with a plausible name; this is
+// the same arithmetic, kept, now the one place it does something).
+function abandonTolerance(profile) {
+  return profile.repeatFailureTolerance + profile.persistence * 0.35;
+}
+
 function copingScores(profile, state, context = {}) {
   const pressure = clamp(context.timePressure ?? 0);
   const importance = clamp(context.taskImportance ?? 0.5);
-  return {
+  const scores = {
     // Getting on with it. Coping is what a person does when something has gone
     // wrong, and every other entry here is a form of that -- so without this one
     // the model had no way to express "that worked, next thing", and made a calm
@@ -107,6 +119,26 @@ function copingScores(profile, state, context = {}) {
     impulsive_retry: profile.impulsivity * 0.9 + profile.irritability * 0.4 + state.anger * 0.9,
     abandon: state.frustration * 1.3 + state.fatigue * 0.8 + pressure * 0.7 - profile.persistence * 0.9 - importance * 0.5,
   };
+  // JRN-1: abandon's own score above competes on the same footing as every
+  // other entry, and loses -- measured on a real run that reached
+  // frustration 1.00 with six failures in a row: reread scored 1.90,
+  // backtrack 1.78, retry 1.37, abandon only 0.77, so p(abandon) peaked at
+  // 0.033 (softmax at this file's *2 temperature never closes a gap that
+  // size with the terms above alone) and the run left only when its step
+  // budget ran out, never because the persona chose to leave. Boosted here,
+  // and only once this profile's own persistence-adjusted tolerance for
+  // repeated failure is actually exceeded -- a run below it is completely
+  // unaffected -- scaled by how far over: +1 the moment it is crossed,
+  // growing with the excess. On that same real trajectory this makes
+  // abandoning reachable rather than certain: p(abandon) 0.01 pre-tolerance,
+  // 0.33 the step tolerance is first crossed, 0.62 (the new leader) at
+  // frustration 1.00 -- a strong majority outcome, not a coin flip forced
+  // every time, so a profile built to be unusually persistent can still
+  // occasionally push through.
+  if (state.consecutiveFailures > 1 && state.frustration > abandonTolerance(profile)) {
+    scores.abandon += 1 + clamp(state.frustration - abandonTolerance(profile)) * 4;
+  }
+  return scores;
 }
 
 function probabilities(scores) {
@@ -156,8 +188,10 @@ class BehaviorController {
   apply(event, context = {}) {
     const before = this.state;
     this.state = reduceState(before, event, this.profile);
-    const tolerance = this.profile.repeatFailureTolerance + this.profile.persistence * 0.35;
-    if (this.state.consecutiveFailures > 1 && this.state.frustration > tolerance) this.state.copingMode = "abandoning";
+    // JRN-1: the tolerance check itself, and what it should do about it, now
+    // live in copingScores -- where it can actually change the sampled
+    // outcome, rather than here, where it only ever set a label the next
+    // three lines threw away.
     const coping = sampleCoping(this.profile, this.state, context, this.random);
     this.state.abandoned = coping.decision.type === "abandon";
     this.state.copingMode = ({ retry: "persistent", reread: "cautious", wait: "cautious",
@@ -168,4 +202,5 @@ class BehaviorController {
 }
 
 module.exports = { BehaviorController, initialState, reduceState, computeWaitTolerance, copingScores,
-  probabilities, sampleCoping, seededRandom, STATE_REDUCER_VERSION, COPING_POLICY_VERSION, WAIT_TOLERANCE_VERSION };
+  abandonTolerance, probabilities, sampleCoping, seededRandom, STATE_REDUCER_VERSION, COPING_POLICY_VERSION,
+  WAIT_TOLERANCE_VERSION };

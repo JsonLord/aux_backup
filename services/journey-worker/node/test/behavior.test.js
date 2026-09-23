@@ -1,8 +1,8 @@
 "use strict";
 const assert = require("node:assert/strict");
 const test = require("node:test");
-const { BehaviorController, computeWaitTolerance, copingScores, initialState, probabilities,
-  seededRandom } = require("../src/behavior");
+const { BehaviorController, abandonTolerance, computeWaitTolerance, copingScores, initialState,
+  probabilities, seededRandom } = require("../src/behavior");
 const { EvidenceCoordinator } = require("../src/evidence");
 const { runJourney } = require("../src/index");
 
@@ -126,4 +126,79 @@ test("selected screenshot is queued with exact map and transition and findings r
   const completed = result.events.find((event) => event.type === "ux.analysis.completed");
   assert.equal(completed.data.stepId, result.steps[0].stepId);
   assert.equal(completed.data.timestampMs, 4200);
+});
+
+test("abandon tolerance is the documented persistence-scaled formula", () => {
+  assert.equal(abandonTolerance({ repeatFailureTolerance: .2, persistence: .25 }), .2 + .25 * .35);
+  const normalized = new BehaviorController(profile).profile;
+  assert.equal(abandonTolerance(normalized), normalized.repeatFailureTolerance + normalized.persistence * 0.35);
+});
+
+test("the abandon boost applies only once tolerance is crossed by more than one failure", () => {
+  // JRN-1's gate, checked directly against copingScores rather than through a
+  // full run: the three states a run can be in relative to it, each proven
+  // by recomputing the plain (unboosted) formula by hand and comparing --
+  // not just asserting the boosted score is "different".
+  const controllerProfile = new BehaviorController(profile).profile;
+  const tolerance = abandonTolerance(controllerProfile);
+  const plainAbandon = (state) => state.frustration * 1.3 + state.fatigue * 0.8
+    - controllerProfile.persistence * 0.9 - 0.5 * 0.5;
+
+  // Below tolerance, two failures in a row: unaffected.
+  const belowTolerance = { ...initialState(), frustration: tolerance - 0.05, fatigue: 0.1, consecutiveFailures: 2 };
+  assert.equal(copingScores(controllerProfile, belowTolerance, {}).abandon, plainAbandon(belowTolerance));
+
+  // Above tolerance, but only one failure: the gate needs a second, so still unaffected.
+  const oneFailure = { ...initialState(), frustration: tolerance + 0.2, fatigue: 0.1, consecutiveFailures: 1 };
+  assert.equal(copingScores(controllerProfile, oneFailure, {}).abandon, plainAbandon(oneFailure));
+
+  // Above tolerance, two failures in a row: both conditions hold, so it boosts --
+  // by exactly this file's own documented formula, +1 growing with the excess.
+  const crossed = { ...initialState(), frustration: tolerance + 0.2, fatigue: 0.3, consecutiveFailures: 2 };
+  const boost = 1 + Math.min(1, Math.max(0, crossed.frustration - tolerance)) * 4;
+  const boosted = copingScores(controllerProfile, crossed, {}).abandon;
+  assert.equal(boosted, plainAbandon(crossed) + boost);
+  assert.ok(boosted > copingScores(controllerProfile, crossed, {}).retry,
+    "once boosted, abandon should be competitive with retry, not just nonzero");
+});
+
+test("crossing tolerance on a second failure flips the leading coping choice to abandon", () => {
+  // The realistic path, through BehaviorController and the same repeated
+  // failure() fixture every other test in this file uses -- not a synthetic
+  // state object. Before JRN-1, abandon's score never got the boost above at
+  // any step, so it stayed a long-shot alongside impulsive_retry/backtrack
+  // throughout an identical run (verified separately against the pre-fix
+  // formula: p(abandon) peaked under 0.09 and never led). Now the second
+  // repeated failure is enough to cross this profile's tolerance (0.2875)
+  // and abandon takes over as the clear leader.
+  const controller = new BehaviorController(profile);
+  const first = controller.apply(failure());
+  assert.equal(first.after.consecutiveFailures, 1);
+  assert.ok(first.coping.probabilities.abandon < 0.05, "a single failure must not cross tolerance yet");
+
+  const second = controller.apply(failure());
+  assert.equal(second.after.consecutiveFailures, 2);
+  assert.ok(second.after.frustration > abandonTolerance(controller.profile));
+  const [leader] = Object.entries(second.coping.probabilities).sort((a, b) => b[1] - a[1])[0];
+  assert.equal(leader, "abandon", `abandon should lead once tolerance is crossed, got ${leader}`);
+  assert.ok(second.coping.probabilities.abandon > 0.6);
+});
+
+test("apply() can now actually produce abandonment, not just a discarded label", () => {
+  // Deterministic, not a probability check: seed 8 on this profile samples
+  // "abandon" itself on the second repeated failure, once frustration
+  // (0.509) clears tolerance (0.2875) with two failures in a row. Before
+  // this fix, apply() computed that exact same crossing and then threw the
+  // result away three lines later -- see the comment left on apply() itself
+  // -- so state.abandoned could never become true and copingMode could never
+  // become "abandoning" through this path, no matter how many failures piled
+  // up, because the sampler was never made to prefer it. It now can, and for
+  // this seed, does.
+  const controller = new BehaviorController({ id: "p_8", behavior: { ...behavior, seed: 8 } });
+  controller.apply(failure());
+  const second = controller.apply(failure());
+  assert.equal(second.coping.decision.type, "abandon");
+  assert.equal(second.coping.decision.reason, "frustration and effort exceeded this profile's tolerance");
+  assert.equal(second.after.abandoned, true);
+  assert.equal(second.after.copingMode, "abandoning");
 });

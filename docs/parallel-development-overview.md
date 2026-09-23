@@ -37,7 +37,7 @@ defects to fix. They are not trends.
 | figure | what it is | lane |
 |---|---|---|
 | **1.03–1.13:1** | The ratios of all four "Fails WCAG AA" findings. The two crops opened, "Video" and "Italiano", are blank page. The summary's "one thing to change" is one of them. | EVD-1, FND-1 |
-| **0.033** | The highest probability of abandoning, reached at frustration 1.00. The tolerance check at `behavior.js:160` is overwritten at `:163`. | JRN-1 |
+| **0.033 → 0.615** | The highest probability of abandoning, reached at frustration 1.00. The tolerance check at `behavior.js:160` is overwritten at `:163`. Closed in code (the right-hand figure is this same real state, re-scored against the fix); not yet confirmed live. | JRN-1 |
 | **2 of 3** | Actions the adherence gate failed (scores 3, 4 and 0) confirmed to have run anyway, via a matching pointer event (the 3rd has no pointer event either way). The gate also judged `e367` "unrelated" when it was the Pricing link. | JRN-3 |
 | **7 clicks** | Alternating between Pricing and "Start free for 30 days". Pricing was clicked under three refs, so no per-ref counter saw a repeat. | JRN-2 |
 | **1** | The run hit its step budget, and that was filed as a high-severity usability finding. `run_diagnostics` is empty. | SEC-1, JRN-4 |
@@ -72,6 +72,18 @@ with five failures in a row. `behavior.js:160` sets `copingMode = "abandoning"`,
 and `:163` replaces it with `"cautious"` in the same call. The run then ends
 "inconclusive" at its 12-step budget. p(abandon) is the coping policy's own
 recorded distribution, not a re-derived figure.
+
+**JRN-1 closes this the only way it can be closed without a live rerun:** the
+tolerance check now feeds the coping score it was always meant to change instead
+of a label the next line discarded, and moving it is enough — nothing about *how*
+these ten states were reached needed to change, so re-scoring the same real
+states above with the fixed policy is a faithful check of the fix, not a
+simulation of one. Steps 1–8 are unchanged to four decimal places. At step 9,
+p(abandon) goes 0.025 → 0.332 and the leader flips from `reread`; at step 10,
+0.033 → **0.615**, abandon the clear leader rather than the 9th of 9 options.
+Whether a live persona at this same profile now actually leaves, rather than
+running out its step budget "inconclusive," is exactly what RUN-2 would show and
+has not been asked to yet.
 
 ## The lanes
 
