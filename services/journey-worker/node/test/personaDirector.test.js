@@ -817,8 +817,15 @@ test("the page is held still for the whole look, and let go afterwards", async (
 
   await run(director, fakeBrowser(), fakeRecorder());
 
-  assert.deepEqual(order.slice(0, 3), ["hold", "walk", "release"],
-    "the walk happens inside the hold");
+  // Not order.slice(0, 3): capture() now holds too (its own test below), so a
+  // real run's first hold/release pair is the "arrived" screenshot's, not
+  // the walk's. What this test actually claims -- the walk happens inside
+  // its own hold -- is checked directly, regardless of what else holds
+  // around it.
+  const walkIndex = order.indexOf("walk");
+  assert.ok(walkIndex > 0, "the walk actually happened");
+  assert.equal(order[walkIndex - 1], "hold", "the walk happens inside a hold");
+  assert.equal(order[walkIndex + 1], "release", "...and the hold is released right after it");
   assert.equal(order.filter((step) => step === "hold").length,
     order.filter((step) => step === "release").length,
     "every hold is released, or the page never scrolls again for the rest of the run");
@@ -838,6 +845,51 @@ test("a hold is released even when the walk throws", async () => {
   await run(director, fakeBrowser(), fakeRecorder());
 
   assert.equal(holds, 0, "a thrown walk must not leave the page frozen for the rest of the run");
+});
+
+// A live run against an 11855px-tall page stored a "full page" screenshot
+// that was the same ~900px hero band repeated roughly thirteen times down the
+// full height: capture() called settle() before the screenshot but held
+// nothing across it, so the reveal keeper's own background timer could fire
+// again while browser.screenshot({full:true}) was still painting a tall
+// document, pulling the live page back toward its start position mid-capture.
+// look() already holds the page still for exactly this reason; capture()
+// did not.
+test("the page is held still for the whole capture, and let go afterwards", async () => {
+  const order = [];
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  director.hold = () => { order.push("hold"); return 1; };
+  director.release = () => { order.push("release"); return 0; };
+  director.settle = async () => { order.push("settle"); };
+
+  const browser = { screenshot: async () => { order.push("screenshot"); } };
+  const recorder = fakeRecorder();
+  const target = await director.capture(browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder }, "arrived");
+
+  assert.ok(target, "a successful capture still returns its path");
+  assert.deepEqual(order, ["hold", "settle", "screenshot", "release"],
+    "settle and the screenshot both happen inside the hold, in order");
+});
+
+test("a capture's hold is released even when the screenshot throws", async () => {
+  let holds = 0;
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  director.hold = () => { holds += 1; return holds; };
+  director.release = () => { holds -= 1; return holds; };
+  director.settle = async () => {};
+
+  const browser = { screenshot: async () => { throw new Error("the browser went away mid-capture"); } };
+  const recorder = fakeRecorder();
+  const target = await director.capture(browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder }, "arrived");
+
+  assert.equal(target, null, "a capture that fails is not worth ending a journey over");
+  assert.equal(holds, 0, "a thrown screenshot must not leave the page frozen for the rest of the run");
 });
 
 test("a capture taken while the page moved is not measured at all", async () => {

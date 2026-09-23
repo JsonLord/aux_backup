@@ -828,6 +828,20 @@ class PersonaDirector {
     if (!directory) return null;
     const name = `${String(this.shots.length + 1).padStart(3, "0")}-${label}.png`;
     const target = path.join(directory, name);
+    // Hold the page still for the whole capture -- the same protection look()
+    // already gives the per-step perception walk, for the identical reason its
+    // own comment there names: the reveal keeper scrolls the whole document
+    // every 1500ms, and a pass takes longer than that. settle() below only
+    // covers the moment before browser.screenshot() starts; without a hold
+    // spanning the screenshot call too, the keeper's background timer can fire
+    // again while a tall page is still being painted, scrolling the live
+    // document out from under a capture already in flight. Measured on a real
+    // run against an 11855px-tall page: the stored "full page" screenshot was
+    // not the page at all but its own ~900px hero band, repeated roughly
+    // thirteen times down the full height, because the keeper kept pulling the
+    // document back toward its own start position while captureBeyondViewport
+    // was still rendering the rest of it.
+    this.hold();
     try {
       // Scroll the whole document through before photographing it. `full: true`
       // stitches a capture as tall as the page, and everything below the fold on a
@@ -846,6 +860,8 @@ class PersonaDirector {
       await browser.screenshot({ path: target, full: true });
     } catch {
       return null;      // a capture that fails is not worth ending a journey over
+    } finally {
+      this.release();
     }
     this.shots.push(target);
     await context.recorder.record("browser.screenshot", `Captured screenshot ${target}`, { path: target });
