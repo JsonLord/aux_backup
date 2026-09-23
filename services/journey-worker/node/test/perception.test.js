@@ -323,6 +323,52 @@ test("the page is asked for a frame before it is photographed", () => {
   assert.match(WALK, /JSON\.stringify\(\{ frame,/);
 });
 
+test("the walk excludes an element something else is drawn on top of", () => {
+  // A live run on open-design.ai measured exactly this: a persistent "Download
+  // OpenDesign Desktop" modal sat over the page, and the walk kept reporting the
+  // covered background text and buttons underneath it as present, at their
+  // original document position -- the perception service was then asked to
+  // verify ink for elements the capture could never show ink for, because
+  // nothing painted them there; the modal did, on top. Every "no ink at all"
+  // region on those steps was one of these, and retrying did nothing, because
+  // the modal was not a transient state to wait out.
+  //
+  // elementFromPoint cannot be executed against a real DOM from this test file
+  // (WALK only ever runs inside a browser, via agent-browser's eval, and this
+  // suite is deliberately dependency-free of both agent-browser and a browser
+  // engine -- see package.json's own "no npm ci" reasoning). Verified instead
+  // against a real Chromium page, out of band: the exact WALK source below,
+  // executed against four constructed pages -- an ordinary unoccluded
+  // paragraph, this same modal-over-background-text shape, a container whose
+  // own centre point resolves to its nested child (must not be excluded), and
+  // a wide paragraph with only its edge covered so its own centre stays clear
+  // (must not be excluded either) -- excluded only the genuinely covered
+  // element, in all four cases. These assertions are the standing guard that
+  // the logic that passed that check stays in the shipped source.
+  assert.match(WALK, /document\.elementFromPoint\(x, y\)/,
+    "the same per-point check WHAT_IS_UNDER_THE_PIXELS makes at three fixed points, applied per element");
+  assert.match(WALK, /top && top !== node && !node\.contains\(top\)/,
+    "an element is its own top point, or its own descendant is -- only something outside its subtree covers it");
+  // The centre, not a corner: a corner is the point most likely to sit under a
+  // neighbouring element's own rounded edge or box-shadow, which is not
+  // occlusion of this element by anything a person would call \"on top of it\".
+  assert.match(WALK, /rect\.x \+ rect\.width \/ 2/);
+  assert.match(WALK, /rect\.y \+ rect\.height \/ 2/);
+  // Clamped into the viewport: an element straddling the edge (already known
+  // to be at least partly on screen, from the rect.bottom/rect.top guard above
+  // it) must not ask elementFromPoint for a point outside the window, which
+  // returns null and would read as "nothing is on top of it" for the wrong
+  // reason.
+  assert.match(WALK, /Math\.min\(Math\.max\(rect\.x \+ rect\.width \/ 2, 0\), innerWidth - 1\)/);
+  assert.match(WALK, /Math\.min\(Math\.max\(rect\.y \+ rect\.height \/ 2, 0\), innerHeight - 1\)/);
+  // Runs after the existing visibility/display/opacity guard, not instead of
+  // it: occlusion is one more way an element is not really there, joining the
+  // reasons already checked, not replacing any of them.
+  assert.match(WALK,
+    /style\.visibility === "hidden".*?Number\(style\.opacity\) === 0\) return;\s*\n\s*\/\/[\s\S]*?const top = topmost\(rect\);/,
+    "the occlusion check runs after the CSS-visibility guard, not before or instead of it");
+});
+
 test("the walk reports whether the page had painted", async () => {
   assert.equal((await lookAtPage(async () => wholeBatch({ after: "0", frame: "painted" }))).paintCheck, "painted");
   // A page that never produced one says so rather than passing quietly.

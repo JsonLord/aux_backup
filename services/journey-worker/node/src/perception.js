@@ -73,6 +73,26 @@ const WALK = `(async () => {
   const INTERACTIVE = "a,button,input,select,textarea,summary,[role],[onclick],[tabindex]";
   const out = [];
   const seen = new Set();
+  // On screen, not hidden by any CSS property that says so, and still not
+  // what a person would actually see: something else is drawn on top of it.
+  // A live run on open-design.ai measured this exactly -- a persistent
+  // "Download OpenDesign Desktop" modal sat over the page, and the walk kept
+  // reporting the covered background text and buttons underneath it as
+  // present, at their original document position. The perception service was
+  // then asked to verify ink for elements the capture could never show ink
+  // for, because nothing painted them -- the modal did, on top. Every one of
+  // that step's "no ink at all" regions was one of these; retrying did
+  // nothing, because the modal was not a transient state to wait out.
+  // elementFromPoint at an element's own centre is the same check
+  // WHAT_IS_UNDER_THE_PIXELS below already makes at three fixed points to
+  // tell a blank capture from a blank page -- applied per element, during the
+  // walk itself, it catches occlusion specifically rather than only reporting
+  // that the boxes and the pixels disagree without saying why.
+  const topmost = (rect) => {
+    const x = Math.min(Math.max(rect.x + rect.width / 2, 0), innerWidth - 1);
+    const y = Math.min(Math.max(rect.y + rect.height / 2, 0), innerHeight - 1);
+    return document.elementFromPoint(x, y);
+  };
   const push = (node, kind) => {
     if (seen.has(node)) return;
     const rect = node.getBoundingClientRect();
@@ -80,6 +100,13 @@ const WALK = `(async () => {
     if (rect.bottom < 0 || rect.top > innerHeight) return;
     const style = getComputedStyle(node);
     if (style.visibility === "hidden" || style.display === "none" || Number(style.opacity) === 0) return;
+    // node.contains(top) covers the ordinary case where the centre point
+    // actually belongs to one of this element's own descendants (a <p>'s
+    // centre landing on an inline <b> inside it is not occlusion); top !==
+    // node covers the element being its own answer directly. Only something
+    // genuinely outside this element's own subtree counts as covering it.
+    const top = topmost(rect);
+    if (top && top !== node && !node.contains(top)) return;
     seen.add(node);
     const label = (node.getAttribute && (node.getAttribute("aria-label")
       || node.getAttribute("alt") || node.getAttribute("title"))) || "";
