@@ -1,5 +1,10 @@
 # Next-cycle implementation plan
 
+> **Scheduling superseded 2026-09-23** by `docs/parallel-development-spec.md`, which
+> schedules what is left of this plan, and everything else the audit and `spec.md`
+> §30 ask for, as ten concurrent lanes measured by one scorer. The item write-ups
+> below stay the record of what was built.
+
 Written 2026-09-18, against the tree at `124818e`. Companion to
 `docs/next-cycle-worksheet.md`, which holds the measured record and the hats
 design; this document schedules the work and says what can run at the same time.
