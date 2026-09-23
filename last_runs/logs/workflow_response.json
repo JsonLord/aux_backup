@@ -1,0 +1,73 @@
+{
+  "session": {
+    "session_id": "ses_740d98f775714ccda90ecc707fa79051",
+    "created_at": "2026-09-22T20:15:44.479463+00:00",
+    "metadata": {
+      "name": "Persona-context vision integration verification",
+      "target_url": "https://open-design.ai/",
+      "source": "api"
+    },
+    "external_ref": {},
+    "workspace_id": "hf:user:675f37b072d14a2cff8b7343",
+    "owner_user_id": "675f37b072d14a2cff8b7343"
+  },
+  "job": {
+    "job_id": "job_90142999fc7640a0924ebef82c2be471",
+    "status": "queued",
+    "output_artifacts": [],
+    "created_at": "2026-09-22T20:15:44.575639+00:00",
+    "started_at": null,
+    "ended_at": null,
+    "attempt": 1,
+    "error": null,
+    "session_id": "ses_740d98f775714ccda90ecc707fa79051",
+    "type": "combined_test",
+    "version": "1.0",
+    "pipeline_run_id": null,
+    "depends_on": [],
+    "input_artifacts": [
+      "art_083aa6ae8cbf489f87fb06b5241b0e53"
+    ],
+    "seed": null,
+    "metadata": {
+      "persona_artifacts": [
+        "art_083aa6ae8cbf489f87fb06b5241b0e53"
+      ],
+      "tasks": [
+        "Understand the product and its primary value proposition"
+      ],
+      "url": "https://open-design.ai/",
+      "examplePersona": null,
+      "browserSafety": {
+        "allowIrreversibleActions": false
+      },
+      "modelAccess": {
+        "builtInAllowed": true,
+        "decidedFor": "Leon4gr45"
+      }
+    },
+    "idempotency_key": null,
+    "workspace_id": "hf:user:675f37b072d14a2cff8b7343",
+    "owner_user_id": "675f37b072d14a2cff8b7343"
+  },
+  "artifacts": [
+    {
+      "artifact_id": "art_083aa6ae8cbf489f87fb06b5241b0e53",
+      "session_id": "ses_740d98f775714ccda90ecc707fa79051",
+      "kind": "persona.profile",
+      "content_type": "application/json",
+      "path": "/home/user/artifacts/hf:user:675f37b072d14a2cff8b7343/ses_740d98f775714ccda90ecc707fa79051/art_083aa6ae8cbf489f87fb06b5241b0e53",
+      "created_at": "2026-09-22T20:15:44.527204+00:00",
+      "metadata": {
+        "schema_version": "1.0",
+        "persona_id": "persona_84bb6f155a4944d5aa9e40388d88aac8",
+        "immutable_run_snapshot": true
+      },
+      "workspace_id": "hf:user:675f37b072d14a2cff8b7343",
+      "owner_user_id": "675f37b072d14a2cff8b7343",
+      "retention_class": "structured",
+      "pinned": 0,
+      "expires_at": "2027-03-21T20:15:44.527178+00:00"
+    }
+  ]
+}

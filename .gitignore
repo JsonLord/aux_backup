@@ -4,6 +4,9 @@ __pycache__/
 *.pyc
 app_output.log
 *.png
+# last_runs/AGENTS.md: a deliberate, single-snapshot evidence folder --
+# screenshots there are the point, not an accident.
+!last_runs/artifacts/*.png
 verification/
 site/
 test_slides/

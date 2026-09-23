@@ -1,0 +1,40 @@
+{
+    "status": "ready",
+    "services": {
+        "controlPlane": {
+            "status": "ok"
+        },
+        "personaRuntime": {
+            "status": "ok",
+            "tinytroupeAvailable": true,
+            "dspyAvailable": true
+        },
+        "journeyWorker": {
+            "service": "journey-worker",
+            "status": "ready",
+            "behaviorController": true,
+            "engine": "journeytest",
+            "journeyTestVersion": "0.1.2"
+        },
+        "eyesonWorker": {
+            "service": "eyeson-worker",
+            "status": "ready",
+            "version": "0.1.0"
+        }
+    },
+    "modelProvider": {
+        "name": "primary",
+        "status": "ok",
+        "endpoint": "https://debian-devil.tail3f341b.ts.net",
+        "alternatives": [
+            {
+                "name": "reflect",
+                "status": "ok",
+                "endpoint": "https://api.helmholtz-blablador.fz-juelich.de"
+            }
+        ],
+        "anyReachable": true
+    },
+    "modelCredentialsConfigured": true,
+    "liveExecutionReady": true
+}

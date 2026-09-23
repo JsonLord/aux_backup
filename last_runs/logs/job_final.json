@@ -1,0 +1,51 @@
+{
+    "job_id": "job_90142999fc7640a0924ebef82c2be471",
+    "session_id": "ses_740d98f775714ccda90ecc707fa79051",
+    "pipeline_run_id": null,
+    "type": "combined_test",
+    "version": "1.0",
+    "status": "succeeded",
+    "depends_on": [],
+    "input_artifacts": [
+        "art_083aa6ae8cbf489f87fb06b5241b0e53"
+    ],
+    "output_artifacts": [
+        "art_38b13a8a707a4745bef3e3eaf0e402c4",
+        "art_6e65d249990a485682fe7c58e3f84e9c",
+        "art_e8943d77a1d048998df681b62d90c48c",
+        "art_ea15d11db91d45889051773187cf2ca8",
+        "art_f12e8524216140f3b4b0ba753e35ee22",
+        "art_ed01f26683b6416db926a36d082e888d",
+        "art_45bd783ecf57418ca5c734fea417e6f6",
+        "art_137f0748e8bb4c3a899861f4d7e75b18",
+        "art_97f98306a90947108191cf5f2a9fd87f",
+        "art_500a3c6111ec4b639f0ce84ca52cb618",
+        "art_18e7dc8dd9d54ded87a3947c0c2f4706"
+    ],
+    "created_at": "2026-09-22T20:15:44.575639+00:00",
+    "started_at": "2026-09-22T20:15:44.593248+00:00",
+    "ended_at": "2026-09-22T20:20:06.222117+00:00",
+    "attempt": 1,
+    "seed": null,
+    "metadata": {
+        "persona_artifacts": [
+            "art_083aa6ae8cbf489f87fb06b5241b0e53"
+        ],
+        "tasks": [
+            "Understand the product and its primary value proposition"
+        ],
+        "url": "https://open-design.ai/",
+        "examplePersona": null,
+        "browserSafety": {
+            "allowIrreversibleActions": false
+        },
+        "modelAccess": {
+            "builtInAllowed": true,
+            "decidedFor": "Leon4gr45"
+        }
+    },
+    "error": null,
+    "idempotency_key": null,
+    "workspace_id": "hf:user:675f37b072d14a2cff8b7343",
+    "owner_user_id": "675f37b072d14a2cff8b7343"
+}
