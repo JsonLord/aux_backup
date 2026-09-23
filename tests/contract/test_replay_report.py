@@ -56,6 +56,21 @@ def test_replay_reproduces_journey_level_fields(replayed, live_report):
     assert len(replayed["journey_outcome"]["runs"]) == len(live_report["journey_outcome"]["runs"])
 
 
+def test_replay_fills_video_timestamps_the_live_snapshot_predates(replayed):
+    """SEC-5 postdates last_runs/'s own live snapshot -- assemble_report is
+    shared code, so replay picks it up (category not in diff_reports'
+    original five, both now real): every finding with a screenshot gets a
+    videoTimestampMs. `step` is the one field replay cannot recover -- see
+    replay_report.py's module docstring, category 6."""
+    with_screenshot = [
+        f for f in replayed["critical_pain_points"]
+        if f.get("evidenceScreenshot") or f.get("screenshotRef")
+    ]
+    assert with_screenshot  # the snapshot has findings with a screenshot
+    assert all(f.get("videoTimestampMs") is not None for f in with_screenshot)
+    assert all(f.get("step") is None for f in replayed["critical_pain_points"])
+
+
 def test_replay_carries_perception_and_expectation_findings(replayed, live_report):
     """Everything _pain_points_from_perception/_pain_points_from_expectations
     produce is journey-only, so it must survive replay -- the broken-promise

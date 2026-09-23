@@ -292,6 +292,9 @@ class ReportAssembler:
         next_evidence_number = 1 + max((item.get("evidenceNumber") or 0 for item in findings), default=0)
         cls._attach_verdict_screenshots(findings, journeys, redact_selectors=redact_selectors,
                                          start_evidence_number=next_evidence_number)
+        # SEC-5: needs evidenceScreenshot/screenshotRef, so after they are
+        # attached above and before anything downstream reads videoTimestampMs.
+        cls._attach_video_timestamps(findings, journeys)
         # BE-3: every Python-side model call this report itself makes while
         # building the redesign panels, for _model_usage_summary below.
         redesign_usage: list[dict[str, Any]] = []
@@ -556,9 +559,62 @@ class ReportAssembler:
         or a failed criterion is a claim about the whole run, not one screenshot)
         sinks to the end, in whatever order it already had -- `sorted` is stable,
         so ties never reshuffle findings that came from the same source.
+
+        SEC-5: also the one place every finding's step is computed, so it is
+        set here as a real field (`finding["step"]`) rather than only used as
+        a transient sort key and thrown away -- the same number this method
+        already derived, not a second calculation.
         """
         with_index = [(cls._finding_step_index(finding), finding) for finding in findings]
+        for step, finding in with_index:
+            finding["step"] = step
         return [finding for _, finding in sorted(with_index, key=lambda pair: (pair[0] is None, pair[0] or 0))]
+
+    @staticmethod
+    def _screenshot_video_timestamps(journeys: list[dict[str, Any]]) -> dict[str | None, dict[str, int]]:
+        """`{runId: {screenshot path: videoTimeMs}}`, read from the two timeline
+        event kinds that actually carry both a screenshot path and the run's
+        video clock: `browser.screenshot` (`data.path`, the raw capture) and
+        `persona.perception` (`data.seenImage`, the persona-perceived
+        variant -- a different file, per-persona optics applied). Together
+        they cover every screenshot a finding can cite: verified against
+        last_runs/, all 6 kept screenshots (3 raw, 3 as-they-saw-it) resolve
+        through one or the other. A screenshot cited by a finding but never
+        captured by either event (should not happen; evidence always comes
+        from a capture) simply has no timestamp, the same honest absence
+        `_finding_step_index` already allows for `step`.
+        """
+        by_run: dict[str | None, dict[str, int]] = {}
+        for journey in journeys:
+            table = by_run.setdefault(journey.get("runId"), {})
+            for event in journey.get("timeline") or []:
+                data = event.get("data") or {}
+                path = data.get("path") if event.get("type") == "browser.screenshot" else (
+                    data.get("seenImage") if event.get("type") == "persona.perception" else None)
+                video_ms = event.get("videoTimeMs")
+                if path and video_ms is not None and path not in table:
+                    # First capture of a given path wins: a persona can look at
+                    # the same screenshot more than once (re-reading it), and
+                    # the moment it was actually taken is what a reader wants,
+                    # not the last time it happened to be glanced at again.
+                    table[path] = video_ms
+        return by_run
+
+    @classmethod
+    def _attach_video_timestamps(cls, findings: list[dict[str, Any]], journeys: list[dict[str, Any]]) -> None:
+        """SEC-5 (spec.md §30.5): `videoTimestampMs`, so a reader can find the
+        cited screenshot in the recording rather than only see a still image.
+        The data already exists in every run's timeline; this is the join
+        that was never made -- 0 of the 9 findings that carried a screenshot
+        had it, on the live run this was written against."""
+        by_run = cls._screenshot_video_timestamps(journeys)
+        for finding in findings:
+            table = by_run.get(finding.get("runId")) or {}
+            for key in ("evidenceScreenshot", "screenshotRef"):
+                ref = finding.get(key)
+                if ref and ref in table:
+                    finding["videoTimestampMs"] = table[ref]
+                    break
 
     @staticmethod
     def _served_by(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:

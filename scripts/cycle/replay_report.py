@@ -56,6 +56,24 @@ concrete numbers on `last_runs/`:
 5. `model_usage` carries no `report.redesign` role (no Python-side model
    call happened) but is otherwise identical -- the Node-side usage log is
    baked into each journey's own `modelUsage` field, unaffected by replay.
+6. `step` is `None` on every finding in a replayed report, even findings
+   whose real step is known. `_finding_step_index()` reads the leading
+   digits off the evidence screenshot's own filename (`"001-as-they-saw-
+   it.jpg"` -> step 1) -- a real, load-bearing convention both this
+   codebase's captures and journeytest-core's own action captures already
+   use, not a guess. `build_screenshot_remap()` renames every kept file to
+   `<kind>__<artifact_id>.<ext>` (`last_runs/AGENTS.md`'s own naming, for
+   snapshot hygiene unrelated to this), which destroys that leading number.
+   Confirmed by running `assemble_report()` on the *unmapped* journey
+   directly (no local screenshot files, so no crop, but the correct `step`):
+   `step` resolves correctly there. `videoTimestampMs` is unaffected, for a
+   different reason than it might look: the remap rewrites a path's
+   *string*, consistently, everywhere it appears (the timeline event that
+   records it and the finding that later cites it both end up naming the
+   same local file), so a lookup keyed on string equality still matches.
+   `step` fails because it needs information *encoded inside* the filename
+   (the leading digits) that the remap's renaming destroys outright, not
+   because the two sides of a comparison disagree.
 
 Usage:
     replay_report.py <run-dir> [--diff] [--out FILE]

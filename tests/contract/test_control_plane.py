@@ -3431,6 +3431,85 @@ def test_blocker_id_is_not_threaded_onto_other_buckets():
     assert "blockerId" not in findings[0]
 
 
+# SEC-5 (spec.md §30.5, docs/parallel-development-spec.md): videoTimestampMs
+# and step, joined from data every run already records -- a live run's own
+# capture events, not a new measurement.
+def _screenshot_event(path, video_ms, kind="browser.screenshot"):
+    data = {"path": path} if kind == "browser.screenshot" else {"seenImage": path}
+    return {"type": kind, "videoTimeMs": video_ms, "data": data}
+
+
+def test_video_timestamps_come_from_the_matching_capture_event():
+    journey = {
+        "runId": "run_1",
+        "timeline": [
+            _screenshot_event("/shots/001-arrived.png", 8198),
+            _screenshot_event("/shots/001-as-they-saw-it.jpg", 10355, kind="persona.perception"),
+        ],
+    }
+    table = JobExecutor._screenshot_video_timestamps([journey])
+    assert table["run_1"] == {
+        "/shots/001-arrived.png": 8198,
+        "/shots/001-as-they-saw-it.jpg": 10355,
+    }
+
+
+def test_video_timestamps_keep_the_first_sighting_of_a_reread_screenshot():
+    """A persona can look at the same capture twice (re-reading it); the
+    moment it was actually taken, not the last time it was glanced at
+    again, is what a reader wants to find in the recording."""
+    journey = {
+        "runId": "run_1",
+        "timeline": [
+            _screenshot_event("/shots/002-page-1.png", 24998, kind="persona.perception"),
+            _screenshot_event("/shots/002-page-1.png", 40000, kind="persona.perception"),
+        ],
+    }
+    table = JobExecutor._screenshot_video_timestamps([journey])
+    assert table["run_1"]["/shots/002-page-1.png"] == 24998
+
+
+def test_attach_video_timestamps_matches_by_run_and_either_screenshot_field():
+    journeys = [
+        {"runId": "run_1", "timeline": [_screenshot_event("/shots/001-a.png", 100)]},
+        {"runId": "run_2", "timeline": [_screenshot_event("/shots/001-a.png", 999)]},
+    ]
+    findings = [
+        {"runId": "run_1", "evidenceScreenshot": "/shots/001-a.png"},
+        {"runId": "run_2", "screenshotRef": "/shots/001-a.png"},  # same path, other run
+        {"runId": "run_1", "evidenceScreenshot": "/shots/missing.png"},
+        {"runId": "run_1"},
+    ]
+    JobExecutor._attach_video_timestamps(findings, journeys)
+    assert findings[0]["videoTimestampMs"] == 100
+    # Same path, but run_2's own table -- never run_1's value by accident.
+    assert findings[1]["videoTimestampMs"] == 999
+    assert "videoTimestampMs" not in findings[2]
+    assert "videoTimestampMs" not in findings[3]
+
+
+def test_step_and_video_timestamp_reach_a_real_finding_end_to_end():
+    """The full join, through assemble_report, on paths shaped like a real
+    run's own capture filenames (not the renamed local files a downloaded
+    snapshot uses -- see replay_report.py's module docstring, category 6,
+    for why that distinction matters for step specifically)."""
+    journey = {
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            _screenshot_event("/shots/001-as-they-saw-it.jpg", 10355, kind="persona.perception"),
+            {"type": "persona.perception", "videoTimeMs": 10355, "data": {
+                "seenImage": "/shots/001-as-they-saw-it.jpg",
+                "notPerceived": [{**FAILS_WCAG, "selector": "p.step1"}],
+            }},
+        ],
+        "verdict": {"status": "completed"},
+    }
+    report = _assembled([journey], tasks=["t"])
+    finding = next(f for f in report["critical_pain_points"] if f["title"].startswith("Fails WCAG"))
+    assert finding["step"] == 1
+    assert finding["videoTimestampMs"] == 10355
+
+
 def test_a_blocked_journey_says_where_the_patience_went():
     """A live report's most serious finding was "The journey was blocked before
     completion", severity critical, recommendation None. A critical finding with no
