@@ -2086,6 +2086,44 @@ def test_a_redacted_element_never_leaves_this_process_in_the_vision_critique_req
         "the sensitive region is blanked in the pixels the model actually receives")
 
 
+def test_the_vision_critique_never_samples_the_viewport_crop(tmp_path, monkeypatch):
+    """JRN-9: personaDirector.js's capture() now writes a viewport crop
+    alongside every full-page screenshot (for verdict evidence -- "the
+    frame the persona was looking at"), named the same with a -viewport.png
+    suffix. The critique's own job needs the opposite: the full page,
+    including whatever a persona never scrolled to. A real run with this
+    pair in its artifacts.screenshots list must never let the smaller
+    viewport crop reach the vision worker, however _evenly_spaced samples."""
+    import json as json_module
+    from PIL import Image
+
+    full_page = tmp_path / "001-arrived.png"
+    Image.new("RGB", (200, 100), color=(255, 0, 0)).save(full_page)
+    viewport = tmp_path / "001-arrived-viewport.png"
+    Image.new("RGB", (200, 100), color=(0, 0, 255)).save(viewport)
+
+    captured_payloads = []
+
+    def urlopen(call, timeout):
+        class Response:
+            def __enter__(self_): return self_
+            def __exit__(self_, *args): pass
+            def read(self_): return json_module.dumps({"painPoints": []}).encode()
+        captured_payloads.append(json_module.loads(call.data))
+        return Response()
+
+    monkeypatch.setattr("apps.api.executor.request.urlopen", urlopen)
+    journeys = [{"runId": "run_1", "artifacts": {"screenshots": [str(viewport), str(full_page)], "snapshots": []}}]
+    JobExecutor._collect_vision_pain_points(
+        journeys, ["Buy an item"], [{"id": "persona_ada"}], "https://example.com",
+        vision=[("https://mine.example/v1", "sk-mine", "vision-model")], send_options=True)
+
+    assert len(captured_payloads) == 1, "the pair counts as one screenshot to the critique, not two"
+    decoded = _decoded_data_uri(
+        f"data:{captured_payloads[0]['imageMimeType']};base64,{captured_payloads[0]['imageBase64']}").convert("RGB")
+    assert decoded.getpixel((100, 50)) == (255, 0, 0), "the full-page capture was sent"
+
+
 def test_one_issue_described_two_ways_merges_on_its_description():
     """A live run against leon4gr45-nova-test published "Ambiguous navigation
     hierarchy" and "Redundant and confusing navigation layers" as two findings.

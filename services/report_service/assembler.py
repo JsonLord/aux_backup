@@ -3744,7 +3744,17 @@ class ReportAssembler:
         attempted, last_error = False, None
         for journey, persona in zip(journeys, personas):
             artifacts = journey.get("artifacts") or {}
-            screenshots, snapshots = artifacts.get("screenshots") or [], artifacts.get("snapshots") or []
+            # JRN-9: personaDirector.js's capture() now takes a viewport crop
+            # alongside every full-page screenshot, for verdict evidence that
+            # shows what the persona actually saw rather than a full-page
+            # composite. The critique's own job is the opposite of that -- a
+            # full page, including whatever a persona never scrolled to -- so
+            # the smaller, redundant viewport pair is excluded here rather
+            # than diluting _evenly_spaced's sample with near-duplicates of
+            # content the full-page shot already covers.
+            screenshots = [path for path in (artifacts.get("screenshots") or [])
+                          if not path.endswith("-viewport.png")]
+            snapshots = artifacts.get("snapshots") or []
             pain_points: list[dict[str, Any]] = []
             if screenshots:
                 persona_summary = persona.get("minibio") or (persona.get("persona") or {}).get("name")

@@ -330,12 +330,20 @@ test("every conclusion can show the page it is about", async () => {
     browser, recorder);
 
   const shots = browser.calls.filter((call) => call[0] === "screenshot").map((call) => call[1]);
-  // Arriving, changing page, and leaving are all worth remembering.
-  assert.ok(shots.length >= 3, `expected captures on arrival, navigation and exit, got ${shots.length}`);
-  assert.match(shots[0], /001-arrived\.png$/);
+  // Arriving, changing page, and leaving are all worth remembering -- each as
+  // a pair now (JRN-9): a viewport "as seen" shot, taken first, and the
+  // full-page one the vision critique reads, taken second.
+  assert.ok(shots.length >= 6, `expected paired captures on arrival, navigation and exit, got ${shots.length}`);
+  assert.match(shots[0], /001-arrived-viewport\.png$/);
+  assert.match(shots[1], /001-arrived\.png$/);
   assert.match(shots.at(-1), /left-done\.png$/);
+  assert.match(shots.at(-2), /left-done-viewport\.png$/);
   for (const criterion of verdict.criteria) {
     assert.ok(criterion.evidence?.screenshot, `${criterion.id} cites no screenshot`);
+    // JRN-9: "the frame the persona was looking at" is the viewport capture,
+    // not the full-page composite -- a real person never saw the composite.
+    assert.match(criterion.evidence.screenshot, /-viewport\.png$/,
+      "criterion evidence cites the viewport capture, not the full-page one");
   }
   // And the captures are recorded, so they reach the run's artifact list.
   assert.ok(recorder.events.some((event) => event.type === "browser.screenshot"));
@@ -847,6 +855,52 @@ test("a hold is released even when the walk throws", async () => {
   assert.equal(holds, 0, "a thrown walk must not leave the page frozen for the rest of the run");
 });
 
+// JRN-9: a full-page composite is not what a person ever actually saw --
+// verdict()'s own evidence field is documented as "the frame the persona
+// was looking at when they stopped", which only a viewport capture is.
+// capture() now takes both: a viewport shot, for that field, and the
+// full-page one (unchanged) for the vision critique, which does need the
+// content below whatever the persona happened to have on screen.
+test("capture() takes a viewport shot and a full-page shot, tracked separately", async () => {
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  const calls = [];
+  const browser = { screenshot: async (options) => { calls.push(options); } };
+  const recorder = fakeRecorder();
+  const target = await director.capture(
+    browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder }, "arrived");
+
+  assert.equal(calls.length, 2, "one viewport call, one full-page call");
+  assert.equal(calls[0].full, undefined, "the viewport call asks for the viewport, not the full page");
+  assert.equal(calls[1].full, true, "the second call is the full-page one");
+  assert.equal(calls[1].path, target, "capture()'s own return value is the full-page path, unchanged");
+  assert.match(calls[0].path, /001-arrived-viewport\.png$/);
+  assert.match(calls[1].path, /001-arrived\.png$/);
+
+  assert.deepEqual(director.shots, [calls[1].path]);
+  assert.deepEqual(director.viewportShots, [calls[0].path]);
+});
+
+test("a failed viewport shot does not cost the run the full-page one", async () => {
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  const browser = {
+    screenshot: async (options) => {
+      if (!options.full) throw new Error("viewport capture failed");
+    },
+  };
+  const target = await director.capture(
+    browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder: fakeRecorder() }, "arrived");
+
+  assert.ok(target, "the full-page capture still succeeds and is returned");
+  assert.deepEqual(director.viewportShots, [], "no viewport shot was recorded");
+  assert.equal(director.shots.length, 1, "the full-page shot was still kept");
+});
+
 // A live run against an 11855px-tall page stored a "full page" screenshot
 // that was the same ~900px hero band repeated roughly thirteen times down the
 // full height: capture() called settle() before the screenshot but held
@@ -865,13 +919,16 @@ test("the page is held still for the whole capture, and let go afterwards", asyn
   director.release = () => { order.push("release"); return 0; };
   director.settle = async () => { order.push("settle"); };
 
-  const browser = { screenshot: async () => { order.push("screenshot"); } };
+  const browser = { screenshot: async (options) => { order.push(options.full ? "full-page" : "viewport"); } };
   const recorder = fakeRecorder();
   const target = await director.capture(browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder }, "arrived");
 
   assert.ok(target, "a successful capture still returns its path");
-  assert.deepEqual(order, ["hold", "settle", "screenshot", "release"],
-    "settle and the screenshot both happen inside the hold, in order");
+  // JRN-9: viewport first (the "as seen" shot, taken before anything about
+  // the full-page capture can disturb the page), then the full-page one the
+  // vision critique reads -- both inside the same hold as settle().
+  assert.deepEqual(order, ["hold", "settle", "viewport", "full-page", "release"],
+    "settle and both screenshots happen inside the hold, in order");
 });
 
 test("a capture's hold is released even when the screenshot throws", async () => {
@@ -1020,16 +1077,19 @@ test("a full-page capture waits for the page's reveals to run", async () => {
 
   const browser = fakeBrowser();
   const shot = browser.screenshot;
-  browser.screenshot = async (options) => { order.push("screenshot"); return shot(options); };
+  browser.screenshot = async (options) => { order.push(options.full ? "full-page" : "viewport"); return shot(options); };
   await run(director, browser, fakeRecorder());
 
-  assert.ok(order.length >= 2, "the run must have captured something");
-  // Every capture is preceded by a settle, and none of them is left unpaired.
+  assert.ok(order.length >= 3, "the run must have captured something");
+  // Every capture is one settle followed by its own pair of screenshots
+  // (JRN-9: viewport, then full-page), and none of them is left unpaired.
   assert.equal(order.filter((step) => step === "settle").length,
-    order.filter((step) => step === "screenshot").length);
-  for (let index = 0; index < order.length; index += 2) {
-    assert.deepEqual(order.slice(index, index + 2), ["settle", "screenshot"],
-      "the picture has to be of a settled page");
+    order.filter((step) => step === "viewport").length);
+  assert.equal(order.filter((step) => step === "viewport").length,
+    order.filter((step) => step === "full-page").length);
+  for (let index = 0; index < order.length; index += 3) {
+    assert.deepEqual(order.slice(index, index + 3), ["settle", "viewport", "full-page"],
+      "both pictures have to be of a settled page");
   }
 });
 

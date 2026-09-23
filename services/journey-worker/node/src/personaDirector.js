@@ -254,6 +254,13 @@ class PersonaDirector {
     this.sleep = sleepFn;
     this.scale = scale;
     this.shots = [];
+    // JRN-9: capture()'s full-page shots are for the vision critique, which
+    // reviews the whole page including content a persona never scrolled to
+    // -- a real, separate need (see capture()'s own comment). Neither of
+    // those is "the frame the persona was looking at when they stopped",
+    // which is what verdict()'s own evidence field is documented to be, so
+    // it is read from this array instead.
+    this.viewportShots = [];
     this.perception = perception;
     this.walk = walk;
     this.frames = frames;
@@ -828,6 +835,10 @@ class PersonaDirector {
     if (!directory) return null;
     const name = `${String(this.shots.length + 1).padStart(3, "0")}-${label}.png`;
     const target = path.join(directory, name);
+    // A person never sees the full-page composite below; they see whatever
+    // is actually in the browser window at this moment. Captured under the
+    // same name, so a reader can tell at a glance which pair goes together.
+    const viewportTarget = path.join(directory, name.replace(/\.png$/, "-viewport.png"));
     // Hold the page still for the whole capture -- the same protection look()
     // already gives the per-step perception walk, for the identical reason its
     // own comment there names: the reveal keeper scrolls the whole document
@@ -857,6 +868,18 @@ class PersonaDirector {
       // taken in the first second of a document or to a run that finishes in three
       // actions. Awaited here so the picture is of a settled page.
       await this.settle();
+      // Viewport first, while the page is exactly where settle() left it --
+      // the full-page capture that follows is what stitches captureBeyondViewport
+      // captures together, and nothing about that process should be allowed
+      // to be what the "as seen" shot ends up describing.
+      try {
+        await browser.screenshot({ path: viewportTarget });
+        this.viewportShots.push(viewportTarget);
+      } catch {
+        // A missing "as seen" crop is a smaller loss than losing the whole
+        // capture over it; the full-page shot below still gives the vision
+        // critique something, and verdict() already falls back past this.
+      }
       await browser.screenshot({ path: target, full: true });
     } catch {
       return null;      // a capture that fails is not worth ending a journey over
@@ -865,6 +888,10 @@ class PersonaDirector {
     }
     this.shots.push(target);
     await context.recorder.record("browser.screenshot", `Captured screenshot ${target}`, { path: target });
+    if (this.viewportShots.at(-1) === viewportTarget) {
+      await context.recorder.record("browser.screenshot", `Captured screenshot ${viewportTarget}`,
+        { path: viewportTarget });
+    }
     return target;
   }
 
@@ -1276,7 +1303,15 @@ class PersonaDirector {
     // criteria and blockers the same way "done" is, so it never reads as a
     // failed or blocked journey.
     const isDiagnostic = ending.type === "diagnostic";
-    const evidence = this.shots.at(-1) || this.shots[0] || undefined;
+    // JRN-9: "the frame the persona was looking at when they stopped" (see
+    // this field's own doc below) is what a viewport capture shows, not the
+    // full-page composite capture() also takes for the vision critique --
+    // the two exist for different readers. Falls back to the full-page shot
+    // only when no viewport capture exists at all (e.g. every screenshot()
+    // call in this run failed), so a real run still cites something over
+    // citing nothing.
+    const evidence = this.viewportShots.at(-1) || this.viewportShots[0]
+      || this.shots.at(-1) || this.shots[0] || undefined;
     const summary = {
       done: `Completed what they came to do. ${ending.detail || ""}`.trim(),
       gave_up: `Gave up: ${ending.detail || "not worth any more time"}.`,
