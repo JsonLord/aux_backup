@@ -3510,6 +3510,90 @@ def test_step_and_video_timestamp_reach_a_real_finding_end_to_end():
     assert finding["videoTimestampMs"] == 10355
 
 
+# SEC-2 (spec.md §30.4, docs/parallel-development-spec.md): the experience
+# trajectory -- the one report-contract section that was missing outright,
+# built from data every persona.affect event already carries.
+def _affect_event(step, frustration, confusion, trust, fatigue, coping="retry",
+                  cognitive=None, physical=None, elapsed_ms=1000, video_ms=900,
+                  consecutive_failures=0, abandoned=False):
+    return {"type": "persona.affect", "elapsedMs": elapsed_ms, "videoTimeMs": video_ms,
+            "data": {"state": {"step": step, "frustration": frustration, "confusion": confusion,
+                               "trust": trust, "fatigue": fatigue, "cognitiveEffort": cognitive,
+                               "physicalEffort": physical, "consecutiveFailures": consecutive_failures,
+                               "abandoned": abandoned},
+                     "coping": {"type": coping}}}
+
+
+def test_experience_trajectory_reads_the_affect_state_directly():
+    journey = {"runId": "run_1", "profileId": "persona_1", "timeline": [
+        _affect_event(1, 0.13, 0.21, 0.98, 0.06, cognitive=0.07, physical=0.0),
+        _affect_event(2, 1.00, 1.00, 0.81, 0.55, coping="explore", cognitive=0.54, physical=0.02),
+    ]}
+    trajectories = JobExecutor._experience_trajectory([journey], findings=[], persona_names={"persona_1": "Alex"})
+
+    assert len(trajectories) == 1
+    t = trajectories[0]
+    assert t["runId"] == "run_1" and t["personaId"] == "persona_1" and t["personaName"] == "Alex"
+    assert len(t["points"]) == 2
+    first, last = t["points"]
+    assert (first["frustration"], first["confusion"], first["trust"], first["fatigue"]) == (0.13, 0.21, 0.98, 0.06)
+    assert first["effort"] == 0.07  # max(cognitive, physical)
+    assert last["coping"] == "explore" and last["abandoned"] is False
+
+
+def test_experience_trajectory_effort_is_the_max_of_cognitive_and_physical():
+    journey = {"runId": "run_1", "profileId": "p1", "timeline": [
+        _affect_event(1, 0.1, 0.1, 0.9, 0.1, cognitive=0.2, physical=0.6),
+    ]}
+    points = JobExecutor._experience_trajectory([journey], findings=[], persona_names={})[0]["points"]
+    assert points[0]["effort"] == 0.6
+    assert points[0]["cognitiveEffort"] == 0.2 and points[0]["physicalEffort"] == 0.6
+
+
+def test_experience_trajectory_effort_is_none_when_neither_is_recorded():
+    journey = {"runId": "run_1", "profileId": "p1", "timeline": [_affect_event(1, 0.1, 0.1, 0.9, 0.1)]}
+    points = JobExecutor._experience_trajectory([journey], findings=[], persona_names={})[0]["points"]
+    assert points[0]["effort"] is None
+
+
+def test_experience_trajectory_marks_findings_by_matching_step():
+    journey = {"runId": "run_1", "profileId": "p1", "timeline": [
+        _affect_event(1, 0.1, 0.1, 0.9, 0.1),
+        _affect_event(2, 0.2, 0.2, 0.8, 0.2),
+    ]}
+    findings = [{"step": 2, "title": "Fails WCAG AA contrast: X"}, {"step": None, "title": "A blocker, no step"}]
+    points = JobExecutor._experience_trajectory([journey], findings=findings, persona_names={})[0]["points"]
+    assert points[0]["findingTitles"] == []
+    assert points[1]["findingTitles"] == ["Fails WCAG AA contrast: X"]
+
+
+def test_experience_trajectory_omits_a_run_with_no_affect_events():
+    journey = {"runId": "run_1", "profileId": "p1", "timeline": [
+        {"type": "persona.expectation", "data": {}},
+    ]}
+    assert JobExecutor._experience_trajectory([journey], findings=[], persona_names={}) == []
+
+
+def test_experience_trajectory_reaches_a_real_run_end_to_end():
+    """The full field, through assemble_report, cross-referencing a real
+    finding's own SEC-5 step -- the join this section exists to make."""
+    journey = {
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            {"type": "persona.perception", "videoTimeMs": 10355, "data": {
+                "seenImage": "/shots/001-as-they-saw-it.jpg",
+                "notPerceived": [{**FAILS_WCAG, "selector": "p.step1"}]}},
+            _affect_event(1, 0.5, 0.4, 0.9, 0.2),
+        ],
+        "verdict": {"status": "completed"},
+    }
+    report = _assembled([journey], tasks=["t"])
+    assert len(report["experience_trajectory"]) == 1
+    point = report["experience_trajectory"][0]["points"][0]
+    assert point["frustration"] == 0.5
+    assert "Fails WCAG AA contrast" in point["findingTitles"][0]
+
+
 def test_a_blocked_journey_says_where_the_patience_went():
     """A live report's most serious finding was "The journey was blocked before
     completion", severity critical, recommendation None. A critical finding with no

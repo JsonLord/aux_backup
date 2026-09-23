@@ -71,6 +71,25 @@ def test_replay_fills_video_timestamps_the_live_snapshot_predates(replayed):
     assert all(f.get("step") is None for f in replayed["critical_pain_points"])
 
 
+def test_replay_fills_the_experience_trajectory_the_live_snapshot_predates(replayed):
+    """SEC-2 also postdates last_runs/'s own live snapshot, and also
+    reaches replay for free (assemble_report is shared code): the ten
+    persona.affect points, matching the same numbers
+    docs/parallel-development-overview.md's own trajectory table states by
+    hand (frustration 0.13 -> 1.00, confusion 0.21 -> 1.00). findingTitles
+    is empty on every point here, consistent with `step` above: the
+    cross-reference needs findings' own `step`, which replay cannot
+    recover."""
+    trajectories = replayed["experience_trajectory"]
+    assert len(trajectories) == 1
+    points = trajectories[0]["points"]
+    assert len(points) == 10
+    assert points[0]["frustration"] == pytest.approx(0.13, abs=0.01)
+    assert points[-1]["frustration"] == pytest.approx(1.00, abs=0.01)
+    assert points[-1]["confusion"] == pytest.approx(1.00, abs=0.01)
+    assert all(point["findingTitles"] == [] for point in points)
+
+
 def test_replay_carries_perception_and_expectation_findings(replayed, live_report):
     """Everything _pain_points_from_perception/_pain_points_from_expectations
     produce is journey-only, so it must survive replay -- the broken-promise

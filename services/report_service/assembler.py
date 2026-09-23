@@ -367,6 +367,10 @@ class ReportAssembler:
                 "model_usage": model_usage,
                 "critical_pain_points": findings,
                 "run_diagnostics": run_diagnostics,
+                # SEC-2: frustration/confusion/trust/fatigue/effort over the
+                # run, per persona -- spec.md §30.4, the one report-contract
+                # section that was missing outright rather than partial.
+                "experience_trajectory": cls._experience_trajectory(journeys, findings, persona_names),
                 "flow_groups": cls._flow_groups(findings, tasks),
                 "elements_to_preserve": preserve,
                 "impact_analysis": cls._impact_analysis(findings, personas),
@@ -615,6 +619,74 @@ class ReportAssembler:
                 if ref and ref in table:
                     finding["videoTimestampMs"] = table[ref]
                     break
+
+    @classmethod
+    def _experience_trajectory(cls, journeys: list[dict[str, Any]], findings: list[dict[str, Any]],
+                               persona_names: dict[str, str]) -> list[dict[str, Any]]:
+        """SEC-2 (spec.md §30.4): a timeline of frustration, confusion, trust,
+        fatigue and effort over the course of the run -- the one section of
+        the report contract that was missing outright, not partial.
+        `last_runs/REPORT_CRITERIA.md`'s own finding: the data exists in
+        every `persona.affect` event and nothing ever assembled it into a
+        series. Read from the timeline directly (`data.state`, the
+        behavior controller's own recorded state at that point), not
+        re-derived or re-computed -- the same numbers the run itself used
+        to decide what the persona did next.
+
+        `effort` is not a field `state` carries on its own; the controller
+        tracks cognitive and physical effort separately
+        (`services/journey-worker/node/src/behavior.js`), and spec.md's
+        wording names one series. Reported as `max(cognitiveEffort,
+        physicalEffort)`, one interpretation stated plainly rather than
+        picked silently, with both raw numbers kept alongside it so nothing
+        is lost to the collapse.
+
+        Each point's `findingTitles` names the findings whose own `step`
+        (SEC-5, set by `_order_by_step` before this runs) lands on the same
+        action, so a reader can see which finding a frustration spike or a
+        confusion plateau corresponds to without cross-referencing two
+        lists by hand.
+        """
+        findings_by_step: dict[int, list[str]] = {}
+        for finding in findings:
+            step = finding.get("step")
+            if step is not None:
+                findings_by_step.setdefault(step, []).append(finding.get("title") or "")
+
+        trajectories = []
+        for journey in journeys:
+            persona_id = journey.get("profileId") or journey.get("testerProfileId")
+            points = []
+            for event in journey.get("timeline") or []:
+                if event.get("type") != "persona.affect":
+                    continue
+                data = event.get("data") or {}
+                state = data.get("state") or {}
+                step = state.get("step")
+                cognitive, physical = state.get("cognitiveEffort"), state.get("physicalEffort")
+                efforts = [value for value in (cognitive, physical) if value is not None]
+                points.append({
+                    "step": step,
+                    "elapsedMs": event.get("elapsedMs"),
+                    "videoTimeMs": event.get("videoTimeMs"),
+                    "frustration": state.get("frustration"),
+                    "confusion": state.get("confusion"),
+                    "trust": state.get("trust"),
+                    "fatigue": state.get("fatigue"),
+                    "effort": max(efforts) if efforts else None,
+                    "cognitiveEffort": cognitive, "physicalEffort": physical,
+                    "consecutiveFailures": state.get("consecutiveFailures"),
+                    "coping": (data.get("coping") or {}).get("type"),
+                    "abandoned": bool(state.get("abandoned")),
+                    "findingTitles": findings_by_step.get(step, []) if step is not None else [],
+                })
+            if points:
+                trajectories.append({
+                    "runId": journey.get("runId"), "personaId": persona_id,
+                    "personaName": persona_names.get(persona_id, persona_id),
+                    "points": points,
+                })
+        return trajectories
 
     @staticmethod
     def _served_by(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
