@@ -258,6 +258,11 @@ class ReportAssembler:
         run_diagnostics = [finding for finding in findings
                            if _is_run_diagnostic(finding) or _is_budget_limited_finding(finding, budget_hit_ids)]
         findings = cls._merge_similar_findings([finding for finding in findings if finding not in run_diagnostics])
+        # FND-2: whether the run this finding came from ever completed its own
+        # task, so severity can be judged from a real input rather than only
+        # assigned by which builder produced the finding. After the merge, so
+        # it reads whichever runId a merged finding actually settled on.
+        cls._attach_task_blocked(findings, journeys)
         # Added after the split, not before: an instrument failure is a diagnostic by
         # construction and must never be merged into, or dropped by, the usability
         # findings it is reported alongside.
@@ -353,9 +358,19 @@ class ReportAssembler:
                 "compiled behavior and ability profile a re-run is given -- not its exact phrasing. See "
                 "model_usage for what this run actually cost, by role, and which providers served it."
             )
+        # SEC-2: frustration/confusion/trust/fatigue/effort over the run, per
+        # persona -- spec.md §30.4, the one report-contract section that was
+        # missing outright rather than partial. Computed once, here, rather
+        # than inside the return dict literal below: SEC-9 also reads each
+        # trajectory's own last point for the executive summary's experience-
+        # quality and completion/abandonment bullets, and a second call would
+        # walk every journey's timeline over again for numbers already in
+        # hand.
+        experience_trajectory = cls._experience_trajectory(journeys, findings, persona_names)
         return {"schema_version": "1.1", "mode": "user_journey", "url": url,
                 "executive_summary": cls._executive_summary(url, tasks, personas,
-                                                             findings, preserve, journeys),
+                                                             findings, preserve, journeys,
+                                                             experience_trajectory),
                 "synthetic_users": personas, "persona_artifacts": persona_artifacts,
                 "journey_outcome": {"status": journey_status, "tasks": tasks, "runs": journeys},
                 # Which providers actually served this report. A run served by the
@@ -367,10 +382,7 @@ class ReportAssembler:
                 "model_usage": model_usage,
                 "critical_pain_points": findings,
                 "run_diagnostics": run_diagnostics,
-                # SEC-2: frustration/confusion/trust/fatigue/effort over the
-                # run, per persona -- spec.md §30.4, the one report-contract
-                # section that was missing outright rather than partial.
-                "experience_trajectory": cls._experience_trajectory(journeys, findings, persona_names),
+                "experience_trajectory": experience_trajectory,
                 "flow_groups": cls._flow_groups(findings, tasks),
                 "elements_to_preserve": preserve,
                 "impact_analysis": cls._impact_analysis(findings, personas),
@@ -810,6 +822,61 @@ class ReportAssembler:
             "expectationsMetRate": round(total_met / total_expectations, 2) if total_expectations else None,
         }
 
+    @staticmethod
+    def _attach_task_blocked(findings: list[dict[str, Any]], journeys: list[dict[str, Any]]) -> None:
+        """Whether the run a finding came from ever completed its own task --
+        the same definition `_journey_outcome`'s own `taskSuccess` already
+        uses (`verdict.status == "passed"`), read here rather than
+        recomputed, so the two can never disagree about the same run.
+
+        FND-2: one of the four inputs a judged severity is meant to use
+        (spec.md 53.2 #3) -- "whether the finding blocked a task" -- made
+        available to every finding that carries a `runId` (every builder in
+        this pipeline except the vision critique, which is aggregated across
+        a cohort by root cause and is not about one run). Mutates in place,
+        after the merge, so a merged finding is read by whichever single
+        `runId` it settled on.
+
+        This does not change any severity label -- every existing rule stays
+        exactly as calibrated. It is read by `_highest_impact` below, to
+        break a tie between two findings of the same severity in favour of
+        the one that actually sat in a run that did not finish, and it is
+        printed on findings that already carry a numeric severity basis
+        (`_broken_promise_finding`) so that judgement is auditable rather
+        than a bare label.
+        """
+        blocked_runs = {journey.get("runId") for journey in journeys
+                        if journey.get("runId") and (journey.get("verdict") or {}).get("status") != "passed"}
+        all_runs = {journey.get("runId") for journey in journeys if journey.get("runId")}
+        for finding in findings:
+            run_id = finding.get("runId")
+            if run_id and run_id in all_runs:
+                finding["taskBlocked"] = run_id in blocked_runs
+
+    @classmethod
+    def _highest_impact(cls, findings: list[dict[str, Any]]) -> dict[str, Any]:
+        """The one finding `_impact_analysis`'s own ranking would put first:
+        highest judged severity, then the most personas it reached, then --
+        only to break a tie the first two leave standing -- whether it came
+        from a run that did not complete its task.
+
+        FND-2: replaces picking whichever finding happened to build first.
+        `_executive_summary` used `findings[0]` from whatever `blocking`
+        (severity in critical/high) happened to contain, which is build
+        order, not impact -- and under replay specifically, build order is
+        not even chronological, because `step` does not survive the
+        screenshot remap (SEC-5's own documented gap), so `_order_by_step`
+        cannot recover it either. Severity and reach are ranked exactly as
+        `_impact_analysis` already ranks its own top-10, so the two views of
+        "what matters most" in one report can never point at different
+        findings for the same reason.
+        """
+        return max(findings, key=lambda item: (
+            cls._SEVERITY_RANK.get(str(item.get("severity")), 1),
+            int(item.get("affectedPersonas") or 0),
+            1 if item.get("taskBlocked") else 0,
+        ))
+
     @classmethod
     def _impact_analysis(cls, findings: list[dict[str, Any]], personas: list[dict[str, Any]]) -> dict[str, Any]:
         """A designer-facing read of the findings: how bad, how widespread, and who
@@ -838,7 +905,8 @@ class ReportAssembler:
     @staticmethod
     def _executive_summary(url: str | None, tasks: list[str], personas: list[dict[str, Any]],
                            findings: list[dict[str, Any]], preserve: list[dict[str, Any]],
-                           journeys: list[dict[str, Any]] | None = None) -> str:
+                           journeys: list[dict[str, Any]] | None = None,
+                           experience_trajectory: list[dict[str, Any]] | None = None) -> str:
         """State what was actually found, not what was merely prepared.
 
         A count is not a summary. "12 usability issues were identified, 3 of them
@@ -848,6 +916,21 @@ class ReportAssembler:
         finding is named, and the two classes that only this pipeline can produce
         are called out by name when they occur, because a reader will not know to
         look for them.
+
+        SEC-9 (spec.md §30.1): the five stated bullets are task outcome,
+        experience quality, strongest pain point, strongest recommendation,
+        and completion/abandonment. Strongest pain point already lived here
+        (FND-2 now picks it by judged impact rather than build order);
+        strongest recommendation follows it directly, read off the same
+        finding rather than synthesised again. Task outcome and completion/
+        abandonment are one combined bullet below: how many personas actually
+        finished, told apart from a harness limit (`cut_short`, already
+        handled) and from ending merely inconclusive without ever choosing to
+        leave. Experience quality is the worst final state any persona
+        actually reached, read from `experience_trajectory` (SEC-2) rather
+        than re-derived, in the same plain banding `affectInWords()`
+        (personaActor.js) already uses for the persona's own prompt --
+        translated here, not imported, since this runs in Python.
         """
         real = [finding for finding in findings
                 if finding.get("title") != "No pain points detected"
@@ -864,11 +947,19 @@ class ReportAssembler:
         # almost any report and tell a reader nothing they can act on; they now
         # sit underneath the judgement instead of in front of it.
         judgement = []
-        worst = (blocking or real)
-        if worst:
-            flow = ReportAssembler._flow_label(worst[0])
-            judgement.append(f"The one thing to change: {worst[0].get('title')}"
+        worst_pool = (blocking or real)
+        if worst_pool:
+            # FND-2: the highest-judged-impact finding, not whichever one
+            # happened to build first -- see _highest_impact's own docstring.
+            worst = ReportAssembler._highest_impact(worst_pool)
+            flow = ReportAssembler._flow_label(worst)
+            judgement.append(f"The one thing to change: {worst.get('title')}"
                              + (f", where it loses people at {flow}." if flow else "."))
+            # SEC-9: the strongest recommendation, read off the same finding
+            # _highest_impact just picked rather than a second judgement call
+            # -- every finding this pipeline builds already carries one.
+            if worst.get("recommendation"):
+                judgement.append(f"Recommended: {worst['recommendation']}")
         if preserve:
             judgement.append(f"What works: {preserve[0].get('title')}.")
         if not judgement:
@@ -893,6 +984,42 @@ class ReportAssembler:
                 f"{len(cut_short)} of those runs stopped early and did not finish the tasks"
                 + (f" -- one got {plural(steps, 'action')} in" if len(cut_short) == 1 and steps else "")
                 + ", so what follows is what was seen before that, not a full review.")
+        # SEC-9: task outcome and completion/abandonment, as one bullet -- how
+        # many personas actually finished, told apart from a harness limit
+        # (cut_short, above) and from ending merely inconclusive without a
+        # persona ever choosing to leave. `abandoned` reads JRN-1's own flag
+        # (state.abandoned, the coping model's decision), not "did not pass":
+        # a run that ran out of its step budget while still trying is a
+        # harness limit (SEC-1's own distinction), not a person who walked
+        # away, and conflating the two here would restate the defect SEC-1
+        # closed elsewhere in the same report.
+        trajectories = experience_trajectory or []
+        if journeys:
+            attempted = len(journeys)
+            completed = sum(1 for journey in journeys if (journey.get("verdict") or {}).get("status") == "passed")
+            abandoned = sum(1 for trajectory in trajectories
+                            if trajectory.get("points") and trajectory["points"][-1].get("abandoned"))
+            if completed == attempted:
+                parts.append("Every persona completed the task.")
+            elif abandoned:
+                parts.append(f"{completed} of {plural(attempted, 'persona')} completed the task; "
+                             f"{plural(abandoned, 'persona')} walked away rather than finish it.")
+            else:
+                parts.append(f"{completed} of {plural(attempted, 'persona')} completed the task.")
+        # SEC-9: experience quality -- the worst final state any persona
+        # actually reached, not an average that would let one badly hurt
+        # persona hide behind others who had an easy time. Same bands
+        # affectInWords() (personaActor.js) already uses for what the persona
+        # itself is told, translated rather than duplicated in spirit: a
+        # number alone ("frustration 0.83") is not what "quality" means to a
+        # reader who has not read behavior.js.
+        finals = [trajectory["points"][-1] for trajectory in trajectories if trajectory.get("points")]
+        if finals:
+            worst_frustration = max(float(point.get("frustration") or 0) for point in finals)
+            band = ("calm" if worst_frustration < 0.25 else "mildly frustrated" if worst_frustration < 0.5
+                   else "notably frustrated" if worst_frustration < 0.75 else "fed up")
+            parts.append(f"At its worst, the experience left a persona {band} "
+                         f"(frustration {worst_frustration:.2f} of 1.00).")
         parts.append(f"{plural(len(real), 'usability issue')} {verb(len(real), 'was', 'were')} identified"
                      + (f", {len(blocking)} of them high-severity or blocking." if blocking else "."))
 

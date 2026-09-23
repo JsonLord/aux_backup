@@ -4810,3 +4810,120 @@ def test_be5_the_pool_is_bounded_by_max_concurrent_model_calls(tmp_path, monkeyp
 
     assert completed["status"] == "succeeded"
     assert peak == 2, f"expected at most 2 in flight at once, saw {peak}"
+
+
+# --- FND-2 (docs/parallel-development-spec.md §6 L3): judged severity ------
+# spec.md §53.2 #3: severity from real inputs -- which task it blocked, the
+# affect trace at that step, how many personas hit it -- rather than only a
+# rule keyed by which builder produced the finding. Scoped to what the
+# pipeline already carries per finding (runId, affectedPersonas, and, for
+# _broken_promise_finding specifically, a real frustration-cost basis in
+# claimedImpact) rather than a rewrite of every builder's own severity rule,
+# which this session's own real data (last_runs/, a single run) could not
+# verify against. "On the task path" (element-level goal relevance) is not
+# attempted here; see docs/parallel-development-spec.md's own FND-2 row for
+# why.
+
+def _verdict_journey(run_id, task_status, ux_findings=()):
+    return {
+        "runId": run_id, "profileId": f"persona_{run_id}",
+        "timeline": [],
+        "verdict": {"status": task_status, "criteria": [], "blockers": [],
+                    "uxFindings": list(ux_findings), "suggestedImprovements": []},
+    }
+
+
+def test_task_blocked_is_read_from_the_runs_own_verdict_status():
+    """The same definition _journey_outcome's own taskSuccess already uses
+    (verdict.status == "passed"), read here rather than recomputed."""
+    journeys = [
+        {"runId": "run_pass", "verdict": {"status": "passed"}},
+        {"runId": "run_fail", "verdict": {"status": "failed"}},
+        {"runId": "run_no_verdict"},
+    ]
+    findings = [
+        {"title": "from the passing run", "runId": "run_pass"},
+        {"title": "from the failing run", "runId": "run_fail"},
+        {"title": "from vision, no runId"},
+        {"title": "from an unresolvable run", "runId": "run_nowhere"},
+    ]
+    JobExecutor._attach_task_blocked(findings, journeys)
+    by_title = {f["title"]: f for f in findings}
+    assert by_title["from the passing run"]["taskBlocked"] is False
+    assert by_title["from the failing run"]["taskBlocked"] is True
+    # Absent, not False: a vision finding is aggregated across a cohort by
+    # root cause and is not about one run, and a runId this run list cannot
+    # resolve is a data inconsistency, not evidence the task succeeded.
+    assert "taskBlocked" not in by_title["from vision, no runId"]
+    assert "taskBlocked" not in by_title["from an unresolvable run"]
+
+
+def test_highest_impact_ranks_severity_then_reach_then_task_blocked():
+    by_severity = [
+        {"title": "first in list, only medium", "severity": "medium", "affectedPersonas": 5},
+        {"title": "later in list, but high", "severity": "high", "affectedPersonas": 1},
+    ]
+    assert JobExecutor._highest_impact(by_severity)["title"] == "later in list, but high"
+
+    by_reach = [
+        {"title": "high, 1 persona", "severity": "high", "affectedPersonas": 1},
+        {"title": "high, 3 personas", "severity": "high", "affectedPersonas": 3},
+    ]
+    assert JobExecutor._highest_impact(by_reach)["title"] == "high, 3 personas"
+
+    by_task_blocked = [
+        {"title": "high, 1 persona, not blocked", "severity": "high", "affectedPersonas": 1, "taskBlocked": False},
+        {"title": "high, 1 persona, blocked", "severity": "high", "affectedPersonas": 1, "taskBlocked": True},
+    ]
+    assert JobExecutor._highest_impact(by_task_blocked)["title"] == "high, 1 persona, blocked"
+
+
+def test_the_executive_summary_leads_with_the_highest_impact_finding_not_the_first_built():
+    """Before this fix, the executive summary's "one thing to change" was
+    `blocking[0]` -- whichever high/critical finding this pipeline happened
+    to build first, which under replay specifically is not even chronological
+    (step does not survive the screenshot remap). Two "major" (-> high)
+    uxFindings, tied on severity and persona reach, one from a run that
+    passed its task and one from a run that did not: build order alone can
+    no longer decide it, and the one from the run that actually failed wins."""
+    journeys = [
+        _verdict_journey("run_pass", "passed",
+                         ux_findings=[{"title": "Minor annoyance", "category": "usability", "severity": "major",
+                                       "description": "This slowed one visitor down for a moment."}]),
+        _verdict_journey("run_fail", "failed",
+                         ux_findings=[{"title": "Real blocker", "category": "usability", "severity": "major",
+                                       "description": "This kept a different visitor from finishing at all."}]),
+    ]
+    report = _assembled(journeys)
+    titles = {f["title"] for f in report["critical_pain_points"]}
+    assert titles == {"Minor annoyance", "Real blocker"}, "fixture sanity: both findings survived, unmerged"
+
+    assert "The one thing to change: Real blocker" in report["executive_summary"]
+    assert "The one thing to change: Minor annoyance" not in report["executive_summary"]
+
+    blocked = {f["title"]: f["taskBlocked"] for f in report["critical_pain_points"]}
+    assert blocked == {"Minor annoyance": False, "Real blocker": True}
+
+
+def test_a_broken_promise_finding_carries_its_own_severity_basis():
+    """spec.md §53.2 #3's own second half: "the severity derivation prints
+    real inputs" -- not only a label. _broken_promise_finding already
+    computed a real frustration cost per promise (claimedImpact); this
+    confirms taskBlocked joins it as a plain field on the same finding,
+    printed rather than left implicit in the severity string."""
+    journey = {
+        "runId": "run_1", "profileId": "persona_1",
+        "timeline": [
+            {"type": "persona.expectation", "data": {"expectation": "the price",
+             "action": {"type": "CLICK", "target": "e1"}, "targetName": "Pricing"}},
+            {"type": "persona.reflection", "data": {"matched": "no", "observed": "a contact form",
+                                                     "gap": "no prices anywhere"}},
+            {"type": "persona.affect", "data": {"state": {"frustration": 0.4}}},
+        ],
+        "verdict": {"status": "failed", "criteria": [], "blockers": [], "uxFindings": [],
+                    "suggestedImprovements": []},
+    }
+    report = _assembled([journey])
+    promise = next(f for f in report["critical_pain_points"] if f["source"] == "persona.expectation")
+    assert promise["taskBlocked"] is True
+    assert promise["claimedImpact"]["frustration"] > 0

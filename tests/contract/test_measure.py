@@ -87,10 +87,20 @@ def test_report_contract_is_computed_not_hand_rated(metrics):
     """Deliberately does not reproduce last_runs/REPORT_CRITERIA.md's 6/2/1
     hand rating -- that rating is named as overstated (section 9) in
     docs/parallel-development-spec.md §2h, and reproducing a known-wrong
-    number here would defeat RUN-1's own purpose."""
+    number here would defeat RUN-1's own purpose.
+
+    This measures the static, unmodified `ux_report__*.json` on disk (see
+    `compute_metrics`), generated before SEC-9 landed -- so
+    1_executive_summary is genuinely "partial" here: that file's executive
+    summary predates the strongest-recommendation, experience-quality and
+    completion/abandonment bullets SEC-9 added, and this scorer now checks
+    for all five (docs/parallel-development-spec.md's own SEC-9 row).
+    `tests/replay/test_golden_invariants.py` checks the "met" side, against
+    today's code replaying the same snapshot.
+    """
     contract = metrics["contract"]["per_report"][0]
     assert contract["sections"] == {
-        "1_executive_summary": "met",
+        "1_executive_summary": "partial",
         "2_synthetic_user": "met",
         "3_journey_outcome": "met",
         "4_experience_trajectory": "missing",
@@ -100,7 +110,7 @@ def test_report_contract_is_computed_not_hand_rated(metrics):
         "8_ux_knowledge_basis": "partial",
         "9_full_evidence": "partial",
     }
-    assert (contract["met"], contract["partial"], contract["missing"]) == (4, 4, 1)
+    assert (contract["met"], contract["partial"], contract["missing"]) == (3, 5, 1)
     assert metrics["contract"]["evidence_language_tags"] == [0, 14]
 
 

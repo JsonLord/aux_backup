@@ -427,9 +427,27 @@ def report_contract_sections(report: dict[str, Any]) -> dict[str, Any]:
     would defeat RUN-1's whole purpose."""
     sections: dict[str, str] = {}
 
-    sections["1_executive_summary"] = (
-        "met" if (report.get("executive_summary") or "").strip() else "missing"
-    )
+    summary = (report.get("executive_summary") or "").strip()
+    if not summary:
+        sections["1_executive_summary"] = "missing"
+    else:
+        # SEC-9: spec.md §30.1's five bullets, checked against the fixed
+        # markers _executive_summary (assembler.py) itself uses for each --
+        # legitimate here because this pipeline controls its own wording
+        # (unlike a persona's or a vision model's free-form prose, which
+        # this file never pattern-matches). "No usability issues were
+        # identified" satisfies both the pain-point and recommendation
+        # bullets vacuously: a clean run has nothing to name or recommend,
+        # and that is not the same thing as a missing bullet.
+        has_lead = "The one thing to change:" in summary or "No usability issues were identified" in summary
+        bullets = {
+            "task_outcome": " attempted " in summary,
+            "experience_quality": "the experience left a persona" in summary,
+            "strongest_pain_point": has_lead,
+            "strongest_recommendation": "Recommended:" in summary or "No usability issues were identified" in summary,
+            "completion_or_abandonment": "completed the task" in summary,
+        }
+        sections["1_executive_summary"] = "met" if all(bullets.values()) else "partial"
 
     users = report.get("synthetic_users") or []
     if users and all(_synthetic_user_complete(u) for u in users):
