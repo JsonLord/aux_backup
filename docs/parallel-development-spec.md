@@ -8,6 +8,8 @@ Written 2026-09-23, against the tree at `915173a`. It reconciles four sources:
 - the live snapshot in `last_runs/`, one persona against `https://open-design.ai/`,
   job `job_90142999fc7640a0924ebef82c2be471`, 2026-09-22.
 
+The one-page board version is `docs/parallel-development-overview.md`.
+
 It replaces the three-track schedule in `docs/next-cycle-plan.md` ("How the three
 tracks run in parallel"). That plan's items are nearly all built. This document
 schedules what is left, and it does so as **ten lanes that run at the same time**.
