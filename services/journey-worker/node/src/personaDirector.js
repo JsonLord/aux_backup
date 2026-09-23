@@ -32,7 +32,7 @@ const { writeFile } = require("node:fs/promises");
 const path = require("node:path");
 
 const { AdherenceGate } = require("./adherence");
-const { BehaviorController } = require("./behavior");
+const { BehaviorController, sampleCoping } = require("./behavior");
 const { browsingFaculty, facultyWith } = require("./faculty");
 // CAP-5: registers "developer" with the faculty registry as a side effect of
 // being required -- loaded here, once, so any run that names it in
@@ -508,13 +508,41 @@ class PersonaDirector {
         history: filterWorkingMemory(history, this.abilities),
       };
       const proposed = await this.actor(ask);
+      // Whether to end this journey is not the gate's question. JRN-3 makes a
+      // rejection actually block the action it was judging -- exactly the
+      // point of it -- but that turns a harsh judge finding some small flaw
+      // in the wording of a DONE or GIVE_UP into the persona being trapped in
+      // a run they had already decided to leave, which is a worse outcome
+      // than not checking it at all. Skipped here rather than inside the
+      // gate, so a judge that would have passed it anyway is one fewer call
+      // spent finding that out.
+      const endsRun = proposed.action?.type === "DONE" || proposed.action?.type === "GIVE_UP";
       // Does that sound like this person? TinyTroupe scores the action against
       // the persona and, when it scores badly, hands the criticism back and asks
       // for another. That is what makes a persona a constraint on the output
       // rather than an instruction it may drift away from.
-      const settled = await this.gate.settle(this.profile, proposed,
-        (flaw) => this.actor(ask, { notLikeYou: flaw }));
+      const settled = endsRun ? { decision: proposed, adherence: null }
+        : await this.gate.settle(this.profile, proposed,
+          (flaw) => this.actor(ask, { notLikeYou: flaw }),
+          // JRN-3: resolved fresh for every attempt the gate judges, so the judge
+          // reads "the 'Pricing' link", not a ref it has no way to place. A live
+          // run's own gate rejected e367 as "unrelated" to an impatient persona
+          // hunting for a price, while e367 was the Pricing link it had already
+          // rejected twice before under other refs.
+          (target) => nameOf(target, perception));
       const decision = settled.decision;
+      // What the thing acted on says on it, from the walk rather than from the
+      // sentence -- and where it sat. The report had been recovering the name by
+      // reading the persona's prose, which works right up until the persona
+      // writes "The Pricing page will load" instead of naming a control -- and
+      // then a report headline reads "Promised more than it did: e6". Resolved
+      // once here, for whichever decision the gate settled on, and reused below:
+      // the adherence record, the expectation record, JRN-2's loop tracker, and
+      // outcomeEvent's repeatKey all read off this same pair rather than each
+      // calling nameOf/boxOf a second time.
+      const perceivedLabel = nameOf(decision.action.target, perception);
+      const targetLabel = perceivedLabel || decision.action.target || "";
+      const targetBox = boxOf(decision.action.target, perception) || undefined;
       if (this.gate.unavailableReason && !reportedGateFailure) {
         reportedGateFailure = true;
         // Said once, not every step. A run where nothing held the persona to
@@ -540,36 +568,49 @@ class PersonaDirector {
           settled.adherence.passed
             ? `that is like them (${settled.adherence.score}/10)`
             : `still not quite like them (${settled.adherence.score}/10)`,
-          { ...settled.adherence, threshold: this.gate.threshold });
+          // JRN-3: the label and box travel with the judgement now too, so a
+          // rejected action is not only a sentence -- it can be named and shown.
+          { ...settled.adherence, threshold: this.gate.threshold,
+            targetLabel: perceivedLabel || undefined, targetBox });
       }
 
       // What they see and what they expect, before anything happens. Committing
       // to an expectation is what makes the next step falsifiable.
-      //
-      // What the thing acted on says on it, from the walk rather than from the
-      // sentence. The report had been recovering this by reading the persona's
-      // prose, which works right up until the persona writes "The Pricing page
-      // will load" instead of naming a control -- and then a report headline
-      // reads "Promised more than it did: e6". Kept bare (empty when unknown)
-      // for targetName below, which has always meant "or nothing" -- and
-      // separately with a same-page fallback to the ref for JRN-2's loop
-      // tracking, which needs some identity for this control even when
-      // perception cannot name it.
-      const perceivedLabel = nameOf(decision.action.target, perception);
-      const targetLabel = perceivedLabel || decision.action.target || "";
       await recorder.record("persona.expectation",
         decision.expectation || `${decision.action.type}`, {
           visible: decision.visible, expectation: decision.expectation,
           action: decision.action,
           targetName: perceivedLabel || undefined,
-          // Where it sat, so a finding about it can show it rather than the page
-          // it was somewhere on.
-          targetBox: boxOf(decision.action.target, perception) || undefined,
+          targetBox,
           malformed: decision.malformed || undefined });
 
-      if (skipAction) {
+      // JRN-3: the gate exhausted its attempts without one that sounded like
+      // this person, and `decision` is still the action it just rejected --
+      // performing it anyway is the gate deciding nothing at all, and it is
+      // exactly what a live run did: two of three actions scored 3 and 4 out
+      // of 10 were confirmed carried out regardless, by their own pointer
+      // events. Sampled here from this person's own current coping
+      // distribution, read-only -- never applied through reduceState, since
+      // this is the gate failing to find an in-character action, not the page
+      // disappointing anyone, and charging the product's affect trajectory
+      // for a limit of the simulation would contaminate the very numbers this
+      // session exists to keep honest. Only `backtrack` gets a distinct
+      // response, because it already has one, real and safe: press back.
+      // Every other sampled type -- including `abandon`, since ending the run
+      // because its own proposals kept missing this person is not a reason
+      // this run should leave -- becomes what `reread` already means here:
+      // look again, decide fresh next turn.
+      const gateExhausted = Boolean(settled.adherence) && settled.adherence.passed === false;
+      if (skipAction || gateExhausted) {
         skipAction = false;
-        history.push(`re-read the page`);
+        if (gateExhausted) {
+          const instead = sampleCoping(controller.profile, controller.state,
+            { taskImportance: 0.6 }, controller.random).decision.type;
+          if (instead === "backtrack") await browser.press("Alt+ArrowLeft").catch(() => {});
+          history.push("thought about it, but that did not sound like you -- you looked again instead");
+        } else {
+          history.push(`re-read the page`);
+        }
         continue;
       }
 

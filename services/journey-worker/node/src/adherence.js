@@ -103,14 +103,24 @@ function salvageScore(text) {
   };
 }
 
-/** One action, as the judge sees it. */
-function actionBrief(decision) {
+/**
+ * One action, as the judge sees it.
+ *
+ * JRN-3: `label`, when given, is what the walk called the target -- not the
+ * ref. A live run's judge rejected `e367` as "unrelated" to an impatient
+ * persona hunting for a price, while `e367` was the Pricing link it had
+ * already rejected twice before under other refs: nothing in the prompt ever
+ * told it so. Falls back to the ref exactly as before when no label is
+ * available, the same fallback every other namer in this codebase uses.
+ */
+function actionBrief(decision, label) {
   const action = decision?.action || {};
+  const named = String(label || "").trim();
+  const target = named ? ` the "${named}"` : action.target ? ` ${action.target}` : "";
   return [
     `They say they can see: ${decision?.visible || "(nothing stated)"}`,
     `They expect: ${decision?.expectation || "(nothing stated)"}`,
-    `They will: ${action.type}${action.target ? ` ${action.target}` : ""}`
-      + `${action.content ? ` -- "${action.content}"` : ""}`,
+    `They will: ${action.type}${target}${action.content ? ` -- "${action.content}"` : ""}`,
   ].join("\n");
 }
 
@@ -146,13 +156,14 @@ class AdherenceGate {
    * the persona, not a dependency of the run: an unreachable judge means the
    * action stands, exactly as it would have without any of this.
    */
-  async score(profile, decision) {
+  async score(profile, decision, label) {
     if (!this.enabled || !this.judge) return null;
     let text;
     try {
       text = await this.judge({
         system: ADHERENCE_SYSTEM,
-        user: `THE PERSON:\n${personaBrief(profile)}\n\nTHE PROPOSED NEXT ACTION:\n${actionBrief(decision)}`,
+        user: `THE PERSON:\n${personaBrief(profile)}\n\nTHE PROPOSED NEXT ACTION:\n`
+          + actionBrief(decision, label),
       });
     } catch (error) {
       this.fail(error.message);
@@ -181,16 +192,26 @@ class AdherenceGate {
   }
 
   /**
-   * The action this person would actually take.
+   * The action this person would actually take -- or, when nothing clears the
+   * bar, the last attempt tried, kept in `decision` for what it is worth (the
+   * one that has been criticised the most) but marked `adherence.passed:
+   * false` for the caller to act on. Still returning it here, rather than
+   * something else, is TinyTroupe's own choice: refusing to act is not
+   * something a person does, and inventing a replacement is a judgement about
+   * the *page*, which is not this gate's job. What the director then does
+   * with a `false` -- JRN-3 -- is a separate decision, made with more context
+   * than this class has (the persona's current affective state, what coping
+   * looks like for them right now), not this method's to make.
    *
-   * `regenerate(feedback)` asks for another one, told what was wrong with the
-   * last. When nothing clears the bar the final attempt is what stands, because
-   * it is the one that has been criticised the most -- TinyTroupe's choice, and
-   * the right one: refusing to act is not something a person does.
+   * `nameFor(target)`, when given, resolves a ref to what the walk called it
+   * -- called fresh for every attempt, since a regenerated action can name a
+   * different control than the one just rejected. Without it every action is
+   * judged by its ref alone, exactly as before this parameter existed.
    */
-  async settle(profile, decision, regenerate) {
+  async settle(profile, decision, regenerate, nameFor) {
+    const labelFor = typeof nameFor === "function" ? nameFor : () => "";
     let current = decision;
-    let judged = await this.score(profile, current);
+    let judged = await this.score(profile, current, labelFor(current.action?.target));
     if (!judged) return { decision: current, adherence: null };
     if (judged.score >= this.threshold) {
       this.stats.passedFirst += 1;
@@ -214,7 +235,7 @@ class AdherenceGate {
       if (!next?.action) break;
       this.stats.regenerated += 1;
       current = next;
-      judged = await this.score(profile, current);
+      judged = await this.score(profile, current, labelFor(current.action?.target));
       if (!judged) return { decision: current, adherence: null };
       history.push({ ...judged, action: current.action });
       if (judged.score >= this.threshold) {

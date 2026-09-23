@@ -193,3 +193,55 @@ test("a rejected action is kept with the reason it was rejected", async () => {
   assert.equal(settled.adherence.history[0].flaw, "Far too patient for them");
   assert.deepEqual(settled.adherence.history[1].action, { type: "CLICK", target: "e7" });
 });
+
+// --- JRN-3: the judge sees the label, not only the ref --------------------
+
+test("actionBrief names the control by its label, and falls back to the ref exactly as before", () => {
+  const decision = { visible: "a page", expectation: "prices", action: { type: "CLICK", target: "e367" } };
+  assert.match(actionBrief(decision, "Pricing"), /the "Pricing"/);
+  assert.doesNotMatch(actionBrief(decision, "Pricing"), /e367/,
+    "the ref is not shown at all once a label is available");
+
+  // No label -- every caller before this parameter existed -- is unchanged.
+  assert.match(actionBrief(decision), /e367/);
+  assert.doesNotMatch(actionBrief(decision), /the "/);
+});
+
+test("the judge reads the resolved label, not the bare ref -- the real defect this closes", async () => {
+  // A live run's own gate rejected e367 as "unrelated" to an impatient persona
+  // hunting for a price, while e367 *was* the Pricing link -- nothing in the
+  // prompt ever said so.
+  const { judge, asked } = judgeReturning('{"score": 9, "flaw": ""}');
+  const gate = new AdherenceGate({ judge });
+  const proposed = { visible: "a page", expectation: "prices", action: { type: "CLICK", target: "e367" } };
+
+  await gate.settle(FRIEDRICH, proposed, async () => proposed, () => "Pricing");
+
+  assert.match(asked[0].user, /the "Pricing"/);
+  assert.doesNotMatch(asked[0].user, /e367/, "the ref itself never reaches the judge once a label resolves");
+});
+
+test("nameFor is called fresh for every attempt, since a regenerated action can name a different control", async () => {
+  const { judge, asked } = judgeReturning(
+    '{"score": 2, "flaw": "not them"}',
+    '{"score": 9, "flaw": ""}');
+  const gate = new AdherenceGate({ judge });
+  const first = { action: { type: "CLICK", target: "e1" } };
+  const second = { action: { type: "CLICK", target: "e2" } };
+  const labels = { e1: "Contact", e2: "Pricing" };
+
+  await gate.settle(FRIEDRICH, first, async () => second, (target) => labels[target]);
+
+  assert.match(asked[0].user, /the "Contact"/);
+  assert.match(asked[1].user, /the "Pricing"/);
+});
+
+test("with no nameFor, settle() judges by ref exactly as it always did", async () => {
+  const { judge, asked } = judgeReturning('{"score": 9, "flaw": ""}');
+  const gate = new AdherenceGate({ judge });
+  const proposed = { action: { type: "CLICK", target: "e367" } };
+
+  await gate.settle(FRIEDRICH, proposed, async () => proposed);
+
+  assert.match(asked[0].user, /e367/);
+});

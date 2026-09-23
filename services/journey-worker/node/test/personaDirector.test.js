@@ -2289,3 +2289,144 @@ test("two controls alternated four times, by label and across refs, is told back
   assert.ok(seenHistory.at(-1).some((line) => line.includes("going back and forth")),
     "the next actor call is shown the loop, not only the recorder");
 });
+
+// --- JRN-3: the gate blocks what it rejects, and tells the judge what it's looking at --------
+
+/** A judge that passes anything naming "Pricing" and rejects everything else --
+ * exactly the shape needed to let one action through and exhaust another. */
+function passesOnlyPricing() {
+  return async ({ user }) => (user.includes('"Pricing"')
+    ? '{"score": 9, "flaw": ""}' : '{"score": 2, "flaw": "not them"}');
+}
+
+test("a rejected action is never performed once the gate exhausts its attempts, and the persona is told so", async () => {
+  // Before this fix, `settled.decision` -- the last, still-rejected attempt --
+  // was performed unconditionally. A live run confirmed it live: two of three
+  // actions scored 3 and 4 out of 10 were carried out anyway, by their own
+  // pointer events.
+  const named = [["e1", "Pricing"], ["e2", "Contact"]];
+  const seenHistory = [];
+  let freshCalls = 0;
+  const script = [{ type: "CLICK", target: "e1" }, { type: "CLICK", target: "e2" }, { type: "DONE", content: "done" }];
+  const actor = async (ask, opts = {}) => {
+    seenHistory.push((ask.history || []).slice());
+    if (!opts.notLikeYou) freshCalls += 1;
+    const step = script[Math.min(freshCalls - 1, script.length - 1)];
+    return { visible: "", expectation: "", action: { type: step.type, target: step.target || "",
+      content: step.content || "" } };
+  };
+  actor.judgeAdherence = passesOnlyPricing();
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: namingPerception(named),
+    frames: () => [], walk: namingWalk(named), actor,
+  });
+  const recorder = fakeRecorder();
+  const browser = fakeBrowser();
+  const verdict = await run(director, browser, recorder);
+
+  assert.equal(verdict.status, "passed", "the run still reaches DONE afterward, not trapped");
+  assert.ok(!browser.calls.some((call) => call[0] === "click" && call[1] === "e2"),
+    "the rejected click on Contact never reaches the browser");
+  assert.ok(!recorder.events.some((event) => event.type === "persona.pointer" && event.data.target === "e2"),
+    "no hand was ever aimed at the rejected control either");
+
+  const rejected = recorder.events.find((event) => event.type === "persona.adherence" && event.data.passed === false);
+  assert.ok(rejected, "the rejection itself is still on the record");
+  assert.equal(rejected.data.targetLabel, "Contact");
+  assert.deepEqual(rejected.data.targetBox, { x: 0, y: 0, width: 40, height: 10 });
+
+  // And the persona is told, not only the recorder -- read on the very next
+  // actor call, the same channel JRN-2's loop notices use.
+  assert.ok(seenHistory.some((entry) => entry.some((line) => line.includes("did not sound like you"))),
+    "a later actor call is shown that the last proposal did not go ahead");
+});
+
+test("the judge is told what the control says on it, and a passed action is judged normally", async () => {
+  // judgeAdherence has to be on the actor *before* the director is
+  // constructed: the constructor reads it once, there and then, to decide
+  // whether to build a real gate at all (`this.gate = gate || new
+  // AdherenceGate({ judge: actor.judgeAdherence })`) -- setting it afterward
+  // leaves that gate permanently disabled, which every test below is careful
+  // not to do.
+  const named = [["e1", "Pricing"]];
+  const actor = scriptedActor([{ type: "CLICK", target: "e1" }, { type: "DONE", content: "done" }]);
+  actor.judgeAdherence = async ({ user }) => {
+    assert.match(user, /the "Pricing"/);
+    assert.doesNotMatch(user, /\be1\b/, "the ref itself is never shown to the judge once a label resolves");
+    return '{"score": 9, "flaw": ""}';
+  };
+  const director = new PersonaDirector({
+    profile: dogged, sleepFn: async () => {}, perception: namingPerception(named),
+    frames: () => [], walk: namingWalk(named), actor,
+  });
+  const recorder = fakeRecorder();
+  await run(director, fakeBrowser(), recorder);
+
+  const passed = recorder.events.find((event) => event.type === "persona.adherence");
+  assert.ok(passed, "the judge was actually reached");
+  assert.equal(passed.data.passed, true);
+  assert.equal(passed.data.targetLabel, "Pricing");
+});
+
+test("DONE and GIVE_UP never reach the gate, so a harsh judge cannot trap a persona who has already decided to leave", async () => {
+  let judged = 0;
+  // A judge that rejects literally everything -- proof this is never asked,
+  // not merely one that happens to pass DONE.
+  const doneActor = scriptedActor([{ type: "DONE", content: "found the price" }]);
+  doneActor.judgeAdherence = async () => { judged += 1; return '{"score": 0, "flaw": "not them at all"}'; };
+  const director = new PersonaDirector({ profile: dogged, sleepFn: async () => {}, actor: doneActor });
+  const recorder = fakeRecorder();
+  const verdict = await run(director, fakeBrowser(), recorder);
+
+  assert.equal(judged, 0, "ending the journey is never sent to the gate");
+  assert.equal(verdict.status, "passed");
+  assert.equal(recorder.events.some((event) => event.type === "persona.adherence"), false);
+
+  // Same for giving up: not just the happy path.
+  const giveUpActor = scriptedActor([{ type: "GIVE_UP", content: "not worth it" }]);
+  giveUpActor.judgeAdherence = async () => '{"score": 0, "flaw": "not them at all"}';
+  const givingUp = new PersonaDirector({ profile: dogged, sleepFn: async () => {}, actor: giveUpActor });
+  const secondVerdict = await run(givingUp, fakeBrowser(), fakeRecorder());
+  assert.equal(secondVerdict.status, "failed");
+  assert.equal(secondVerdict.summary.includes("Gave up"), true);
+});
+
+test("a coping type sampled from this person's own current state, not the rejected click, is what happens next", async () => {
+  // Deterministic, not a probability check, the same way JRN-1's own seed-8
+  // test is: seed 5 on this profile, after one real failing click builds
+  // real confusion and a consecutive failure, samples "backtrack" the moment
+  // a second action is rejected outright -- found empirically, the same way
+  // every seed-pinned test in this session was, by running the real sampler
+  // against the real state it will actually see.
+  const named = [["e1", "Pricing"], ["e2", "Contact"]];
+  const behavior = { seed: 5, patience: .3, persistence: .3, irritability: .6, angerReactivity: .5,
+    angerRecovery: .3, impulsivity: .3, repeatFailureTolerance: .9, selfEfficacy: .3,
+    verificationTendency: .2, exploration: .1, helpSeeking: .1 };
+  const profile = { id: "p_backtrack", persona: {}, behavior, abilities: {} };
+  const script = [{ type: "CLICK", target: "e1" }, { type: "CLICK", target: "e2" }, { type: "DONE", content: "done" }];
+  let freshCalls = 0;
+  const actor = async (ask, opts = {}) => {
+    if (!opts.notLikeYou) freshCalls += 1;
+    const step = script[Math.min(freshCalls - 1, script.length - 1)];
+    return { visible: "", expectation: "", action: { type: step.type, target: step.target || "",
+      content: step.content || "" } };
+  };
+  actor.judgeAdherence = passesOnlyPricing();
+  const director = new PersonaDirector({
+    profile, sleepFn: async () => {}, perception: namingPerception(named),
+    frames: () => [], walk: namingWalk(named), actor,
+  });
+  const browser = fakeBrowser({ clickThrows: true });
+  const verdict = await run(director, browser, fakeRecorder());
+
+  // Not an exact call list -- fakeBrowser's own snapshot/screenshot/
+  // scrollIntoView calls surround these -- only what this fix actually
+  // controls: Contact is never clicked, and the press this person's own
+  // sampled coping produced is.
+  assert.ok(browser.calls.some((call) => call[0] === "click" && call[1] === "e1"), "the passed click still happens");
+  assert.ok(!browser.calls.some((call) => call[0] === "click" && call[1] === "e2"),
+    "the rejected click on Contact is replaced by this person's own sampled coping, not performed");
+  assert.ok(browser.calls.some((call) => call[0] === "press" && call[1] === "Alt+ArrowLeft"),
+    "sampled here from real state: this profile, this seed, one real failure in");
+  assert.equal(verdict.status, "passed", "and the run still reaches its DONE afterward");
+});
