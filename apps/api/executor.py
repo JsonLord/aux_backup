@@ -480,25 +480,6 @@ class JobExecutor(ReportAssembler):
             message = ""
         return f"HTTP {error.code} from the eyeson worker: {message}" if message else str(error)
 
-    @staticmethod
-    def _served_by(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """The distinct providers that answered across a cohort, in run order.
-
-        `servedBy` is set by the worker and carries an endpoint and a model but
-        never a key (services/journey-worker/node/src/journeytest.js). Runs that
-        never reached a model contribute nothing rather than a blank row.
-        """
-        seen, served = set(), []
-        for journey in journeys:
-            entry = journey.get("servedBy") or {}
-            key = (entry.get("endpoint"), entry.get("model"))
-            if not entry.get("endpoint") or key in seen:
-                continue
-            seen.add(key)
-            served.append({"endpoint": entry["endpoint"], "model": entry.get("model"),
-                           "movedFromPrimary": bool(entry.get("movedFromPrimary"))})
-        return served
-
     @classmethod
     def _run_models(cls, job: dict[str, Any]) -> dict[str, list[dict[str, str]]] | None:
         """The model chain to send with a run, or None to leave the worker its own.

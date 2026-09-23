@@ -552,6 +552,35 @@ class ReportAssembler:
         return [finding for _, finding in sorted(with_index, key=lambda pair: (pair[0] is None, pair[0] or 0))]
 
     @staticmethod
+    def _served_by(journeys: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """The distinct providers that answered across a cohort, in run order.
+
+        `servedBy` is set by the worker and carries an endpoint and a model but
+        never a key (services/journey-worker/node/src/journeytest.js). Runs that
+        never reached a model contribute nothing rather than a blank row.
+
+        RUN-0: moved here from `apps/api/executor.py` (unchanged apart from
+        the move) -- it was a third back-reference from `assemble_report`
+        into the run half that BE-2's own docstring did not name, found
+        while making `ReportAssembler.assemble_report()` callable standalone
+        for RUN-3's offline replay. It belongs here on its own terms too: it
+        reads only `journeys` and summarises a report field, the same shape
+        as `_model_usage_summary` beside it, not a run-half concern like
+        `_vision_timeout`/`_worker_error` (still genuinely back-references,
+        since they read environment and format a live HTTP error).
+        """
+        seen, served = set(), []
+        for journey in journeys:
+            entry = journey.get("servedBy") or {}
+            key = (entry.get("endpoint"), entry.get("model"))
+            if not entry.get("endpoint") or key in seen:
+                continue
+            seen.add(key)
+            served.append({"endpoint": entry["endpoint"], "model": entry.get("model"),
+                           "movedFromPrimary": bool(entry.get("movedFromPrimary"))})
+        return served
+
+    @staticmethod
     def _model_usage_summary(journeys: list[dict[str, Any]], extra_usage: list[dict[str, Any]] | None = None
                              ) -> dict[str, Any] | None:
         """BE-3: what this run actually cost, broken down by role, and which
