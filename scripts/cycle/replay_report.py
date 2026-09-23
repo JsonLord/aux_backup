@@ -218,7 +218,21 @@ def _finding_titles(report: dict[str, Any]) -> list[str]:
 def diff_reports(replayed: dict[str, Any], live: dict[str, Any]) -> dict[str, Any]:
     """A summary diff, grouped by the categories the module docstring names --
     not a full structural diff, which would mostly restate that two
-    independently-built dicts differ in key order and float precision."""
+    independently-built dicts differ in key order and float precision.
+
+    This also surfaces a second, welcome kind of difference the module
+    docstring's five categories do not name: `assemble_report` is live code,
+    so replaying an old run through today's tree picks up every report-side
+    fix made since that run shipped, not only what vision/redesign being
+    absent costs. On `last_runs/`, FND-1 (report-service, not this script)
+    means replay no longer produces the four false "Fails WCAG AA contrast"
+    titles the live snapshot still carries, and produces one grouped, honest
+    finding the live snapshot does not have. `findings_missing_from_replay`/
+    `findings_only_in_replay` will show both kinds of difference at once;
+    telling them apart means checking whether the titles involved changed
+    for a documented reason (a git-log question) or because vision/redesign
+    were never called (this script's own doing).
+    """
     replayed_titles, live_titles = _finding_titles(replayed), _finding_titles(live)
     missing_from_replay = [t for t in live_titles if t not in replayed_titles]
     extra_in_replay = [t for t in replayed_titles if t not in live_titles]

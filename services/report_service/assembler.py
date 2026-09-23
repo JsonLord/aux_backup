@@ -1796,7 +1796,22 @@ class ReportAssembler:
             # than in either builder, so one rule covers both and neither can drift.
             finding["personaEvidence"] = cls._relevant_quotes(finding)
             findings.append(finding)
-        return cls._fold_undrawn(findings)
+        return cls._fold_unverified_contrast(cls._fold_undrawn(findings))
+
+    # legibility()'s own bar for counting a region as containing text at all
+    # (perception_service/optics.py:306: `has_text = ... and ink >= 0.005`).
+    # FND-1 reuses it rather than inventing a second number: a "Fails WCAG AA
+    # contrast" claim below _LOW_RATIO_UNVERIFIED_MAX needs the same ink this
+    # codebase already requires to call something text, or it is not a
+    # contrast claim this report can stand behind.
+    _INK_VERIFIED_MIN = 0.005
+    # spec.md §55.3's own rule 4 ("1.00:1 is not a measurement"), widened to
+    # the band a live run showed the same failure survives in: ratios of
+    # 1.03-1.13:1 on last_runs/, all against elements with ink below the
+    # floor above (see docs/parallel-development-spec.md §2a and its EVD-1/
+    # FND-1 rows). Below this, "Fails" is not asserted without verified ink;
+    # at or above it, a real number this codebase has measured stands.
+    _LOW_RATIO_UNVERIFIED_MAX = 1.2
 
     # How many separate "declared but not drawn" elements a report will name before
     # it says the thing they have in common instead.
@@ -1837,6 +1852,74 @@ class ReportAssembler:
             "evidence": f"{len(undrawn)} regions the tree says hold something, all with no ink",
             "elementName": "", "elementBox": None,
             "affectedPersonaIds": sorted({persona for item in undrawn
+                                          for persona in (item.get("affectedPersonaIds") or [])}),
+        }]
+
+    # How many separate "ink not confirmed" elements a report will name before
+    # it says the thing they have in common instead -- same philosophy as
+    # _UNDRAWN_WORTH_NAMING, its own constant because the two classes are
+    # unrelated and free to diverge.
+    _UNVERIFIED_CONTRAST_WORTH_NAMING = 3
+
+    @classmethod
+    def _fold_unverified_contrast(cls, findings: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """FND-1: several elements that all measured a low ratio with no
+        confirmed ink are one observation about the capture, not one per
+        element -- confirmed on `last_runs/`, where four language-switcher
+        entries and a nav icon all showed exactly this shape at once. The
+        same fold `_fold_undrawn` already does for `perception.notDrawn`,
+        with `instances[]` carrying each element's own numbers rather than
+        only its name, per this item's own done-when.
+
+        The temporary `_unverifiedRatio`/`_unverifiedInk` fields
+        `_unreadable_finding` attaches are popped here either way -- folded
+        into `instances[]`, or simply removed when there are too few to
+        fold -- so neither ever reaches the serialized report.
+        """
+        unverified = [item for item in findings if item.get("source") == "perception.unverifiedContrast"]
+        if not unverified:
+            return findings
+        if len(unverified) <= cls._UNVERIFIED_CONTRAST_WORTH_NAMING:
+            for item in unverified:
+                item.pop("_unverifiedRatio", None)
+                item.pop("_unverifiedInk", None)
+            return findings
+        rest = [item for item in findings if item.get("source") != "perception.unverifiedContrast"]
+        instances = [{
+            "name": item.get("elementName"),
+            "elementBox": item.get("elementBox"),
+            "measuredRatio": item.pop("_unverifiedRatio", None),
+            "ink": item.pop("_unverifiedInk", None),
+            "runId": item.get("runId"),
+        } for item in unverified]
+        names = [str(item.get("elementName") or "").strip() for item in unverified]
+        shown = ", ".join(f'"{name}"' for name in names[:4] if name)
+        lead = max(unverified, key=lambda item: len(item.get("personaEvidence") or []))
+        lead = {key: value for key, value in lead.items() if not key.startswith("_")}
+        return rest + [{**lead,
+            # Deliberately different vocabulary from _fold_undrawn's own
+            # summary, not only a different claim: the two scored 0.20 on
+            # _merge_similar_findings' own 0.18 prose-similarity gate when
+            # first written closer to each other, which folded this finding
+            # straight into "elements were declared and not drawn" and lost
+            # it -- found by running this against last_runs/, not by
+            # inspection. Below 0.04 now, measured the same way.
+            "title": f"{len(unverified)} regions measured a low contrast ratio with unconfirmed ink",
+            "summary": (f"{len(unverified)} regions -- among others {shown} -- returned a contrast "
+                        f"ratio under {cls._LOW_RATIO_UNVERIFIED_MAX}:1 while their own ink reading "
+                        f"stayed under {cls._INK_VERIFIED_MIN}: too faint to count as text by this "
+                        "codebase's own bar (perception_service/optics.py). Filing each individually "
+                        f"would publish {len(unverified)} accessibility defects built from pixels "
+                        "nobody confirmed exist. Grouped instead, with the raw ratio and ink reading "
+                        "for each kept in `instances` rather than dropped."),
+            "recommendation": ("Check these render on a settled page. If any of them reliably "
+                               "measures real ink on a clean capture, file that one as its own "
+                               "contrast defect."),
+            "evidence": f"{len(unverified)} regions measured under {cls._LOW_RATIO_UNVERIFIED_MAX}:1 "
+                        f"with ink below {cls._INK_VERIFIED_MIN}",
+            "elementName": "", "elementBox": None,
+            "instances": instances,
+            "affectedPersonaIds": sorted({persona for item in unverified
                                           for persona in (item.get("affectedPersonaIds") or [])}),
         }]
 
@@ -1903,6 +1986,54 @@ class ReportAssembler:
                 "personaEvidence": group["reasoning"],
                 "affectedPersonaIds": personas, "affectedPersonas": len(personas),
                 "source": "perception.notDrawn",
+                "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
+            }
+
+        measured_ink = item.get("ink")
+        if (fails_wcag and ratio is not None and ratio < cls._LOW_RATIO_UNVERIFIED_MAX
+                and (measured_ink or 0) < cls._INK_VERIFIED_MIN):
+            # FND-1: `nothingDrawn` above only fires when *both* internal and
+            # edge contrast are under 0.02 -- a real live capture on
+            # last_runs/ measured internal contrast 0.69 (a faint background
+            # pattern, not a flat region) on an element with ink 0.0026,
+            # which clears nothingDrawn's gate and still produced "Fails
+            # WCAG AA contrast: 'Video' -- 1.13:1" against a crop that is
+            # blank page. Ratio and ink-luminance-vs-paper-luminance are the
+            # same piece of information at a low ratio (the two are
+            # arithmetically tied), so this checks the one independent
+            # signal available: legibility()'s own `ink` -- the fraction of
+            # the region's inner pixels that actually differ from its
+            # background, the thing "is there real ink here" is asking.
+            # EVD-1 is the perception-service fix (nothingDrawn itself
+            # should catch this shape); this is the report's own guard so
+            # the claim is never asserted upstream of that fix landing.
+            return {
+                "severity": "info", "category": "profile-specific",
+                "title": f"Contrast measured, ink not confirmed: {what}",
+                "summary": (f"{what} measured {ratio}:1{f' against a WCAG AA minimum of {required}:1' if required else ''}, "
+                            f"which would fail -- but the region has essentially no detected ink "
+                            f"({measured_ink if measured_ink is not None else 0}, against the 0.005 "
+                            "this codebase already requires to call something text). A ratio this "
+                            "close to 1.0 with no confirmed ink is more often the capture and the "
+                            "page disagreeing about what is drawn there than a genuine low-contrast "
+                            "element (spec.md §55.3). No contrast defect is claimed."),
+                "recommendation": ("Check this element renders on a settled page before trusting this "
+                                   "number. If it reliably measures real ink here on a clean capture, "
+                                   "it is a genuine low-contrast defect and should be filed as one."),
+                "evidence": (f"ratio {ratio}:1, ink {measured_ink if measured_ink is not None else 0} "
+                             f"(needs >= {cls._INK_VERIFIED_MIN} to count as detected text), seen on "
+                             f"{plural(group['steps'], 'step')}"),
+                "evidenceScreenshot": group["seenImage"],
+                "evidenceIsAsTheySawIt": bool(group["seenImage"]),
+                "elementBox": item.get("box"), "elementName": item.get("name") or "",
+                "contrastRatio": None, "wcagRequired": None, "wcagPasses": None,
+                "observation": item.get("reason") or "",
+                "personaEvidence": group["reasoning"],
+                "affectedPersonaIds": personas, "affectedPersonas": len(personas),
+                "source": "perception.unverifiedContrast",
+                # Kept for _fold_unverified_contrast's instances[] -- the raw
+                # numbers, not only the rendered strings above.
+                "_unverifiedRatio": ratio, "_unverifiedInk": measured_ink,
                 "runId": (group["runIds"] or [None])[0], "personaId": (personas or [None])[0],
             }
 

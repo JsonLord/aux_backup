@@ -58,30 +58,53 @@ def test_replay_reproduces_journey_level_fields(replayed, live_report):
 
 def test_replay_carries_perception_and_expectation_findings(replayed, live_report):
     """Everything _pain_points_from_perception/_pain_points_from_expectations
-    produce is journey-only, so it must survive replay byte for byte -- the
-    contrast findings, the broken-promise findings, and the one misfiled
-    run-limit finding SEC-1 will later relocate."""
+    produce is journey-only, so it must survive replay -- the broken-promise
+    findings and the one misfiled run-limit finding SEC-1 will later
+    relocate, byte for byte. The four "Fails WCAG AA contrast" titles do
+    *not* survive unchanged, and that is FND-1 working as intended, not a
+    replay gap: assemble_report is shared, live code, so replaying an old
+    run through today's tree applies every report-side fix made since,
+    including the one that makes those four titles wrong in the first
+    place (see docs/parallel-development-spec.md's FND-1 row)."""
     replayed_titles = {f["title"] for f in replayed["critical_pain_points"]}
     live_titles = {f["title"] for f in live_report["critical_pain_points"]}
-    journey_only_titles = {
+    unaffected_by_any_report_fix = {
         title for title in live_titles
         if not title.startswith("Download link")  # the one eyeson-vision-synthesis finding
+        and not title.startswith("Fails WCAG AA contrast")  # FND-1 reclassifies these
     }
-    assert journey_only_titles <= replayed_titles
+    assert unaffected_by_any_report_fix <= replayed_titles
+    # FND-1's own replacement: the four false contrast findings grouped into
+    # one honest, info-severity finding with instances[].
+    grouped = next(
+        f for f in replayed["critical_pain_points"]
+        if f["source"] == "perception.unverifiedContrast"
+    )
+    assert grouped["severity"] == "info"
+    assert len(grouped["instances"]) == 4
+    assert not any(key.startswith("_") for key in grouped)  # no leaked temp fields
+    assert not any(title.startswith("Fails WCAG AA contrast") for title in replayed_titles)
 
 
 def test_replay_is_missing_exactly_the_documented_vision_sourced_content(replayed, live_report):
     diff = rr.diff_reports(replayed, live_report)
-    assert diff["findings_missing_from_replay"] == [
-        "Download link does not initiate download or navigate to a new page."
+    # findings_missing_from_replay mixes the one genuine vision gap with the
+    # four "Fails WCAG AA contrast" titles FND-1 correctly retires -- see
+    # diff_reports' own docstring on telling the two kinds apart.
+    assert set(diff["findings_missing_from_replay"]) == {
+        "Download link does not initiate download or navigate to a new page.",
+        'Fails WCAG AA contrast: "Video"',
+        'Fails WCAG AA contrast: "Italiano"',
+        'Fails WCAG AA contrast: "RUРусский"',
+        'Fails WCAG AA contrast: "ESEspañol"',
+    }
+    assert diff["findings_only_in_replay"] == [
+        "4 regions measured a low contrast ratio with unconfirmed ink"
     ]
-    assert diff["findings_only_in_replay"] == []
     # All 6 kept screenshots remap cleanly on this snapshot -- see
     # replay_report.py's module docstring, category 4.
     assert diff["matched_findings_missing_screenshot_crop"] == []
     assert set(diff["matched_findings_missing_redesign_html"]) == {
-        'Fails WCAG AA contrast: "Italiano"',
-        'Fails WCAG AA contrast: "Video"',
         "Users could not finish the tasks they came to do",
     }
     # Category 2: this run's elements_to_preserve is entirely vision-sourced

@@ -3215,6 +3215,114 @@ def test_faint_but_real_ink_is_still_a_contrast_finding():
     assert findings[0]["contrastRatio"] == 2.85
 
 
+# FND-1 (docs/parallel-development-spec.md): a real live run measured "Fails WCAG
+# AA contrast: 'Video' -- 1.13:1" against a nav-bar icon whose capture was blank
+# page over a faint background pattern -- internal contrast 0.6941 (real variance,
+# so nothingDrawn's own internal<0.02 gate does not fire) with ink 0.0015, well
+# under legibility()'s own 0.005 bar for counting as text. Reproduced here from
+# last_runs/artifacts/journey_log__*.json's actual recorded values.
+UNVERIFIED_LOW_RATIO = {"selector": "e138", "role": "link", "name": "Video",
+                        "box": {"x": 43, "y": 361, "width": 1212, "height": 36},
+                        "reason": "nothing in the region stands out from its background",
+                        "internalContrast": 0.6941, "edgeContrast": 0.0091, "ink": 0.0015,
+                        "contrast": {"ratio": 1.13, "required": 3, "passes": False,
+                                     "measured": "text against its own background"}}
+
+
+def test_a_low_ratio_with_no_confirmed_ink_is_not_a_contrast_claim():
+    """The false positive FND-1 exists to close: nothingDrawn's dual gate
+    (internal<0.02 AND edge<0.02) does not catch a faint background pattern
+    that carries real internal variance but no actual ink, and a ratio this
+    close to 1.0 is not itself evidence that any ink was found."""
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[UNVERIFIED_LOW_RATIO], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    finding = findings[0]
+    assert "Fails WCAG AA contrast" not in finding["title"]
+    assert finding["title"] == 'Contrast measured, ink not confirmed: "Video"'
+    assert finding["source"] == "perception.unverifiedContrast"
+    # No claim is made, the same rule nothingDrawn's own branch follows.
+    assert finding["contrastRatio"] is None and finding["wcagPasses"] is None
+    assert finding["severity"] == "info"
+    # The real numbers still reach the reader, in the evidence line, not as a
+    # WCAG claim.
+    assert "1.13" in finding["evidence"] and "0.0015" in finding["evidence"]
+    # No leaked temporary field used only for _fold_unverified_contrast.
+    assert not any(key.startswith("_") for key in finding)
+
+
+def test_a_low_ratio_right_at_the_ink_floor_still_files_as_a_contrast_defect():
+    """The boundary the guard must not swallow: ink at or above 0.005 -- the
+    same bar legibility() uses to call something text -- is confirmed ink,
+    however low the ratio."""
+    at_floor = {**UNVERIFIED_LOW_RATIO, "selector": "e_floor", "ink": 0.005}
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[at_floor], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    assert "Fails WCAG AA contrast" in findings[0]["title"]
+    assert findings[0]["contrastRatio"] == 1.13
+
+
+def test_a_low_confirmed_ink_ratio_right_at_1_2_still_files_as_a_contrast_defect():
+    """The other boundary: 1.2:1 itself is not "unverified" territory -- only
+    strictly below it."""
+    at_bound = {**UNVERIFIED_LOW_RATIO, "selector": "e_bound", "ink": 0.0,
+                "contrast": {**UNVERIFIED_LOW_RATIO["contrast"], "ratio": 1.2}}
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=[at_bound], eyes=RARE_EYES)])
+
+    assert len(findings) == 1
+    assert "Fails WCAG AA contrast" in findings[0]["title"]
+
+
+def test_several_unverified_contrast_regions_are_grouped_with_instances():
+    """FND-1's other half: several elements with this shape are one
+    observation about the capture, not one high-severity finding each --
+    the exact live count from last_runs/ (four language-switcher entries and
+    a nav icon)."""
+    regions = [
+        {**UNVERIFIED_LOW_RATIO, "selector": f"e_{i}", "name": name,
+         "contrast": {**UNVERIFIED_LOW_RATIO["contrast"], "ratio": ratio}}
+        for i, (name, ratio) in enumerate([
+            ("Video", 1.13), ("Italiano", 1.03), ("RUРусский", 1.03),
+            ("ESEspañol", 1.04),
+        ])
+    ]
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=regions, eyes=RARE_EYES)])
+
+    grouped = [f for f in findings if f["source"] == "perception.unverifiedContrast"]
+    assert len(grouped) == 1
+    finding = grouped[0]
+    assert finding["title"] == "4 regions measured a low contrast ratio with unconfirmed ink"
+    assert len(finding["instances"]) == 4
+    assert {i["name"] for i in finding["instances"]} == {
+        "Video", "Italiano", "RUРусский", "ESEspañol"
+    }
+    assert {i["measuredRatio"] for i in finding["instances"]} == {1.13, 1.03, 1.04}
+    assert not any(key.startswith("_") for key in finding)
+    assert not any("Fails WCAG AA contrast" in f["title"] for f in findings)
+
+
+def test_a_couple_of_unverified_contrast_regions_are_named_individually():
+    """Below the folding threshold, each stays its own finding -- the same
+    "worth naming individually" cutoff _fold_undrawn already uses, applied
+    to this class with its own constant."""
+    regions = [
+        {**UNVERIFIED_LOW_RATIO, "selector": f"e_{i}", "name": f"Region {i}"}
+        for i in range(2)
+    ]
+    findings = JobExecutor._pain_points_from_perception(
+        [_perception_journey(unreadable=regions, eyes=RARE_EYES)])
+
+    grouped = [f for f in findings if f["source"] == "perception.unverifiedContrast"]
+    assert len(grouped) == 2
+    assert all("instances" not in f for f in grouped)
+    assert all(not any(key.startswith("_") for key in f) for f in grouped)
+
+
 def test_a_blocked_journey_says_where_the_patience_went():
     """A live report's most serious finding was "The journey was blocked before
     completion", severity critical, recommendation None. A critical finding with no
