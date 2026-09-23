@@ -90,6 +90,29 @@ test("settle time is long enough for a transition to start", () => {
 
 const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
+// JRN-9's own remaining gap: holds>0 protects a capture from a NEW tick, but
+// not from one already running -- and a real navigation commonly takes
+// several seconds, long enough for an un-held tick (fired the moment the
+// keeper starts, before the run has ever held anything) to start against
+// the now-loaded page and still be mid-pass when the run's first capture
+// finally calls hold(). Measured on a live run against an 11855px-tall
+// page: capture()'s own hold (already fixed) was not enough on its own --
+// the "arrived" screenshot was still the same repeated hero band, because
+// the tick that corrupted it had started before capture() ever ran.
+test("the keeper never ticks on its own before the run has held at least once", async () => {
+  const { calls, runner } = recorder(true, summary());
+  startRevealKeeper({ intervalMs: 10, env: { AUX_REVEAL: "1" }, runner });
+  await wait(60);
+  assert.equal(calls.length, 0,
+    "no autonomous pass before the run's own first hold, however long the wait");
+
+  holdRevealKeeper();
+  releaseRevealKeeper();
+  await wait(40);
+  assert.ok(calls.length >= 1,
+    "once the run has held and released once, the keeper resumes ticking on its own");
+});
+
 // The keeper fires every 1500ms and a perception pass (snapshot, box walk,
 // capture) takes longer than that, so a pass lands between the boxes being read
 // and the pixels being captured. Every box is in viewport coordinates, so the
@@ -100,6 +123,11 @@ const wait = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 test("a held page is not scrolled out from under a measurement", async () => {
   const { calls, runner } = recorder(true, summary());
   startRevealKeeper({ intervalMs: 10, env: { AUX_REVEAL: "1" }, runner });
+  // The keeper's own autonomous ticking stays off until the run has held at
+  // least once itself (see its own comment on this) -- simulate the run's
+  // first real capture()/look() before testing the keeper's later behaviour.
+  holdRevealKeeper();
+  releaseRevealKeeper();
   await wait(40);
   const beforeHold = calls.length;
   assert.ok(beforeHold >= 1, "the keeper must be scrolling to begin with");
@@ -116,6 +144,8 @@ test("a held page is not scrolled out from under a measurement", async () => {
 test("overlapping holds cannot end each other's", async () => {
   const { calls, runner } = recorder(true, summary());
   startRevealKeeper({ intervalMs: 10, env: { AUX_REVEAL: "1" }, runner });
+  holdRevealKeeper();
+  releaseRevealKeeper();
   await wait(30);
   const before = calls.length;
 

@@ -45,6 +45,12 @@ const MAX_STEPS = 60;
 const DEFAULT_INTERVAL_MS = 1500;
 // Outstanding requests to keep the page still (see holdRevealKeeper).
 let holds = 0;
+// Whether the run's own code (capture() or look(), the only two callers of
+// hold()) has completed at least one hold of its own. Until it has, the
+// keeper's autonomous ticking stays off entirely -- see startRevealKeeper's
+// own comment for why a plain holds>0 check is not enough to protect the
+// very first capture of a run.
+let hasHeldOnce = false;
 
 let timer = null;
 let lastError = "";
@@ -183,6 +189,7 @@ function evalResult(stdout) {
  * leave the count negative and permanently re-enable scrolling mid-measurement.
  */
 function holdRevealKeeper() {
+  hasHeldOnce = true;
   holds += 1;
   return holds;
 }
@@ -212,7 +219,23 @@ function startRevealKeeper({ intervalMs, env = process.env, runner = batch, sett
     // was before the scroll and every pixel showing where the page is now. A
     // live run reported the entire navigation bar as failing WCAG AA at 1:1 for
     // a persona with 0.95 acuity, because the crops had landed on blank page.
-    if (holds > 0) return;
+    //
+    // holds>0 alone is not enough for the run's very first capture: this
+    // function is called (both here and from the interval below) before the
+    // run itself has had any chance to call hold() at all, and a real
+    // navigation commonly takes several seconds -- long enough for one or
+    // more un-held ticks to start against the now-loaded page and still be
+    // scrolling it when the first capture finally calls hold(), which does
+    // not retroactively stop a pass already in flight. Measured on a live
+    // run against an 11855px-tall page: the "arrived" screenshot was still
+    // the same repeated hero band after capture() itself was already
+    // protected, because this tick had started before capture() ever ran.
+    // capture() and look() already reveal what they need themselves, via
+    // their own settle() call inside their own hold, so the keeper's
+    // autonomous ticking has nothing of its own to do until the run has
+    // shown it can protect a measurement -- i.e., until hold() has been
+    // called at least once.
+    if (holds > 0 || !hasHeldOnce) return;
     revealOnce(runner, { settleMs, maxSteps }).catch(() => {});
   };
   tick();
@@ -238,6 +261,7 @@ function __resetRevealKeeper() {
   passes = 0;
   lastResult = null;
   holds = 0;
+  hasHeldOnce = false;
 }
 
 module.exports = {
