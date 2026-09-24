@@ -1,0 +1,76 @@
+# RUN-8 (docs/parallel-development-spec.md §6 L0): both suites, plus
+# tests/replay/'s golden invariants, on every push and pull request.
+#
+# tests/replay/ is not a separate job: `pytest tests/` already discovers it
+# (no testpaths restriction in pytest.ini, and it is not in the --ignore
+# list below), so a golden-invariant regression fails the same job a unit
+# test would. It is called out in step names anyway, so a failure there is
+# obvious at a glance in the Actions UI without opening the log.
+name: tests
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+concurrency:
+  group: tests-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python:
+    name: python (pytest, incl. tests/replay/)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: "pip"
+
+      # The exact set docs/next-cycle-handover.md's own baseline procedure
+      # installs -- kept in sync with that file, not a separate list that
+      # can drift from it. dspy is deliberately not installed (AGENTS.md);
+      # the three tests that need it are deselected below, by name, rather
+      # than left to fail the job.
+      - name: Install dependencies
+        run: |
+          pip install --upgrade pip
+          pip install \
+            pytest pytest-asyncio pytest-cov fastapi pydantic cryptography Pillow requests httpx \
+            numpy scipy huggingface-hub "gradio[oauth]==5.15.0" openai chevron textdistance \
+            beautifulsoup4 lxml lxml_html_clean
+
+      - name: pytest
+        run: |
+          pytest tests/ -q -p no:cacheprovider \
+            --ignore=tests/e2e --ignore=tests/load --ignore=tests/integration \
+            --deselect tests/contract/test_model_providers.py::test_the_service_resolves_providers_in_exactly_one_place \
+            --deselect tests/contract/test_persona_studio.py::test_load_example_persona_into_studio_appends_and_selects_new_entry \
+            --deselect tests/contract/test_persona_studio.py::test_load_example_persona_into_studio_surfaces_compile_failure \
+            -rf
+
+  node:
+    name: node (journey-worker)
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: services/journey-worker/node
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # No `npm ci`: the test suite (services/journey-worker/node/test/) is
+      # self-contained and does not import agent-browser or
+      # journeytest-core directly -- verified locally, repeatedly, this
+      # session, with node_modules absent. Installing them here would only
+      # slow the job down for no coverage gained.
+      - name: Syntax check every source file
+        run: npm run check
+
+      - name: node --test
+        run: npm test

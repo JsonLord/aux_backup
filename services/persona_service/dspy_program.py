@@ -3,6 +3,8 @@ import os
 
 import dspy
 
+from .providers import require_providers
+
 
 class CompileBehaviorProfile(dspy.Signature):
     """Convert a persona into web interaction priors; never infer impairments from demographics."""
@@ -76,7 +78,7 @@ def _max_completion_tokens():
     return value if value > 0 else None
 
 
-def configure_lm(force: bool = False):
+def configure_lm(force: bool = False, index: int = 0):
     """Idempotently configure DSPy's global LM from the same OPENAI_* settings used
     elsewhere in this service (services/persona_service/generator.py), so DSPy
     targets the same OpenAI-compatible endpoint (self-hosted router; BLABLADOR_*
@@ -87,14 +89,14 @@ def configure_lm(force: bool = False):
     completion against the given ``api_base`` instead of assuming api.openai.com.
     """
     global _lm_configured
-    if _lm_configured and not force:
+    if _lm_configured and not force and index == 0:
         return
-    api_key = os.getenv("OPENAI_API_KEY") or os.getenv("BLABLADOR_API_KEY")
-    base_url = (os.getenv("OPENAI_COMPATIBLE_ENDPOINT") or os.getenv("OPENAI_BASE_URL")
-                or os.getenv("BLABLADOR_BASE_URL") or "https://debian-devil.tail3f341b.ts.net/v1").rstrip("/")
-    model = os.getenv("OPENAI_MODEL", "auto")
-    if not api_key:
-        raise RuntimeError("OPENAI_API_KEY or BLABLADOR_API_KEY is required to configure DSPy")
+    # One resolution for the whole service (providers.py). This function used to
+    # carry its own copy, so adding a fallback to the generator left compilation
+    # still reaching for an endpoint that was not there -- which is precisely how
+    # cycle 28 failed, on the copy that had not been touched.
+    providers = require_providers()
+    base_url, api_key, model = providers[min(index, len(providers) - 1)]
     lm_kwargs = {"api_base": base_url, "api_key": api_key, "temperature": 0}
     max_completion_tokens = _max_completion_tokens()
     if max_completion_tokens is not None:
@@ -102,3 +104,4 @@ def configure_lm(force: bool = False):
     lm = dspy.LM(f"openai/{model}", **lm_kwargs)
     dspy.configure(lm=lm)
     _lm_configured = True
+    return base_url, model

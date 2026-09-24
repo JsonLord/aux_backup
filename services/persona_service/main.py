@@ -1,12 +1,14 @@
 from uuid import uuid4
 
 from fastapi import Depends, FastAPI, HTTPException, Query
+from fastapi.responses import JSONResponse
 
 from apps.api.auth import IdentityProvider
 
 from .compiler import PersonaCompiler
 from .generator import TinyTroupeGenerator
 from .github_pool import GitHubPersonaPoolClient, PersonaPoolConfig, select_pool_group
+from .providers import model_providers, unreachable, why
 from .models import (
     PersonaCompileRequest,
     PersonaGenerateRequest,
@@ -24,9 +26,44 @@ _pool_config = PersonaPoolConfig.from_env()
 pool_client = GitHubPersonaPoolClient(_pool_config) if _pool_config else None
 
 
+@app.exception_handler(Exception)
+async def say_what_went_wrong(request, error):
+    """Answer with the cause, not with the word "Internal".
+
+    An unhandled exception here becomes {"detail": "Internal Server Error"}, and
+    the caller renders that as "500 Server Error ... for url:
+    http://127.0.0.1:8090/v1/personas/compile" -- the status, the port, and
+    nothing about why. Three cycles were spent firing runs against that sentence.
+
+    The cause chain matters as much as the exception: a compilation that fails
+    because a name will not resolve says "Internal" at the top and EAI_AGAIN two
+    levels down, and only the second one tells anybody what to do.
+    """
+    print(f"[persona] {request.url.path} failed: {why(error)}", flush=True)
+    return JSONResponse(status_code=500, content={
+        "detail": f"{type(error).__name__}: {why(error)}",
+        "unreachable": unreachable(error),
+        "providersConfigured": [
+            {"endpoint": url, "model": model} for url, _, model in model_providers()],
+    })
+
+
 def require_write(auth):
     if auth.get("role", "owner") not in {"owner", "admin", "write", "contributor", "service"}:
         raise HTTPException(403, "workspace role is read-only")
+
+
+def _providers(body) -> list[tuple[str, str, str]] | None:
+    """The chain this request was handed, in providers.py's (url, key, model) shape.
+
+    None means the caller sent none and the deployment's environment decides, as
+    it did before routing existed. An empty list means the caller has no provider
+    it may use, and the engine refuses rather than falling back onto credentials
+    that are not theirs to spend.
+    """
+    if getattr(body, "models", None) is None:
+        return None
+    return [(entry.baseUrl, entry.apiKey, entry.model) for entry in body.models]
 
 
 @app.get("/healthz")
@@ -38,7 +75,8 @@ def health():
 def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
     require_write(auth)
     generated = generator.generate(body.theme, body.customer_profile, body.count, body.scenario,
-                                   body.seed, allow_offline_fallback=body.allow_offline_fallback)
+                                   body.seed, allow_offline_fallback=body.allow_offline_fallback,
+                                   providers=_providers(body))
     for item in generated:
         profiles.save(item, auth["workspace_id"], auth["owner_user_id"])
     return generated
@@ -47,7 +85,8 @@ def generate(body: PersonaGenerateRequest, auth=Depends(identity)):
 @app.post("/v1/personas/compile", response_model=SyntheticUserProfile)
 def compile_existing(body: PersonaCompileRequest, auth=Depends(identity)):
     require_write(auth)
-    compiled = generator.compile_existing(body.persona, body.scenario, body.seed, source=body.source)
+    compiled = generator.compile_existing(body.persona, body.scenario, body.seed,
+                                          source=body.source, providers=_providers(body))
     profiles.save(compiled, auth["workspace_id"], auth["owner_user_id"])
     return compiled
 

@@ -27,6 +27,8 @@ const { readdir, readFile, stat } = require("node:fs/promises");
 const path = require("node:path");
 
 const { getRunContext, peekRunReasoning } = require("./reasoningCapture");
+const { latestFrame } = require("./viewportStream");
+const { readCursorPosition } = require("./cursorKeeper");
 
 // journeytest-core's own safeId(): non-portable characters replaced, capped at 24.
 function safeId(value, fallback = "run") {
@@ -70,7 +72,7 @@ async function findRunDirectory(outputDir, runId, startedAt) {
   return candidates[0].full;
 }
 
-async function latestScreenshot(runDirectory) {
+async function latestScreenshot(runDirectory, { skipBytes = false } = {}) {
   const directory = path.join(runDirectory, "screenshots");
   let names;
   try {
@@ -88,6 +90,9 @@ async function latestScreenshot(runDirectory) {
   }));
   stats.sort((left, right) => right.at - left.at);
   const newest = stats[0];
+  // A live frame is already in hand; reading the file only to discard it would
+  // cost a whole screenshot's worth of IO per poll.
+  if (skipBytes) return { frames: names.length, name: newest.name, frame: null };
   try {
     const bytes = await readFile(path.join(directory, newest.name));
     return { frames: names.length, name: newest.name,
@@ -117,13 +122,34 @@ async function liveRunState(runId) {
   if (!directory) {
     return { runId, status: "live", elapsedMs, frames: 0, frame: null, frameName: null, reasoning };
   }
-  const { frames, frame, name } = await latestScreenshot(directory);
+  // The stream shows the page as it paints; the screenshots on disk only exist
+  // where the run deliberately captured one. Prefer the stream, fall back to the
+  // files when nothing has arrived recently.
+  const streamed = latestFrame();
+  const [{ frames, frame, name }, cursor] = await Promise.all([
+    latestScreenshot(directory, { skipBytes: Boolean(streamed) }),
+    // Where the on-page marker is drawn, so a viewer can magnify around it
+    // rather than around the middle of the page.
+    readCursorPosition().catch(() => null),
+  ]);
   // The directory basename *is* journeytest-core's own run id, which is what the
   // stored artifacts are tagged with -- the caller's run id is a different
   // identifier. Reporting it is what lets a finished live run be matched to its
   // recording.
   return { runId, journeyRunId: path.basename(directory), status: "live", elapsedMs,
-    frames, frame, frameName: name, reasoning };
+    frames,
+    frame: streamed ? `data:image/jpeg;base64,${streamed.data}` : frame,
+    frameName: name,
+    // Which of the two a viewer is looking at. frameMetadata is the stream's own
+    // report and is passed through as-is, but do NOT scale against it: its
+    // deviceWidth/deviceHeight describe the device, not the image. A real frame
+    // measured 1280x633 -- the page viewport -- while its metadata said
+    // 1280x720. Scale against `cursor.viewport`, which is read from the same
+    // page and does match the image.
+    frameSource: streamed ? "stream" : "screenshot",
+    frameMetadata: streamed ? streamed.metadata : undefined,
+    cursor,
+    reasoning };
 }
 
 module.exports = { liveRunState, findRunDirectory, directoryStartedAt, safeId };

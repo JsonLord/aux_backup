@@ -130,6 +130,42 @@ def test_direct_engine_normalizes_provider_response(monkeypatch):
     assert engine.compile_behavior({"name": "Ada"}, "checkout", ("patience",), 9) == {"patience": 1.0}
 
 
+def test_direct_engine_records_usage_only_for_the_call_that_answered(monkeypatch):
+    """BE-3: role, provider, wall time and token usage, recorded once per real
+    answer -- never for a retried attempt that failed, which spent no tokens
+    a report could account for."""
+    calls = []
+
+    class FailingResponse:
+        def raise_for_status(self): raise ValueError("still warming up")
+
+    class OkResponse:
+        def raise_for_status(self): pass
+        def json(self):
+            return {"choices": [{"message": {"content": '{"patience": 0.5}'}}],
+                    "usage": {"prompt_tokens": 42, "completion_tokens": 7}}
+
+    def fake_post(url, headers=None, json=None, timeout=None):
+        calls.append(json)
+        return FailingResponse() if len(calls) == 1 else OkResponse()
+
+    monkeypatch.setattr("services.persona_service.semantic.requests.post", fake_post)
+    monkeypatch.setattr("services.persona_service.semantic.time.sleep", lambda *_: None)
+    engine = DirectLLMSemanticEngine(api_key="fixture", base_url="https://provider.invalid")
+
+    result = engine.compile_behavior({"name": "Ada"}, "checkout", ("patience",), 9)
+
+    assert result == {"patience": 0.5}
+    assert len(calls) == 2, "the request really was retried once"
+    assert len(engine.usage_log) == 1, "only the attempt that actually answered is billed"
+    entry = engine.usage_log[0]
+    assert entry["role"] == "persona.behavior"
+    assert entry["endpoint"] == "https://provider.invalid"
+    assert entry["promptTokens"] == 42 and entry["completionTokens"] == 7
+    assert entry["wallMs"] >= 0
+    assert entry["temperature"] == 0
+
+
 def test_direct_engine_accepts_space_openai_compatible_variable_names(monkeypatch):
     monkeypatch.delenv("BLABLADOR_API_KEY", raising=False)
     monkeypatch.delenv("BLABLADOR_BASE_URL", raising=False)
