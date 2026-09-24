@@ -56,6 +56,26 @@ const CAPTURE_ATTEMPTS = 3;
 // Between attempts. A page that was still assembling itself wants time more than
 // it wants anything else, and on a two-core box it wants more of it.
 const CAPTURE_BACKOFF_MS = 600;
+
+// perception.js's WALK does this same wait before its own screenshot, with the
+// same reasoning: a picture is of what the compositor last painted, not of what
+// the DOM says exists, and a screenshot taken right after a scroll can be of a
+// surface nothing has drawn into yet -- which is blank, and indistinguishable
+// from a viewport with nothing in it. settle() ends every reveal pass with a
+// scroll back to its start position, so capture() (this file) is exactly the
+// shape of code that measurement was written against; it just never got the
+// same wait. Two nested frames, because one only says a frame is coming: the
+// callback of the second runs after the first has been committed. Bounded,
+// because a throttled or hidden page can stop producing frames altogether and
+// a capture that waits forever is worse than one taken early.
+const WAIT_FOR_PAINT =
+  "(() => typeof requestAnimationFrame === \"function\""
+  + " ? Promise.race(["
+  + "     new Promise((resolve) => requestAnimationFrame("
+  + "       () => requestAnimationFrame(() => resolve(\"painted\")))),"
+  + "     new Promise((resolve) => setTimeout(() => resolve(\"no frame within 1000ms\"), 1000)),"
+  + "   ])"
+  + " : Promise.resolve(\"no requestAnimationFrame\"))()";
 const { MATCH_OUTCOMES, affectInWords, describeTarget } = require("./personaActor");
 const { actionKey, detectLoop, loopNotice } = require("./loopDetector");
 const { filterWorkingMemory, readingDurationMs, simulatePointer } = require("./physical");
@@ -308,6 +328,19 @@ class PersonaDirector {
       // A reveal pass that fails is not worth losing the capture over; the
       // picture is then of whatever has revealed itself so far, which is what it
       // was before this existed.
+    }
+  }
+
+  /** Wait for the compositor to commit a frame before anything photographs the
+   * page -- see WAIT_FOR_PAINT's own comment for why settle()'s own scroll
+   * makes this necessary. A seam, so a test can assert a capture waits for it
+   * without a live browser. */
+  async waitForPaint(browser) {
+    try {
+      await browser.eval(WAIT_FOR_PAINT);
+    } catch {
+      // Could not confirm a frame was painted; proceeding is what every
+      // capture in this codebase already did before this existed.
     }
   }
 
@@ -868,6 +901,18 @@ class PersonaDirector {
       // taken in the first second of a document or to a run that finishes in three
       // actions. Awaited here so the picture is of a settled page.
       await this.settle();
+      // settle()'s own reveal pass ends with a scroll back to its start
+      // position -- a mutation, which the compositor has not necessarily
+      // painted yet the instant that eval call returns. A live run's
+      // viewport capture came back blank (3421 bytes, the same single-colour
+      // signature look()'s own capture-refused captures carry) while its
+      // full-page pair, taken moments later, had real content -- consistent
+      // with exactly this race, and with WAIT_FOR_PAINT's own comment (which
+      // already names this failure shape for a different capture path).
+      // Waited for once here, not once per screenshot below: nothing between
+      // the two calls scrolls or otherwise invalidates the frame this
+      // confirms.
+      await this.waitForPaint(browser);
       // Viewport first, while the page is exactly where settle() left it --
       // the full-page capture that follows is what stitches captureBeyondViewport
       // captures together, and nothing about that process should be allowed

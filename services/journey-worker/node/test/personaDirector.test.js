@@ -918,17 +918,64 @@ test("the page is held still for the whole capture, and let go afterwards", asyn
   director.hold = () => { order.push("hold"); return 1; };
   director.release = () => { order.push("release"); return 0; };
   director.settle = async () => { order.push("settle"); };
+  director.waitForPaint = async () => { order.push("wait-for-paint"); };
 
   const browser = { screenshot: async (options) => { order.push(options.full ? "full-page" : "viewport"); } };
   const recorder = fakeRecorder();
   const target = await director.capture(browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder }, "arrived");
 
   assert.ok(target, "a successful capture still returns its path");
-  // JRN-9: viewport first (the "as seen" shot, taken before anything about
-  // the full-page capture can disturb the page), then the full-page one the
-  // vision critique reads -- both inside the same hold as settle().
-  assert.deepEqual(order, ["hold", "settle", "viewport", "full-page", "release"],
-    "settle and both screenshots happen inside the hold, in order");
+  // JRN-9: settle() ends by scrolling the page back to its start position,
+  // and a screenshot taken before the compositor commits that scroll's own
+  // repaint is blank -- so waitForPaint runs after settle() and before
+  // either screenshot, once (nothing between the two screenshots scrolls or
+  // otherwise invalidates the frame it confirmed). Viewport first (the "as
+  // seen" shot), then the full-page one the vision critique reads -- both
+  // inside the same hold as settle().
+  assert.deepEqual(order, ["hold", "settle", "wait-for-paint", "viewport", "full-page", "release"],
+    "settle, the paint wait and both screenshots happen inside the hold, in order");
+});
+
+// A live run's viewport capture came back blank (3421 bytes, the same
+// single-colour signature look()'s own capture-refused captures carry)
+// while its full-page pair, taken moments later, had real content --
+// consistent with a screenshot racing the compositor's own commit of
+// settle()'s final scroll, the exact failure perception.js's WALK already
+// documents and already guards against for a different capture path.
+test("waitForPaint asks the page to confirm a frame was actually committed", async () => {
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  const evalCalls = [];
+  const browser = { eval: async (script) => { evalCalls.push(script); return "painted"; } };
+
+  await director.waitForPaint(browser);
+
+  assert.equal(evalCalls.length, 1);
+  // Two nested frames, not one: the callback of the first rAF calls a
+  // second rAF, whose own callback is what actually resolves -- the second
+  // only runs once the first has actually been committed (see
+  // WAIT_FOR_PAINT's own comment for why one frame callback is not enough).
+  assert.match(evalCalls[0], /requestAnimationFrame\(\s*\(\)\s*=>\s*requestAnimationFrame\(/,
+    "waits for two nested frames, not a fixed delay or a single frame");
+  assert.match(evalCalls[0], /1000/, "bounded, so a throttled page cannot wait forever");
+});
+
+test("a capture proceeds even when confirming the paint fails", async () => {
+  const director = new PersonaDirector({
+    profile: impatient, sleepFn: async () => {},
+    actor: async () => ({ visible: "", expectation: "", action: { type: "DONE", content: "done" } }),
+  });
+  director.settle = async () => {};
+  const browser = {
+    eval: async () => { throw new Error("the browser went away mid-wait"); },
+    screenshot: async () => {},
+  };
+  const target = await director.capture(
+    browser, { artifacts: { screenshotsDir: "/tmp/persona-test-shots" }, recorder: fakeRecorder() }, "arrived");
+
+  assert.ok(target, "unable to confirm a frame is not the same as the capture failing");
 });
 
 test("a capture's hold is released even when the screenshot throws", async () => {
